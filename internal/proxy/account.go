@@ -1003,6 +1003,98 @@ func normalizeModelName(displayName string) string {
 	return s
 }
 
+func publicFacingModelID(displayName, internalID string) string {
+	name := normalizeModelName(displayName)
+	if name == "" {
+		name = friendlyModelNameByInternalID(internalID)
+	}
+	if name == "" {
+		return ""
+	}
+	if isClaudeModel(displayName, internalID, "") || isClaudeFamilyName(name) {
+		return ensureClaudeModelID(name)
+	}
+	return name
+}
+
+func displayModelName(displayName, internalID, family string) string {
+	name := strings.TrimSpace(displayName)
+	if name == "" {
+		name = displayNameFromPublicModelID(friendlyModelNameByInternalID(internalID))
+	}
+	if name == "" {
+		name = strings.TrimSpace(internalID)
+	}
+	if name == "" {
+		return ""
+	}
+	if isClaudeModel(name, internalID, family) && !hasClaudeDisplayPrefix(name) {
+		return "Claude " + name
+	}
+	return name
+}
+
+func ensureClaudeModelID(name string) string {
+	normalized := normalizeModelName(name)
+	if normalized == "" {
+		return ""
+	}
+	base := strings.TrimPrefix(normalized, "claude-")
+	base = strings.TrimPrefix(base, "anthropic-")
+	if isClaudeFamilyName(base) {
+		return "claude-" + base
+	}
+	return normalized
+}
+
+func displayNameFromPublicModelID(modelID string) string {
+	switch strings.ToLower(strings.TrimSpace(modelID)) {
+	case "claude-opus-4.6", "opus-4.6":
+		return "Opus 4.6"
+	case "claude-sonnet-4.6", "sonnet-4.6":
+		return "Sonnet 4.6"
+	case "claude-haiku-4.5", "haiku-4.5":
+		return "Haiku 4.5"
+	default:
+		return strings.TrimSpace(modelID)
+	}
+}
+
+func hasClaudeDisplayPrefix(name string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	return strings.HasPrefix(normalized, "claude ") || strings.HasPrefix(normalized, "claude-")
+}
+
+func isClaudeModel(displayName, internalID, family string) bool {
+	normalizedFamily := strings.ToLower(strings.TrimSpace(family))
+	if strings.Contains(normalizedFamily, "anthropic") || strings.Contains(normalizedFamily, "claude") {
+		return true
+	}
+	if isClaudeFamilyName(normalizeModelName(displayName)) {
+		return true
+	}
+	return isClaudeInternalID(internalID)
+}
+
+func isClaudeFamilyName(name string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	normalized = strings.TrimPrefix(normalized, "claude-")
+	normalized = strings.TrimPrefix(normalized, "anthropic-")
+	return normalized == "opus" || strings.HasPrefix(normalized, "opus-") ||
+		normalized == "sonnet" || strings.HasPrefix(normalized, "sonnet-") ||
+		normalized == "haiku" || strings.HasPrefix(normalized, "haiku-")
+}
+
+func isClaudeInternalID(id string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(id))
+	switch normalized {
+	case "avocado-froyo-medium", "almond-croissant-low", "anthropic-haiku-4.5":
+		return true
+	default:
+		return strings.HasPrefix(normalized, "anthropic-") && isClaudeFamilyName(normalized)
+	}
+}
+
 // SaveAccounts persists current account state (models, quota) back to JSON files
 func (p *AccountPool) SaveAccounts(dir string) {
 	p.mu.RLock()

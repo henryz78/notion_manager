@@ -126,7 +126,7 @@ func DefaultConfig() *Config {
 		Proxy: ProxyConfig{
 			NotionAPIBase:         "https://www.notion.so/api/v3",
 			ClientVersion:         "23.13.20260313.1423",
-			DefaultModel:          "opus-4.6",
+			DefaultModel:          "claude-opus-4.6",
 			EnableWebSearch:       boolPtr(true),
 			EnableWorkspaceSearch: boolPtr(false),
 			AskModeDefault:        boolPtr(false),

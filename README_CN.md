@@ -124,7 +124,7 @@ export OPENAI_API_KEY=<your-api-key>
 - 图片、PDF、CSV 文件输入会复用现有的 Notion 上传链路
 - 请求里未指定 `model` 时，自动回退到 `proxy.default_model`
 - `/v1/responses` 暂不支持 `previous_response_id`（当前实现是无状态桥接）
-- **ASK 模式**：模型名追加 `-ask` 后缀（如 `sonnet-4.6-ask`）即可对应 Notion 前端 “Ask” 开关（`useReadOnlyMode=true`）；也可设置 `proxy.ask_mode_default: true` 使所有请求默认进入 ASK 模式
+- **ASK 模式**：模型名追加 `-ask` 后缀（如 `claude-sonnet-4.6-ask`）即可对应 Notion 前端 “Ask” 开关（`useReadOnlyMode=true`）；也可设置 `proxy.ask_mode_default: true` 使所有请求默认进入 ASK 模式
 
 ### 5. Microsoft SSO 批量注册
 
@@ -326,7 +326,7 @@ curl http://localhost:3000/v1/messages \
   -H "Authorization: Bearer <api_key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "sonnet-4.6",
+    "model": "claude-sonnet-4.6",
     "max_tokens": 512,
     "messages": [
       { "role": "user", "content": "你好，介绍一下当前可用能力。" }

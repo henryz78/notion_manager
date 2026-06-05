@@ -741,6 +741,7 @@ func (c *Client) fetchModels(spaceID string, headers map[string]string) []map[st
 		Models []struct {
 			Model        string `json:"model"`
 			ModelMessage string `json:"modelMessage"`
+			ModelFamily  string `json:"modelFamily"`
 			IsDisabled   bool   `json:"isDisabled"`
 		} `json:"models"`
 	}
@@ -752,16 +753,78 @@ func (c *Client) fetchModels(spaceID string, headers map[string]string) []map[st
 		if m.IsDisabled {
 			continue
 		}
-		name := m.ModelMessage
-		if name == "" {
-			name = m.Model
-		}
 		out = append(out, map[string]interface{}{
-			"name": name,
+			"name": notionModelDisplayName(m.ModelMessage, m.Model, m.ModelFamily),
 			"id":   m.Model,
 		})
 	}
 	return out
+}
+
+func notionModelDisplayName(displayName, internalID, family string) string {
+	name := strings.TrimSpace(displayName)
+	if name == "" {
+		name = notionFriendlyModelDisplayName(internalID)
+	}
+	if name == "" {
+		name = strings.TrimSpace(internalID)
+	}
+	if name == "" {
+		return ""
+	}
+	if notionIsClaudeModel(name, internalID, family) && !notionHasClaudePrefix(name) {
+		return "Claude " + name
+	}
+	return name
+}
+
+func notionFriendlyModelDisplayName(internalID string) string {
+	switch strings.ToLower(strings.TrimSpace(internalID)) {
+	case "avocado-froyo-medium":
+		return "Opus 4.6"
+	case "almond-croissant-low":
+		return "Sonnet 4.6"
+	case "anthropic-haiku-4.5":
+		return "Haiku 4.5"
+	default:
+		return ""
+	}
+}
+
+func notionHasClaudePrefix(name string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	return strings.HasPrefix(normalized, "claude ") || strings.HasPrefix(normalized, "claude-")
+}
+
+func notionIsClaudeModel(displayName, internalID, family string) bool {
+	normalizedFamily := strings.ToLower(strings.TrimSpace(family))
+	if strings.Contains(normalizedFamily, "anthropic") || strings.Contains(normalizedFamily, "claude") {
+		return true
+	}
+	if notionIsClaudeFamilyName(displayName) {
+		return true
+	}
+	return notionIsClaudeInternalID(internalID)
+}
+
+func notionIsClaudeFamilyName(name string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	normalized = strings.ReplaceAll(normalized, " ", "-")
+	normalized = strings.TrimPrefix(normalized, "claude-")
+	normalized = strings.TrimPrefix(normalized, "anthropic-")
+	return normalized == "opus" || strings.HasPrefix(normalized, "opus-") ||
+		normalized == "sonnet" || strings.HasPrefix(normalized, "sonnet-") ||
+		normalized == "haiku" || strings.HasPrefix(normalized, "haiku-")
+}
+
+func notionIsClaudeInternalID(id string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(id))
+	switch normalized {
+	case "avocado-froyo-medium", "almond-croissant-low", "anthropic-haiku-4.5":
+		return true
+	default:
+		return strings.HasPrefix(normalized, "anthropic-") && notionIsClaudeFamilyName(normalized)
+	}
 }
 
 // newUUID returns a random UUID v4 string.

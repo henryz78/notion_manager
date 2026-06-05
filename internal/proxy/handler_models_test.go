@@ -60,7 +60,7 @@ func TestHandlePublicModels_UsesPoolModelsAndNormalizesIDs(t *testing.T) {
 		gotIDs = append(gotIDs, item.ID)
 	}
 
-	wantIDs := []string{"gpt-5.4", "opus-4.6"}
+	wantIDs := []string{"claude-opus-4.6", "gpt-5.4"}
 	if !reflect.DeepEqual(gotIDs, wantIDs) {
 		t.Fatalf("unexpected model ids: got %v want %v", gotIDs, wantIDs)
 	}
@@ -96,9 +96,54 @@ func TestHandlePublicModels_FallsBackToDefaultModelMap(t *testing.T) {
 		gotIDs = append(gotIDs, item.ID)
 	}
 
-	wantIDs := []string{"gemini-2.5-flash", "sonnet-4.6"}
+	wantIDs := []string{"claude-sonnet-4.6", "gemini-2.5-flash"}
 	if !reflect.DeepEqual(gotIDs, wantIDs) {
 		t.Fatalf("unexpected fallback models: got %v want %v", gotIDs, wantIDs)
+	}
+}
+
+func TestResolveModelAcceptsClaudeDotAliases(t *testing.T) {
+	original := SnapshotModelMap()
+	ReplaceModelMap(map[string]string{
+		"sonnet-4.6": "almond-croissant-low",
+		"opus-4.6":   "avocado-froyo-medium",
+		"haiku-4.5":  "anthropic-haiku-4.5",
+	})
+	t.Cleanup(func() {
+		ReplaceModelMap(original)
+	})
+
+	tests := map[string]string{
+		"claude-sonnet-4.6": "almond-croissant-low",
+		"claude-opus-4.6":   "avocado-froyo-medium",
+		"claude-haiku-4.5":  "anthropic-haiku-4.5",
+		"sonnet-4.6":        "almond-croissant-low",
+	}
+
+	for input, want := range tests {
+		if got := ResolveModel(input); got != want {
+			t.Fatalf("ResolveModel(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestDisplayModelNameAddsClaudePrefixForAnthropicModels(t *testing.T) {
+	tests := []struct {
+		name       string
+		internalID string
+		family     string
+		want       string
+	}{
+		{name: "Sonnet 4.6", internalID: "almond-croissant-low", family: "anthropic", want: "Claude Sonnet 4.6"},
+		{name: "", internalID: "almond-croissant-low", family: "anthropic", want: "Claude Sonnet 4.6"},
+		{name: "Claude Opus 4.6", internalID: "avocado-froyo-medium", family: "anthropic", want: "Claude Opus 4.6"},
+		{name: "GPT 5.4", internalID: "oval-kumquat-medium", family: "openai", want: "GPT 5.4"},
+	}
+
+	for _, tc := range tests {
+		if got := displayModelName(tc.name, tc.internalID, tc.family); got != tc.want {
+			t.Fatalf("displayModelName(%q, %q, %q) = %q, want %q", tc.name, tc.internalID, tc.family, got, tc.want)
+		}
 	}
 }
 

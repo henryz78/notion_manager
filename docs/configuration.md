@@ -31,7 +31,7 @@ environment variables > config.yaml > code defaults
 | --- | --- | --- | --- |
 | `proxy.notion_api_base` | `https://www.notion.so/api/v3` | same | Notion API base URL |
 | `proxy.client_version` | `23.13.20260313.1423` | same | `x-notion-client-version` header |
-| `proxy.default_model` | `opus-4.6` | `opus-4.6` | Fallback model when request omits one |
+| `proxy.default_model` | `claude-opus-4.6` | `claude-opus-4.6` | Fallback model when request omits one |
 | `proxy.disable_notion_prompt` | `true` | `false` | Removes Notion's ~33k system prompt for leaner API usage |
 | `proxy.enable_web_search` | `true` | `true` | Global web-search toggle (overridable per-request) |
 | `proxy.enable_workspace_search` | `false` | `false` | Global workspace-search toggle (overridable per-request) |

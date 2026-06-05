@@ -104,9 +104,12 @@ func ApplyConfig(cfg *Config) {
 
 // anthropicModelAliases maps Anthropic SDK model names to our friendly aliases
 var anthropicModelAliases = map[string]string{
+	"claude-opus-4.6":   "opus-4.6",
 	"claude-opus-4-6":   "opus-4.6",
 	"claude-opus-4-5":   "opus-4.6", // older version → best available opus
+	"claude-sonnet-4.6": "sonnet-4.6",
 	"claude-sonnet-4-6": "sonnet-4.6",
+	"claude-haiku-4.5":  "haiku-4.5",
 	"claude-haiku-4-5":  "haiku-4.5",
 	"claude-sonnet-4-5": "sonnet-4.5",
 	"claude-opus-4":     "opus-4",
@@ -1673,7 +1676,7 @@ func FetchModels(acc *Account) ([]ModelEntry, error) {
 	var models []ModelEntry
 	for _, m := range result.Models {
 		if !m.IsDisabled {
-			models = append(models, ModelEntry{ID: m.Model, Name: m.ModelMessage})
+			models = append(models, ModelEntry{ID: m.Model, Name: displayModelName(m.ModelMessage, m.Model, m.ModelFamily)})
 		}
 	}
 	return models, nil

@@ -93,10 +93,7 @@ func buildPublicModels(models []ModelEntry) []publicModel {
 }
 
 func publicModelID(model ModelEntry) string {
-	if normalized := normalizeModelName(model.Name); normalized != "" {
-		return normalized
-	}
-	return friendlyModelNameByInternalID(model.ID)
+	return publicFacingModelID(model.Name, model.ID)
 }
 
 func friendlyModelNameByInternalID(id string) string {

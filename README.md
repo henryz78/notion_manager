@@ -122,7 +122,7 @@ Or download a pre-built binary from [Releases](https://github.com/SleepingBag945
 - File inputs for images, PDFs, and CSVs reuse the existing Notion upload pipeline
 - Default model fallback via `proxy.default_model`
 - `previous_response_id` is intentionally unsupported in `/v1/responses` (stateless bridge)
-- **ASK mode** — append `-ask` to any model name (e.g. `sonnet-4.6-ask`) for a read-only single turn that mirrors Notion's frontend "Ask" toggle, or set `proxy.ask_mode_default: true` to make every request ASK by default
+- **ASK mode** — append `-ask` to any model name (e.g. `claude-sonnet-4.6-ask`) for a read-only single turn that mirrors Notion's frontend "Ask" toggle, or set `proxy.ask_mode_default: true` to make every request ASK by default
 
 ### Bulk Microsoft-SSO registration
 
@@ -313,7 +313,7 @@ curl http://localhost:3000/v1/messages \
   -H "Authorization: Bearer <api_key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "sonnet-4.6",
+    "model": "claude-sonnet-4.6",
     "max_tokens": 512,
     "messages": [
       { "role": "user", "content": "Summarize what notion-manager does." }

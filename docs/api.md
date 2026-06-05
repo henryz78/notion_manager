@@ -27,7 +27,7 @@ curl http://localhost:3000/v1/messages \
   -H "x-api-key: <api_key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "opus-4.6",
+    "model": "claude-opus-4.6",
     "max_tokens": 1024,
     "messages": [
       { "role": "user", "content": "Describe the main components of this project." }
@@ -86,7 +86,7 @@ curl http://localhost:3000/v1/messages \
   -H "X-Web-Search: true" \
   -H "X-Workspace-Search: false" \
   -d '{
-    "model": "sonnet-4.6",
+    "model": "claude-sonnet-4.6",
     "messages": [
       { "role": "user", "content": "Search for recent information about Go 1.25." }
     ]
@@ -109,7 +109,7 @@ curl http://localhost:3000/v1/messages \
   -H "x-api-key: <api_key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "sonnet-4.6",
+    "model": "claude-sonnet-4.6",
     "max_tokens": 600,
     "messages": [{
       "role": "user",

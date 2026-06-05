@@ -40,7 +40,7 @@ proxy:
     # Notion client version sent in headers
     client_version: "23.13.20260313.1423"
     # Default model when none specified in request
-    default_model: "opus-4.6"
+    default_model: "claude-opus-4.6"
     # Disable Notion's built-in system prompt (~33k tokens).
     # When true, removes Notion AI identity, built-in tools, and web search.
     # Reduces input tokens from ~33k to ~757. Recommended for pure API proxy usage.
@@ -98,6 +98,7 @@ browser:
     # sec-ch-ua-platform header value
     sec_ch_ua_platform: '"Windows"'
 # Model alias mapping: friendly name → Notion internal model ID
+# Claude short aliases remain accepted; public /models emits claude-* names.
 # These are overwritten at runtime when models are fetched from Notion API.
 model_map:
     opus-4.6: "avocado-froyo-medium"
