@@ -31,6 +31,7 @@ func TestSortAccountDetailsRanksHealthyFirst(t *testing.T) {
 		account("dan", "dan@x.com", map[string]interface{}{"no_workspace": true, "remaining": 50}),
 		account("eve", "eve@x.com", map[string]interface{}{"remaining": 200}),
 		account("frank", "frank@x.com", map[string]interface{}{"remaining": 50, "research_usage": 5}),
+		account("gina", "gina@x.com", map[string]interface{}{"auth_invalid": true, "remaining": 300}),
 	}
 
 	sortAccountDetails(accounts)
@@ -44,8 +45,9 @@ func TestSortAccountDetailsRanksHealthyFirst(t *testing.T) {
 	// 2. research-limited but otherwise healthy (frank)
 	// 3. exhausted (bob)
 	// 4. no_workspace (dan)
-	// 5. permanent (carol)
-	want := []string{"eve", "alice", "frank", "bob", "dan", "carol"}
+	// 5. auth_invalid (gina)
+	// 6. permanent (carol)
+	want := []string{"eve", "alice", "frank", "bob", "dan", "gina", "carol"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("sort order mismatch:\n got=%v\nwant=%v", got, want)
 	}
@@ -149,6 +151,9 @@ func TestSummarizeAccountsAggregates(t *testing.T) {
 		account("e", "e@x", map[string]interface{}{
 			"remaining": 80, "research_usage": 4, // research-limited (no premium)
 		}),
+		account("f", "f@x", map[string]interface{}{
+			"auth_invalid": true, "remaining": 70, "research_usage": 5,
+		}),
 	}
 
 	s := summarizeAccounts(accounts)
@@ -156,8 +161,12 @@ func TestSummarizeAccountsAggregates(t *testing.T) {
 	if s.NoWorkspace != 1 {
 		t.Errorf("NoWorkspace: want 1 got %d", s.NoWorkspace)
 	}
+	if s.AuthInvalid != 1 {
+		t.Errorf("AuthInvalid: want 1 got %d", s.AuthInvalid)
+	}
 	// b is exhausted-only; d is permanent-only. c has no_workspace so it's
-	// excluded from the bucket per UX spec. -> 2.
+	// excluded from the bucket per UX spec. f is auth_invalid so it has its
+	// own bucket. -> 2.
 	if s.ExhaustedOnly != 2 {
 		t.Errorf("ExhaustedOnly: want 2 got %d", s.ExhaustedOnly)
 	}
@@ -169,8 +178,8 @@ func TestSummarizeAccountsAggregates(t *testing.T) {
 	if s.ResearchLimited != 1 {
 		t.Errorf("ResearchLimited: want 1 got %d", s.ResearchLimited)
 	}
-	if s.TotalRemaining != 230 { // 100 + 0 + 50 + 0 + 80
-		t.Errorf("TotalRemaining: want 230 got %d", s.TotalRemaining)
+	if s.TotalRemaining != 300 { // 100 + 0 + 50 + 0 + 80 + 70
+		t.Errorf("TotalRemaining: want 300 got %d", s.TotalRemaining)
 	}
 	if s.TotalSpaceUsage != 210 || s.TotalSpaceLimit != 400 {
 		t.Errorf("space totals: usage=%d limit=%d", s.TotalSpaceUsage, s.TotalSpaceLimit)

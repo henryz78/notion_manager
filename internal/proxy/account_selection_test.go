@@ -151,6 +151,87 @@ func TestGetAccountDetailsSurfacesTemporaryFailure(t *testing.T) {
 	}
 }
 
+func TestRepeatedAuthErrorsMarkAccountInvalid(t *testing.T) {
+	acc := &Account{
+		UserEmail: "invalid@example.com",
+		QuotaInfo: &QuotaInfo{
+			IsEligible: true,
+		},
+	}
+	pool := &AccountPool{accounts: []*Account{acc}}
+
+	if invalid := pool.RecordAuthFailure(acc, time.Minute); invalid {
+		t.Fatal("first auth failure should only cool the account down")
+	}
+	if invalid := pool.RecordAuthFailure(acc, time.Minute); !invalid {
+		t.Fatal("second consecutive auth failure should mark account invalid")
+	}
+
+	if got := pool.GetBestAccount(); got != nil {
+		t.Fatalf("auth-invalid account should be skipped, got %#v", got)
+	}
+	details := pool.GetAccountDetails()
+	if details[0]["auth_invalid"] != true {
+		t.Fatalf("auth_invalid missing: %#v", details[0])
+	}
+	if details[0]["auth_failures"] != 2 {
+		t.Fatalf("auth_failures=%#v want 2", details[0]["auth_failures"])
+	}
+	if details[0]["last_failure_reason"] != "auth_invalid" {
+		t.Fatalf("last_failure_reason=%#v", details[0]["last_failure_reason"])
+	}
+}
+
+func TestClearTemporaryUnavailableClearsAuthInvalidState(t *testing.T) {
+	acc := &Account{
+		UserEmail: "recover@example.com",
+		QuotaInfo: &QuotaInfo{
+			IsEligible: true,
+		},
+	}
+	pool := &AccountPool{accounts: []*Account{acc}}
+
+	pool.RecordAuthFailure(acc, time.Minute)
+	pool.RecordAuthFailure(acc, time.Minute)
+	pool.ClearTemporaryUnavailable(acc)
+
+	if got := pool.GetBestAccount(); got == nil || got.UserEmail != "recover@example.com" {
+		t.Fatalf("cleared account should be selectable, got %#v", got)
+	}
+	details := pool.GetAccountDetails()
+	if details[0]["auth_invalid"] == true {
+		t.Fatalf("auth_invalid should be cleared: %#v", details[0])
+	}
+	if details[0]["auth_failures"] != nil {
+		t.Fatalf("auth_failures should be omitted after clear: %#v", details[0])
+	}
+}
+
+func TestApplyQuotaInfoClearsAuthInvalidState(t *testing.T) {
+	acc := &Account{
+		UserEmail: "quota-recover@example.com",
+		QuotaInfo: &QuotaInfo{
+			IsEligible: true,
+		},
+	}
+	pool := &AccountPool{accounts: []*Account{acc}}
+
+	pool.RecordAuthFailure(acc, time.Minute)
+	pool.RecordAuthFailure(acc, time.Minute)
+	pool.applyQuotaInfo(acc, &QuotaInfo{IsEligible: true})
+
+	if got := pool.GetBestAccount(); got == nil || got.UserEmail != "quota-recover@example.com" {
+		t.Fatalf("quota-refreshed account should be selectable, got %#v", got)
+	}
+	details := pool.GetAccountDetails()
+	if details[0]["auth_invalid"] == true {
+		t.Fatalf("auth_invalid should be cleared after quota refresh: %#v", details[0])
+	}
+	if details[0]["auth_failures"] != nil {
+		t.Fatalf("auth_failures should be omitted after quota refresh: %#v", details[0])
+	}
+}
+
 func TestIsQuotaExhaustedUsesEligibilityFlag(t *testing.T) {
 	pool := &AccountPool{
 		accounts: []*Account{

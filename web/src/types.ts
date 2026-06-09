@@ -23,6 +23,8 @@ export interface AccountInfo {
   unavailable_until?: string
   last_failure_reason?: string
   last_failure_at?: string
+  auth_invalid?: boolean
+  auth_failures?: number
   eligible?: boolean
   usage?: number
   limit?: number
@@ -108,6 +110,7 @@ export interface RefreshStatus {
 export interface AccountSummary {
   exhausted_only: number
   no_workspace: number
+  auth_invalid: number
   premium_accounts: number
   research_limited: number
   total_research_usage: number

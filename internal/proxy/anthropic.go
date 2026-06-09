@@ -1173,6 +1173,15 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				lastNonQuotaErr = reqErr
 				failure := classifyAccountAttemptError(reqErr)
 				if failure.Retryable {
+					if failure.Reason == "auth_error" {
+						invalid := pool.RecordAuthFailure(acc, defaultAccountFailureCooldown)
+						if invalid {
+							log.Printf("[health] %s failed with auth_error and is now marked auth_invalid, trying next account: %v", acc.UserEmail, reqErr)
+						} else {
+							log.Printf("[health] %s failed with auth_error, trying next account: %v", acc.UserEmail, reqErr)
+						}
+						continue
+					}
 					pool.MarkTemporarilyUnavailable(acc, failure.Reason, defaultAccountFailureCooldown)
 					log.Printf("[health] %s failed with %s, trying next account: %v", acc.UserEmail, failure.Reason, reqErr)
 					continue

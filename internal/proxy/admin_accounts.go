@@ -14,6 +14,7 @@ import (
 type AccountSummary struct {
 	ExhaustedOnly       int   `json:"exhausted_only"`
 	NoWorkspace         int   `json:"no_workspace"`
+	AuthInvalid         int   `json:"auth_invalid"`
 	PremiumAccounts     int   `json:"premium_accounts"`
 	ResearchLimited     int   `json:"research_limited"`
 	TotalResearchUsage  int   `json:"total_research_usage"`
@@ -37,16 +38,20 @@ func summarizeAccounts(accounts []map[string]interface{}) AccountSummary {
 		exh := mapBool(a, "exhausted")
 		perm := mapBool(a, "permanent")
 		nws := mapBool(a, "no_workspace")
+		authInvalid := mapBool(a, "auth_invalid")
 		if nws {
 			s.NoWorkspace++
 		}
-		if (exh || perm) && !nws {
+		if authInvalid {
+			s.AuthInvalid++
+		}
+		if (exh || perm) && !nws && !authInvalid {
 			s.ExhaustedOnly++
 		}
 		if hasPremiumMap(a) {
 			s.PremiumAccounts++
 		}
-		if !exh && !perm && !nws && isResearchLimitedMap(a) {
+		if !exh && !perm && !nws && !authInvalid && isResearchLimitedMap(a) {
 			s.ResearchLimited++
 		}
 		s.TotalResearchUsage += mapInt(a, "research_usage")
@@ -93,14 +98,19 @@ func matchAccountQuery(a map[string]interface{}, qLower string) bool {
 // sortAccountDetails sorts in-place using the same criteria the dashboard
 // previously applied client-side:
 //  1. Permanently exhausted accounts to the bottom.
-//  2. Accounts with no accessible workspace to the bottom.
-//  3. Quota-exhausted accounts to the bottom.
-//  4. More remaining basic quota first.
-//  5. Research-limited accounts (no premium, research >= 3) to the bottom.
-//  6. Stable fallback by name (lower-cased).
+//  2. Auth-invalid accounts to the bottom.
+//  3. Accounts with no accessible workspace to the bottom.
+//  4. Quota-exhausted accounts to the bottom.
+//  5. More remaining basic quota first.
+//  6. Research-limited accounts (no premium, research >= 3) to the bottom.
+//  7. Stable fallback by name (lower-cased).
 func sortAccountDetails(accounts []map[string]interface{}) {
 	sort.SliceStable(accounts, func(i, j int) bool {
 		ai, aj := mapBool(accounts[i], "permanent"), mapBool(accounts[j], "permanent")
+		if ai != aj {
+			return !ai
+		}
+		ai, aj = mapBool(accounts[i], "auth_invalid"), mapBool(accounts[j], "auth_invalid")
 		if ai != aj {
 			return !ai
 		}

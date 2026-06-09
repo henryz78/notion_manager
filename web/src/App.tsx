@@ -447,8 +447,9 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
   const premium = hasPremiumAccess(account)
   const researchLimited = isResearchLimited(account)
   const noWorkspace = !!account.no_workspace
-  const temporarilyUnavailable = !!account.temporarily_unavailable
-  const status = account.permanent || account.exhausted || noWorkspace || temporarilyUnavailable
+  const authInvalid = !!account.auth_invalid
+  const temporarilyUnavailable = !authInvalid && !!account.temporarily_unavailable
+  const status = account.permanent || account.exhausted || noWorkspace || authInvalid || temporarilyUnavailable
     ? 'exhausted'
     : mergeQuotaStatus([
       getQuotaStatusByUsage(spaceQuota.usage, spaceQuota.limit),
@@ -462,10 +463,14 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
   // because Notion's /ai SPA hangs indefinitely on these accounts (the
   // root-cause this fix is for).
   const cardBg = account.permanent ? 'bg-bg-exhausted border-white/[0.03] opacity-55'
-    : account.exhausted || noWorkspace || temporarilyUnavailable ? 'bg-bg-exhausted border-white/[0.03]'
+    : account.exhausted || noWorkspace || authInvalid || temporarilyUnavailable ? 'bg-bg-exhausted border-white/[0.03]'
     : 'bg-bg-card hover:bg-bg-card-hover border-white/[0.03] hover:border-white/[0.07]'
 
   const handleClick = () => {
+    if (authInvalid) {
+      alert('该账号 Cookie/token 已失效，请重新导入账号。')
+      return
+    }
     if (noWorkspace) {
       // Use a native alert — we don't have a toast infra and openProxy
       // would otherwise pop a tab that displays raw JSON 409 to the user.
@@ -481,9 +486,9 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
 
   return (
     <div
-      className={`rounded-lg p-4 border ${noWorkspace || temporarilyUnavailable ? 'cursor-not-allowed' : 'cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30'} transition-all duration-200 ${cardBg}`}
+      className={`rounded-lg p-4 border ${authInvalid || noWorkspace || temporarilyUnavailable ? 'cursor-not-allowed' : 'cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30'} transition-all duration-200 ${cardBg}`}
       onClick={handleClick}
-      title={noWorkspace ? '账号无可访问工作区，已被排除出选号池' : temporarilyUnavailable ? `临时跳过：${account.last_failure_reason || 'temporary_failure'}` : undefined}
+      title={authInvalid ? '账号 Cookie/token 已失效，请重新导入账号' : noWorkspace ? '账号无可访问工作区，已被排除出选号池' : temporarilyUnavailable ? `临时跳过：${account.last_failure_reason || 'temporary_failure'}` : undefined}
     >
       {/* Header */}
       <div className="flex items-center gap-2.5 mb-2.5">
@@ -520,6 +525,7 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
         )}
         {account.exhausted && !account.permanent && <Badge variant="warning">Basic blocked</Badge>}
         {account.permanent && <Badge variant="warning">Free cap</Badge>}
+        {authInvalid && <Badge variant="warning">Cookie 失效</Badge>}
         {noWorkspace && <Badge variant="warning">无工作区</Badge>}
         {temporarilyUnavailable && (
           <Badge variant="warning">临时跳过 {account.last_failure_reason || 'failure'}</Badge>
@@ -761,6 +767,10 @@ export default function App() {
     // (total - available) lumps "exhausted" and "no workspace" together.
     // We split them out explicitly for the operator.
     const exhausted = data.total - data.available
+    const exhaustedOnly = s?.exhausted_only ?? 0
+    const noWorkspace = s?.no_workspace ?? 0
+    const authInvalid = s?.auth_invalid ?? 0
+    const otherUnavailable = Math.max(0, exhausted - exhaustedOnly - noWorkspace - authInvalid)
     const availableRate = data.total > 0 ? Math.round((data.available / data.total) * 100) : 0
     const sameBasicQuota = isSameQuota(
       { usage: s?.total_space_usage ?? 0, limit: s?.total_space_limit ?? 0 },
@@ -768,8 +778,10 @@ export default function App() {
     )
     return {
       exhausted,
-      exhaustedOnly: s?.exhausted_only ?? 0,
-      noWorkspace: s?.no_workspace ?? 0,
+      exhaustedOnly,
+      noWorkspace,
+      authInvalid,
+      otherUnavailable,
       availableRate,
       totalResearchUsage: s?.total_research_usage ?? 0,
       totalRemaining: s?.total_remaining ?? 0,
@@ -814,6 +826,16 @@ export default function App() {
     )
   }
 
+  const accountSummaryParts = summary
+    ? [
+      `${data!.available} 可用`,
+      summary.exhaustedOnly > 0 ? `${summary.exhaustedOnly} 耗尽` : null,
+      summary.noWorkspace > 0 ? `${summary.noWorkspace} 无工作区` : null,
+      summary.authInvalid > 0 ? `${summary.authInvalid} Cookie 失效` : null,
+      summary.otherUnavailable > 0 ? `${summary.otherUnavailable} 临时跳过` : null,
+    ].filter(Boolean).join(' / ')
+    : ''
+
   return (
     <div className="min-h-screen">
       <Header query={query} onQuery={setQuery} onLogout={handleLogout} authRequired={authRequired} />
@@ -824,9 +846,7 @@ export default function App() {
           <div className="grid grid-cols-5 divide-x divide-white/[.05] mb-6 max-lg:grid-cols-3 max-md:grid-cols-2 max-md:divide-x-0 max-sm:grid-cols-1">
             <StatCard
               label="总账号" value={data!.total}
-              sub={summary.noWorkspace > 0
-                ? `${data!.available} 可用 / ${summary.exhaustedOnly} 耗尽 / ${summary.noWorkspace} 无工作区`
-                : `${data!.available} 可用 / ${summary.exhausted} 耗尽`}
+              sub={accountSummaryParts}
             />
             <StatCard
               label="可用" value={data!.available}

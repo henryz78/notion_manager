@@ -38,6 +38,8 @@ type Account struct {
 	TemporaryUnavailableUntil *time.Time `json:"-"`
 	LastFailureReason         string     `json:"-"`
 	LastFailureAt             *time.Time `json:"-"`
+	AuthFailureCount         int        `json:"-"`
+	AuthInvalid              bool       `json:"-"`
 	// Workspace probe state. SpaceCount is the number of `space_views`
 	// returned by /api/v3/loadUserContent for this account's user_root.
 	// 0 with WorkspaceCheckedAt != nil means the Notion onboarding

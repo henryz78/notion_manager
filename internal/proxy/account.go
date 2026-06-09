@@ -26,7 +26,10 @@ var (
 	workspaceProbe = CheckUserWorkspace
 )
 
-const defaultAccountFailureCooldown = 2 * time.Minute
+const (
+	defaultAccountFailureCooldown = 2 * time.Minute
+	authInvalidFailureThreshold   = 2
+)
 
 type AccountPool struct {
 	mu       sync.RWMutex
@@ -116,6 +119,8 @@ type accountHealthSnapshot struct {
 	TemporaryUnavailableUntil *time.Time
 	LastFailureReason         string
 	LastFailureAt             *time.Time
+	AuthFailureCount         int
+	AuthInvalid              bool
 }
 
 func (acc *Account) healthSnapshot() accountHealthSnapshot {
@@ -128,6 +133,8 @@ func (acc *Account) healthSnapshot() accountHealthSnapshot {
 		TemporaryUnavailableUntil: cloneTimePtr(acc.TemporaryUnavailableUntil),
 		LastFailureReason:         acc.LastFailureReason,
 		LastFailureAt:             cloneTimePtr(acc.LastFailureAt),
+		AuthFailureCount:         acc.AuthFailureCount,
+		AuthInvalid:              acc.AuthInvalid,
 	}
 }
 
@@ -505,6 +512,39 @@ func (p *AccountPool) MarkTemporarilyUnavailable(acc *Account, reason string, co
 	log.Printf("[health] temporarily disabled %s for %s (%s)", acc.UserEmail, cooldown, reason)
 }
 
+// RecordAuthFailure records a failed account authentication attempt. The first
+// auth error only cools the account down; repeated consecutive auth errors mark
+// the account invalid until a refresh/reimport clears the runtime state.
+func (p *AccountPool) RecordAuthFailure(acc *Account, cooldown time.Duration) bool {
+	if acc == nil {
+		return false
+	}
+	if cooldown <= 0 {
+		cooldown = defaultAccountFailureCooldown
+	}
+	now := time.Now()
+	until := now.Add(cooldown)
+
+	acc.mu.Lock()
+	acc.AuthFailureCount++
+	count := acc.AuthFailureCount
+	if count >= authInvalidFailureThreshold {
+		acc.AuthInvalid = true
+		acc.TemporaryUnavailableUntil = nil
+		acc.LastFailureReason = "auth_invalid"
+		acc.LastFailureAt = &now
+		acc.mu.Unlock()
+		log.Printf("[health] marked %s auth invalid after %d consecutive auth failures", acc.UserEmail, count)
+		return true
+	}
+	acc.TemporaryUnavailableUntil = &until
+	acc.LastFailureReason = "auth_error"
+	acc.LastFailureAt = &now
+	acc.mu.Unlock()
+	log.Printf("[health] temporarily disabled %s for %s (auth_error %d/%d)", acc.UserEmail, cooldown, count, authInvalidFailureThreshold)
+	return false
+}
+
 func (p *AccountPool) ClearTemporaryUnavailable(acc *Account) {
 	if acc == nil {
 		return
@@ -513,12 +553,18 @@ func (p *AccountPool) ClearTemporaryUnavailable(acc *Account) {
 	acc.TemporaryUnavailableUntil = nil
 	acc.LastFailureReason = ""
 	acc.LastFailureAt = nil
+	acc.AuthFailureCount = 0
+	acc.AuthInvalid = false
 	acc.mu.Unlock()
 }
 
 func (p *AccountPool) isTemporarilyUnavailable(acc *Account) bool {
 	health := acc.healthSnapshot()
 	return health.TemporaryUnavailableUntil != nil && health.TemporaryUnavailableUntil.After(time.Now())
+}
+
+func (p *AccountPool) isAuthInvalid(acc *Account) bool {
+	return acc.healthSnapshot().AuthInvalid
 }
 
 func (p *AccountPool) isQuotaExhausted(acc *Account) bool {
@@ -547,7 +593,7 @@ func (p *AccountPool) hasNoWorkspace(acc *Account) bool {
 // isUnusable folds quota-exhausted and no-workspace accounts into a
 // single "do not select" predicate used by every picker.
 func (p *AccountPool) isUnusable(acc *Account) bool {
-	return p.isQuotaExhausted(acc) || p.hasNoWorkspace(acc) || p.isTemporarilyUnavailable(acc)
+	return p.isQuotaExhausted(acc) || p.hasNoWorkspace(acc) || p.isTemporarilyUnavailable(acc) || p.isAuthInvalid(acc)
 }
 
 // applyWorkspaceCount records the latest probe result. Caller must NOT
@@ -607,6 +653,8 @@ func (p *AccountPool) applyQuotaInfo(acc *Account, info *QuotaInfo) quotaApplyRe
 		acc.TemporaryUnavailableUntil = nil
 		acc.LastFailureReason = ""
 		acc.LastFailureAt = nil
+		acc.AuthFailureCount = 0
+		acc.AuthInvalid = false
 		return res
 	}
 	res.NowExhausted = true
@@ -1453,6 +1501,12 @@ func (p *AccountPool) GetAccountDetails() []map[string]interface{} {
 		if health.LastFailureAt != nil {
 			entry["last_failure_at"] = health.LastFailureAt.Format(time.RFC3339)
 		}
+		if health.AuthInvalid {
+			entry["auth_invalid"] = true
+		}
+		if health.AuthFailureCount > 0 {
+			entry["auth_failures"] = health.AuthFailureCount
+		}
 		if acc.WorkspaceCheckedAt != nil {
 			entry["space_count"] = acc.SpaceCount
 			entry["workspace_checked_at"] = acc.WorkspaceCheckedAt.Format(time.RFC3339)
@@ -1522,6 +1576,12 @@ func (p *AccountPool) GetQuotaSummary() []map[string]interface{} {
 		}
 		if health.LastFailureAt != nil {
 			entry["last_failure_at"] = health.LastFailureAt.Format(time.RFC3339)
+		}
+		if health.AuthInvalid {
+			entry["auth_invalid"] = true
+		}
+		if health.AuthFailureCount > 0 {
+			entry["auth_failures"] = health.AuthFailureCount
 		}
 		if acc.WorkspaceCheckedAt != nil {
 			entry["space_count"] = acc.SpaceCount
