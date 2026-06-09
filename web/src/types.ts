@@ -19,6 +19,10 @@ export interface AccountInfo {
   // probed (fresh registration before the first refresh tick).
   space_count?: number
   workspace_checked_at?: string
+  temporarily_unavailable?: boolean
+  unavailable_until?: string
+  last_failure_reason?: string
+  last_failure_at?: string
   eligible?: boolean
   usage?: number
   limit?: number

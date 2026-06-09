@@ -26,6 +26,8 @@ var (
 	workspaceProbe = CheckUserWorkspace
 )
 
+const defaultAccountFailureCooldown = 2 * time.Minute
+
 type AccountPool struct {
 	mu       sync.RWMutex
 	accounts []*Account
@@ -108,6 +110,25 @@ func (acc *Account) quotaSnapshot() accountQuotaSnapshot {
 
 func (acc *Account) quotaInfoSnapshot() *QuotaInfo {
 	return acc.quotaSnapshot().Info
+}
+
+type accountHealthSnapshot struct {
+	TemporaryUnavailableUntil *time.Time
+	LastFailureReason         string
+	LastFailureAt             *time.Time
+}
+
+func (acc *Account) healthSnapshot() accountHealthSnapshot {
+	if acc == nil {
+		return accountHealthSnapshot{}
+	}
+	acc.mu.RLock()
+	defer acc.mu.RUnlock()
+	return accountHealthSnapshot{
+		TemporaryUnavailableUntil: cloneTimePtr(acc.TemporaryUnavailableUntil),
+		LastFailureReason:         acc.LastFailureReason,
+		LastFailureAt:             cloneTimePtr(acc.LastFailureAt),
+	}
 }
 
 func (acc *Account) setModels(models []ModelEntry) {
@@ -460,6 +481,46 @@ func (p *AccountPool) ClearQuotaExhausted(acc *Account) {
 	acc.clearQuotaExhausted()
 }
 
+// MarkTemporarilyUnavailable skips an account for a short runtime cooldown.
+// This is deliberately not persisted; it protects active traffic from a bad
+// account without turning transient Notion/network failures into durable state.
+func (p *AccountPool) MarkTemporarilyUnavailable(acc *Account, reason string, cooldown time.Duration) {
+	if acc == nil {
+		return
+	}
+	if cooldown <= 0 {
+		cooldown = defaultAccountFailureCooldown
+	}
+	now := time.Now()
+	until := now.Add(cooldown)
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "temporary_failure"
+	}
+	acc.mu.Lock()
+	acc.TemporaryUnavailableUntil = &until
+	acc.LastFailureReason = reason
+	acc.LastFailureAt = &now
+	acc.mu.Unlock()
+	log.Printf("[health] temporarily disabled %s for %s (%s)", acc.UserEmail, cooldown, reason)
+}
+
+func (p *AccountPool) ClearTemporaryUnavailable(acc *Account) {
+	if acc == nil {
+		return
+	}
+	acc.mu.Lock()
+	acc.TemporaryUnavailableUntil = nil
+	acc.LastFailureReason = ""
+	acc.LastFailureAt = nil
+	acc.mu.Unlock()
+}
+
+func (p *AccountPool) isTemporarilyUnavailable(acc *Account) bool {
+	health := acc.healthSnapshot()
+	return health.TemporaryUnavailableUntil != nil && health.TemporaryUnavailableUntil.After(time.Now())
+}
+
 func (p *AccountPool) isQuotaExhausted(acc *Account) bool {
 	quota := acc.quotaSnapshot()
 	if quota.PermanentlyExhausted {
@@ -486,7 +547,7 @@ func (p *AccountPool) hasNoWorkspace(acc *Account) bool {
 // isUnusable folds quota-exhausted and no-workspace accounts into a
 // single "do not select" predicate used by every picker.
 func (p *AccountPool) isUnusable(acc *Account) bool {
-	return p.isQuotaExhausted(acc) || p.hasNoWorkspace(acc)
+	return p.isQuotaExhausted(acc) || p.hasNoWorkspace(acc) || p.isTemporarilyUnavailable(acc)
 }
 
 // applyWorkspaceCount records the latest probe result. Caller must NOT
@@ -543,6 +604,9 @@ func (p *AccountPool) applyQuotaInfo(acc *Account, info *QuotaInfo) quotaApplyRe
 		}
 		acc.QuotaExhaustedAt = nil
 		acc.PermanentlyExhausted = false
+		acc.TemporaryUnavailableUntil = nil
+		acc.LastFailureReason = ""
+		acc.LastFailureAt = nil
 		return res
 	}
 	res.NowExhausted = true
@@ -1364,6 +1428,7 @@ func (p *AccountPool) GetAccountDetails() []map[string]interface{} {
 	var details []map[string]interface{}
 	for _, acc := range p.accounts {
 		quota := acc.quotaSnapshot()
+		health := acc.healthSnapshot()
 		models := acc.modelsSnapshot()
 		entry := map[string]interface{}{
 			"email":        acc.UserEmail,
@@ -1377,6 +1442,16 @@ func (p *AccountPool) GetAccountDetails() []map[string]interface{} {
 			// HandleAdminAccounts already gates on session). The dashboard
 			// shows a "copy token" action and uses it for nothing else.
 			"token_v2": acc.TokenV2,
+		}
+		if health.TemporaryUnavailableUntil != nil {
+			entry["temporarily_unavailable"] = health.TemporaryUnavailableUntil.After(time.Now())
+			entry["unavailable_until"] = health.TemporaryUnavailableUntil.Format(time.RFC3339)
+		}
+		if health.LastFailureReason != "" {
+			entry["last_failure_reason"] = health.LastFailureReason
+		}
+		if health.LastFailureAt != nil {
+			entry["last_failure_at"] = health.LastFailureAt.Format(time.RFC3339)
 		}
 		if acc.WorkspaceCheckedAt != nil {
 			entry["space_count"] = acc.SpaceCount
@@ -1429,6 +1504,7 @@ func (p *AccountPool) GetQuotaSummary() []map[string]interface{} {
 	var summary []map[string]interface{}
 	for _, acc := range p.accounts {
 		quota := acc.quotaSnapshot()
+		health := acc.healthSnapshot()
 		entry := map[string]interface{}{
 			"email":        acc.UserEmail,
 			"name":         acc.UserName,
@@ -1436,6 +1512,16 @@ func (p *AccountPool) GetQuotaSummary() []map[string]interface{} {
 			"exhausted":    p.isQuotaExhausted(acc),
 			"permanent":    quota.PermanentlyExhausted,
 			"no_workspace": p.hasNoWorkspace(acc),
+		}
+		if health.TemporaryUnavailableUntil != nil {
+			entry["temporarily_unavailable"] = health.TemporaryUnavailableUntil.After(time.Now())
+			entry["unavailable_until"] = health.TemporaryUnavailableUntil.Format(time.RFC3339)
+		}
+		if health.LastFailureReason != "" {
+			entry["last_failure_reason"] = health.LastFailureReason
+		}
+		if health.LastFailureAt != nil {
+			entry["last_failure_at"] = health.LastFailureAt.Format(time.RFC3339)
 		}
 		if acc.WorkspaceCheckedAt != nil {
 			entry["space_count"] = acc.SpaceCount

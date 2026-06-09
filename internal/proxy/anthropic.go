@@ -1114,6 +1114,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				// Empty response — account/thread in bad state, clear session and try next account
 				log.Printf("[empty] %s returned empty response, trying next account", acc.UserEmail)
 				sawEmptyResponse = true
+				pool.MarkTemporarilyUnavailable(acc, "empty_response", defaultAccountFailureCooldown)
 				if currentSession != nil {
 					globalSessionManager.Delete(fingerprint)
 					session = nil
@@ -1148,6 +1149,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					pool.RemoveAccount(acc)
 				} else {
 					log.Printf("[premium] %s premium feature unavailable, trying next account", acc.UserEmail)
+					pool.MarkTemporarilyUnavailable(acc, "premium_unavailable", defaultAccountFailureCooldown)
 				}
 				if !isFirstTurn && session != nil {
 					globalSessionManager.Delete(fingerprint)
@@ -1169,9 +1171,19 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					continue
 				}
 				lastNonQuotaErr = reqErr
+				failure := classifyAccountAttemptError(reqErr)
+				if failure.Retryable {
+					pool.MarkTemporarilyUnavailable(acc, failure.Reason, defaultAccountFailureCooldown)
+					log.Printf("[health] %s failed with %s, trying next account: %v", acc.UserEmail, failure.Reason, reqErr)
+					continue
+				}
+				break
 			}
 
 			// ── Success: save/update session ──
+			if reqErr == nil {
+				pool.ClearTemporaryUnavailable(acc)
+			}
 			if !isResearcher && currentSession != nil && reqErr == nil {
 				if isFirstTurn {
 					currentSession.TurnCount = 1
@@ -1567,8 +1579,7 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 				return cbErr
 			}
 			log.Printf("[err] %s: %v", requestID, cbErr)
-			writeAnthropicError(w, requestID, http.StatusBadGateway, "notion API error: "+cbErr.Error(), "api_error")
-			return nil
+			return cbErr
 		}
 		log.Printf("[err] %s: streaming completed with partial data before error: %v", requestID, cbErr)
 	}
@@ -1732,8 +1743,7 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 			return cbErr
 		}
 		log.Printf("[err] %s: %v", requestID, cbErr)
-		writeAnthropicError(w, requestID, http.StatusBadGateway, "notion API error: "+cbErr.Error(), "api_error")
-		return nil
+		return cbErr
 	}
 
 	contentStr := fullContent.String()
@@ -2028,8 +2038,7 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 			return err
 		}
 		log.Printf("[err] %s: %v", requestID, err)
-		writeAnthropicError(w, requestID, http.StatusBadGateway, "notion API error: "+err.Error(), "api_error")
-		return nil
+		return err
 	}
 
 	content := fullContent.String()

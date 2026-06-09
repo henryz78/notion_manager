@@ -33,6 +33,11 @@ type Account struct {
 	QuotaInfo            *QuotaInfo `json:"-"`
 	QuotaCheckedAt       *time.Time `json:"-"`
 	PermanentlyExhausted bool       `json:"-"`
+	// Short-lived runtime cooldown for account-local failures such as
+	// expired auth, rate limiting, network errors, or Notion 5xx responses.
+	TemporaryUnavailableUntil *time.Time `json:"-"`
+	LastFailureReason         string     `json:"-"`
+	LastFailureAt             *time.Time `json:"-"`
 	// Workspace probe state. SpaceCount is the number of `space_views`
 	// returned by /api/v3/loadUserContent for this account's user_root.
 	// 0 with WorkspaceCheckedAt != nil means the Notion onboarding

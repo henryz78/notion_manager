@@ -1,6 +1,9 @@
 package proxy
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestNextSkipsIneligibleAccounts(t *testing.T) {
 	pool := &AccountPool{
@@ -80,6 +83,71 @@ func TestGetBestAccountReturnsNilWhenOnlyIneligibleAccounts(t *testing.T) {
 
 	if got := pool.GetBestAccount(); got != nil {
 		t.Fatalf("expected nil, got %#v", got)
+	}
+}
+
+func TestTemporaryUnavailableAccountIsSkippedUntilCooldownExpires(t *testing.T) {
+	blocked := &Account{
+		UserEmail: "blocked@example.com",
+		QuotaInfo: &QuotaInfo{
+			IsEligible: true,
+			SpaceLimit: 200,
+			SpaceUsage: 10,
+			UserLimit:  200,
+			UserUsage:  10,
+		},
+	}
+	fallback := &Account{
+		UserEmail: "fallback@example.com",
+		QuotaInfo: &QuotaInfo{
+			IsEligible: true,
+			SpaceLimit: 200,
+			SpaceUsage: 80,
+			UserLimit:  200,
+			UserUsage:  80,
+		},
+	}
+	pool := &AccountPool{accounts: []*Account{blocked, fallback}}
+
+	pool.MarkTemporarilyUnavailable(blocked, "auth_error", time.Hour)
+
+	if got := pool.GetBestAccount(); got == nil || got.UserEmail != "fallback@example.com" {
+		t.Fatalf("expected cooldown account to be skipped, got %#v", got)
+	}
+
+	past := time.Now().Add(-time.Second)
+	blocked.mu.Lock()
+	blocked.TemporaryUnavailableUntil = &past
+	blocked.mu.Unlock()
+
+	if got := pool.GetBestAccount(); got == nil || got.UserEmail != "blocked@example.com" {
+		t.Fatalf("expected expired cooldown account to be usable again, got %#v", got)
+	}
+}
+
+func TestGetAccountDetailsSurfacesTemporaryFailure(t *testing.T) {
+	acc := &Account{
+		UserEmail: "cooldown@example.com",
+		QuotaInfo: &QuotaInfo{
+			IsEligible: true,
+		},
+	}
+	pool := &AccountPool{accounts: []*Account{acc}}
+
+	pool.MarkTemporarilyUnavailable(acc, "upstream_5xx", time.Minute)
+
+	details := pool.GetAccountDetails()
+	if len(details) != 1 {
+		t.Fatalf("details len=%d want 1", len(details))
+	}
+	if details[0]["temporarily_unavailable"] != true {
+		t.Fatalf("temporarily_unavailable missing: %#v", details[0])
+	}
+	if details[0]["last_failure_reason"] != "upstream_5xx" {
+		t.Fatalf("last_failure_reason=%#v", details[0]["last_failure_reason"])
+	}
+	if _, ok := details[0]["unavailable_until"].(string); !ok {
+		t.Fatalf("unavailable_until missing: %#v", details[0])
 	}
 }
 

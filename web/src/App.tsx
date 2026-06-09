@@ -447,7 +447,8 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
   const premium = hasPremiumAccess(account)
   const researchLimited = isResearchLimited(account)
   const noWorkspace = !!account.no_workspace
-  const status = account.permanent || account.exhausted || noWorkspace
+  const temporarilyUnavailable = !!account.temporarily_unavailable
+  const status = account.permanent || account.exhausted || noWorkspace || temporarilyUnavailable
     ? 'exhausted'
     : mergeQuotaStatus([
       getQuotaStatusByUsage(spaceQuota.usage, spaceQuota.limit),
@@ -461,7 +462,7 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
   // because Notion's /ai SPA hangs indefinitely on these accounts (the
   // root-cause this fix is for).
   const cardBg = account.permanent ? 'bg-bg-exhausted border-white/[0.03] opacity-55'
-    : account.exhausted || noWorkspace ? 'bg-bg-exhausted border-white/[0.03]'
+    : account.exhausted || noWorkspace || temporarilyUnavailable ? 'bg-bg-exhausted border-white/[0.03]'
     : 'bg-bg-card hover:bg-bg-card-hover border-white/[0.03] hover:border-white/[0.07]'
 
   const handleClick = () => {
@@ -471,14 +472,18 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
       alert('该账号没有可访问的 Notion 工作区，无法打开 /ai 反代。请重新注册或选择其他账号。')
       return
     }
+    if (temporarilyUnavailable) {
+      alert(`该账号刚刚请求失败，已临时跳过。原因：${account.last_failure_reason || 'temporary_failure'}`)
+      return
+    }
     openProxy(account.email)
   }
 
   return (
     <div
-      className={`rounded-lg p-4 border ${noWorkspace ? 'cursor-not-allowed' : 'cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30'} transition-all duration-200 ${cardBg}`}
+      className={`rounded-lg p-4 border ${noWorkspace || temporarilyUnavailable ? 'cursor-not-allowed' : 'cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30'} transition-all duration-200 ${cardBg}`}
       onClick={handleClick}
-      title={noWorkspace ? '账号无可访问工作区，已被排除出选号池' : undefined}
+      title={noWorkspace ? '账号无可访问工作区，已被排除出选号池' : temporarilyUnavailable ? `临时跳过：${account.last_failure_reason || 'temporary_failure'}` : undefined}
     >
       {/* Header */}
       <div className="flex items-center gap-2.5 mb-2.5">
@@ -516,6 +521,9 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
         {account.exhausted && !account.permanent && <Badge variant="warning">Basic blocked</Badge>}
         {account.permanent && <Badge variant="warning">Free cap</Badge>}
         {noWorkspace && <Badge variant="warning">无工作区</Badge>}
+        {temporarilyUnavailable && (
+          <Badge variant="warning">临时跳过 {account.last_failure_reason || 'failure'}</Badge>
+        )}
         {modelCount > 0 && (
           <button
             onClick={e => { e.stopPropagation(); setShowModels(!showModels) }}
