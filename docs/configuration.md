@@ -16,7 +16,7 @@ environment variables > config.yaml > code defaults
 | `server.accounts_dir` | `accounts` | `accounts` | Account JSON directory; also stores `.register_history.json` / `.token_stats.json` / `.register_inputs/` |
 | `server.token_file` | `token.txt` | `token.txt` | Fallback single-account file |
 | `server.api_key` | empty | auto-generated | Used by `/v1/messages` |
-| `server.admin_password` | empty | auto-generated | Hashed on first startup |
+| `server.admin_password` | empty | auto-generated | Hashed on first startup; override with `ADMIN_PASSWORD` |
 | `server.log_file` | `server.stderr.log` | empty (stderr) | All `log.Printf` output is appended here |
 | `server.debug_logging` | `true` | `true` | High-volume debug logs |
 | `server.api_log_input` | `true` | `false` | Log incoming `/v1/messages` request bodies |

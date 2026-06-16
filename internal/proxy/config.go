@@ -205,6 +205,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	if v := os.Getenv("API_KEY"); v != "" {
 		cfg.Server.ApiKey = v
 	}
+	if v := os.Getenv("ADMIN_PASSWORD"); v != "" {
+		cfg.Server.AdminPassword = v
+	}
 	if v := os.Getenv("LOG_FILE"); v != "" {
 		cfg.Server.LogFile = v
 	}

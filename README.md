@@ -321,6 +321,46 @@ curl http://localhost:3000/v1/messages \
   }'
 ```
 
+## Railway Deployment
+
+The repository includes a root `Dockerfile`. Railway can use it to build the dashboard assets, compile the Go service, and run the app with account files stored under `/app/accounts`.
+
+1. Create a Railway project from this GitHub repository.
+2. Add these service **Variables**:
+
+```text
+API_KEY=sk-replace-with-your-own-random-key
+ADMIN_PASSWORD=replace-with-your-dashboard-password
+ACCOUNTS_DIR=/app/accounts
+DEBUG_LOGGING=false
+```
+
+3. Add a service Volume mounted at:
+
+```text
+/app/accounts
+```
+
+4. Generate a public domain in **Networking**.
+5. Open the dashboard:
+
+```text
+https://<your-domain>/dashboard/
+```
+
+Verify the API:
+
+```bash
+curl https://<your-domain>/v1/models \
+  -H "Authorization: Bearer sk-replace-with-your-own-random-key"
+```
+
+Notes:
+
+- Do not commit `accounts/`, `config.yaml`, or `token.txt` to GitHub; `.dockerignore` excludes them from image builds.
+- Railway container filesystems are ephemeral across rebuilds. Keep account JSON files, register history, and token stats in the `/app/accounts` Volume.
+- Railway injects `PORT` automatically, so `server.port` does not need to be set manually.
+
 ## Documentation
 
 - [API Usage](docs/api.md) — Standard requests, OpenAI compatibility, search overrides, file uploads, research mode, ASK mode

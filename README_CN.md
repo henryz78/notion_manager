@@ -334,6 +334,46 @@ curl http://localhost:3000/v1/messages \
   }'
 ```
 
+## Railway 部署
+
+仓库根目录已包含 `Dockerfile`，Railway 会用它构建前端静态资源、编译 Go 服务，并在运行时从 `/app/accounts` 读取账号池。
+
+1. 在 Railway 新建 Project，选择 GitHub 仓库。
+2. 在服务的 **Variables** 中设置：
+
+```text
+API_KEY=sk-替换成你自己的随机密钥
+ADMIN_PASSWORD=替换成你的 Dashboard 登录密码
+ACCOUNTS_DIR=/app/accounts
+DEBUG_LOGGING=false
+```
+
+3. 在服务中添加 Volume，挂载路径填：
+
+```text
+/app/accounts
+```
+
+4. 在 **Networking** 中生成 Public Domain。
+5. 部署完成后访问：
+
+```text
+https://<你的域名>/dashboard/
+```
+
+API 验证：
+
+```bash
+curl https://<你的域名>/v1/models \
+  -H "Authorization: Bearer sk-替换成你自己的随机密钥"
+```
+
+注意：
+
+- 不要把 `accounts/`、`config.yaml`、`token.txt` 提交到 GitHub；`.dockerignore` 已经默认排除这些文件。
+- Railway 的容器文件系统会随重建丢失，账号 JSON、注册历史和 token 统计都应保存在 `/app/accounts` 这个 Volume 中。
+- Railway 会自动注入 `PORT`，不需要手动设置 `server.port`。
+
 ## 详细文档
 
 - [API 接入](docs/api_cn.md) — 标准请求、OpenAI 兼容、搜索控制、文件上传、研究模式、ASK 模式

@@ -16,7 +16,7 @@
 | `server.accounts_dir` | `accounts` | `accounts` | 账号 JSON 目录；同时存放 `.register_history.json` / `.token_stats.json` / `.register_inputs/` |
 | `server.token_file` | `token.txt` | `token.txt` | 单账号回退文件 |
 | `server.api_key` | 空 | 自动生成 | `/v1/messages` 鉴权 |
-| `server.admin_password` | 空 | 自动生成 | 首次启动后哈希回写 |
+| `server.admin_password` | 空 | 自动生成 | 首次启动后哈希回写；环境变量 `ADMIN_PASSWORD` 可覆盖 |
 | `server.log_file` | `server.stderr.log` | 空（stderr） | `log.Printf` 全部追加到该文件 |
 | `server.debug_logging` | `true` | `true` | 高频调试日志 |
 | `server.api_log_input` | `true` | `false` | 记录入站 `/v1/messages` 请求体 |
