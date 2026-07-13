@@ -325,6 +325,16 @@ curl http://localhost:3000/v1/messages \
 
 The repository includes a root `Dockerfile`. Railway can use it to build the dashboard assets, compile the Go service, and run the app with account files stored under `/app/accounts`.
 
+Every push to GitHub also triggers `.github/workflows/docker-image.yml`, which builds `linux/amd64` and `linux/arm64` images and publishes them to GitHub Container Registry:
+
+```text
+ghcr.io/henryz78/notion_manager:latest
+```
+
+The `master` branch updates `latest`, other branches receive branch tags, and every commit receives a `sha-<short-sha>` tag. After the first build, open **Packages → notion_manager → Package settings** on GitHub and set the package visibility to **Public** so other Railway accounts can pull it directly.
+
+### Deploy from the GitHub repository
+
 1. Create a Railway project from this GitHub repository.
 2. Add these service **Variables**:
 
@@ -354,6 +364,20 @@ Verify the API:
 curl https://<your-domain>/v1/models \
   -H "Authorization: Bearer sk-replace-with-your-own-random-key"
 ```
+
+### Deploy from the GHCR image
+
+1. Create a project in another Railway account and select **Deploy a Docker Image**.
+2. Enter this image reference:
+
+```text
+ghcr.io/henryz78/notion_manager:latest
+```
+
+3. Add the same Variables shown above.
+4. Add a Volume mounted at `/app/accounts`.
+5. Generate a public domain under **Networking**.
+6. After a new image is published, redeploy the Railway service to pull the latest `latest` tag.
 
 Notes:
 

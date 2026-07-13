@@ -338,6 +338,16 @@ curl http://localhost:3000/v1/messages \
 
 仓库根目录已包含 `Dockerfile`，Railway 会用它构建前端静态资源、编译 Go 服务，并在运行时从 `/app/accounts` 读取账号池。
 
+每次推送到 GitHub 时，`.github/workflows/docker-image.yml` 还会自动构建 `linux/amd64` 和 `linux/arm64` 镜像并发布到 GitHub Container Registry：
+
+```text
+ghcr.io/henryz78/notion_manager:latest
+```
+
+`master` 更新 `latest`，其他分支生成对应的分支标签，每次提交还会生成 `sha-<短提交号>` 标签。首次构建后，在 GitHub 的 **Packages → notion_manager → Package settings** 中将包可见性设为 **Public**，其他 Railway 账号即可直接拉取。
+
+### 从 GitHub 仓库部署
+
 1. 在 Railway 新建 Project，选择 GitHub 仓库。
 2. 在服务的 **Variables** 中设置：
 
@@ -367,6 +377,20 @@ API 验证：
 curl https://<你的域名>/v1/models \
   -H "Authorization: Bearer sk-替换成你自己的随机密钥"
 ```
+
+### 从 GHCR 镜像部署
+
+1. 在另一个 Railway 账号中新建 Project，选择 **Deploy a Docker Image**。
+2. 镜像地址填写：
+
+```text
+ghcr.io/henryz78/notion_manager:latest
+```
+
+3. 添加与上面相同的 Variables。
+4. 添加 Volume，挂载到 `/app/accounts`。
+5. 在 **Networking** 中生成 Public Domain。
+6. 后续镜像更新后，在 Railway 的 Deployments 页面重新部署该服务以拉取最新的 `latest`。
 
 注意：
 
