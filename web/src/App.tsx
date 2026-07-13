@@ -698,7 +698,7 @@ export default function App() {
     setQuotaRefreshing(false)
   }
 
-  const toggleSetting = async (key: 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'debug_logging') => {
+  const toggleSetting = async (key: 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'use_notion_personal_instructions' | 'debug_logging') => {
     if (!settings) return
     const newVal = !settings[key]
     try {
@@ -1022,7 +1022,7 @@ export default function App() {
                     />
                   </div>
                 </div>
-                <div className="flex items-center gap-5 ml-auto">
+                <div className="flex items-center gap-5 ml-auto flex-wrap justify-end">
                   <label className="flex items-center gap-2 cursor-pointer select-none">
                     <button
                       onClick={() => toggleSetting('enable_web_search')}
@@ -1052,6 +1052,18 @@ export default function App() {
                       <span className={`absolute top-[2px] left-[2px] w-3 h-3 rounded-full transition-all duration-200 ${settings.ask_mode_default ? 'bg-white shadow-sm translate-x-[12px]' : 'bg-white/40'}`} />
                     </button>
                     <span className="text-[12px] text-text-primary">ASK 模式</span>
+                  </label>
+                  <label
+                    className="flex items-center gap-2 cursor-pointer select-none"
+                    title="关闭：使用项目现有提示词处理方式。开启：忽略客户端行为类 system prompt，使用当前 Notion 账号在官网保存的默认 Agent 个人指令；工具调用协议仍会保留。"
+                  >
+                    <button
+                      onClick={() => toggleSetting('use_notion_personal_instructions')}
+                      className={`relative w-7 h-4 rounded-full transition-colors duration-200 cursor-pointer border-none ${settings.use_notion_personal_instructions ? 'bg-[#4dab9a]' : 'bg-white/10 border border-white/5'}`}
+                    >
+                      <span className={`absolute top-[2px] left-[2px] w-3 h-3 rounded-full transition-all duration-200 ${settings.use_notion_personal_instructions ? 'bg-white shadow-sm translate-x-[12px]' : 'bg-white/40'}`} />
+                    </button>
+                    <span className="text-[12px] text-text-primary">官网个人指令</span>
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer select-none">
                     <button

@@ -44,12 +44,13 @@ type ServerConfig struct {
 }
 
 type ProxyConfig struct {
-	NotionAPIBase         string `yaml:"notion_api_base"`
-	ClientVersion         string `yaml:"client_version"`
-	DefaultModel          string `yaml:"default_model"`
-	DisableNotionPrompt   bool   `yaml:"disable_notion_prompt"`
-	EnableWebSearch       *bool  `yaml:"enable_web_search"`
-	EnableWorkspaceSearch *bool  `yaml:"enable_workspace_search"`
+	NotionAPIBase                 string `yaml:"notion_api_base"`
+	ClientVersion                 string `yaml:"client_version"`
+	DefaultModel                  string `yaml:"default_model"`
+	DisableNotionPrompt           bool   `yaml:"disable_notion_prompt"`
+	UseNotionPersonalInstructions bool   `yaml:"use_notion_personal_instructions"`
+	EnableWebSearch               *bool  `yaml:"enable_web_search"`
+	EnableWorkspaceSearch         *bool  `yaml:"enable_workspace_search"`
 	// AskModeDefault toggles Notion's ASK mode (frontend "Answers only,
 	// won't make edits" — config.useReadOnlyMode=true on the workflow
 	// thread). When true, all chat requests run in read-only mode by
@@ -124,12 +125,13 @@ func DefaultConfig() *Config {
 			NotionLogResp: false,
 		},
 		Proxy: ProxyConfig{
-			NotionAPIBase:         "https://www.notion.so/api/v3",
-			ClientVersion:         "23.13.20260313.1423",
-			DefaultModel:          "claude-opus-4.6",
-			EnableWebSearch:       boolPtr(true),
-			EnableWorkspaceSearch: boolPtr(false),
-			AskModeDefault:        boolPtr(false),
+			NotionAPIBase:                 "https://www.notion.so/api/v3",
+			ClientVersion:                 "23.13.20260313.1423",
+			DefaultModel:                  "claude-opus-4.6",
+			UseNotionPersonalInstructions: false,
+			EnableWebSearch:               boolPtr(true),
+			EnableWorkspaceSearch:         boolPtr(false),
+			AskModeDefault:                boolPtr(false),
 		},
 		Timeouts: TimeoutConfig{
 			InferenceTimeout: 300,
@@ -237,6 +239,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if v := os.Getenv("DEFAULT_MODEL"); v != "" {
 		cfg.Proxy.DefaultModel = v
+	}
+	if v := os.Getenv("USE_NOTION_PERSONAL_INSTRUCTIONS"); v != "" {
+		cfg.Proxy.UseNotionPersonalInstructions = strings.EqualFold(v, "true") || v == "1"
 	}
 	if v := os.Getenv("INFERENCE_TIMEOUT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -598,6 +603,13 @@ func (c *Config) AskModeDefault() bool {
 		return false
 	}
 	return *c.Proxy.AskModeDefault
+}
+
+// NotionPersonalInstructionsEnabled reports whether requests should use the
+// current Notion account's default Agent instructions page instead of client
+// system prompts. The default is false for backward compatibility.
+func (c *Config) NotionPersonalInstructionsEnabled() bool {
+	return c != nil && c.Proxy.UseNotionPersonalInstructions
 }
 
 // NotionProxyURL returns the upstream proxy applied to all notion-bound

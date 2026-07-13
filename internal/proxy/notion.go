@@ -1268,6 +1268,17 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 		return callResearcherInference(acc, messages, cb, &opt)
 	}
 
+	usePersonalInstructions := AppConfig.NotionPersonalInstructionsEnabled()
+	personalInstructionsPageID := ""
+	if usePersonalInstructions {
+		var err error
+		personalInstructionsPageID, err = fetchNotionPersonalInstructionsPageID(acc)
+		if err != nil {
+			return fmt.Errorf("load Notion personal instructions setting: %w", err)
+		}
+	}
+	disableBuiltinTools = effectiveDisableBuiltinTools(disableBuiltinTools, usePersonalInstructions)
+
 	notionModel := ResolveModel(model)
 	if notionModel != model {
 		log.Printf("[model] resolved %q → %q", model, notionModel)
@@ -1285,7 +1296,17 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 		if newUserContent == "" {
 			newUserContent = "continue"
 		}
-		transcript := buildPartialTranscript(acc, newUserContent, notionModel, disableBuiltinTools, enableWebSearch, opt.EnableWorkspaceSearch, opt.UseReadOnlyMode, session)
+		transcript := buildPartialTranscript(
+			acc,
+			newUserContent,
+			notionModel,
+			disableBuiltinTools,
+			enableWebSearch,
+			opt.EnableWorkspaceSearch,
+			opt.UseReadOnlyMode,
+			session,
+			personalInstructionsPageID,
+		)
 
 		reqBody = NotionInferenceRequest{
 			TraceID:                 generateUUIDv4(),
@@ -1320,7 +1341,21 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 			contextID = generateUUIDv4()
 			now = time.Now().Format(time.RFC3339Nano)
 		}
-		transcript := buildFullTranscript(acc, messages, notionModel, disableBuiltinTools, enableWebSearch, opt.EnableWorkspaceSearch, opt.UseReadOnlyMode, attachments, configID, contextID, now)
+		transcript := buildFullTranscript(
+			acc,
+			messages,
+			notionModel,
+			disableBuiltinTools,
+			enableWebSearch,
+			opt.EnableWorkspaceSearch,
+			opt.UseReadOnlyMode,
+			attachments,
+			configID,
+			contextID,
+			now,
+			usePersonalInstructions,
+			personalInstructionsPageID,
+		)
 
 		// When attachments are present, reuse the upload thread instead of creating a new one.
 		createThread := true
@@ -1408,6 +1443,18 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 	return parseNDJSONStream(reader, requestID, cb, opt.NativeToolUses, opt.ThinkingBlocks, opt.ThinkingCallback, opt.KnownCitationURLs, opt.KnownCitationDocs, opt.KnownToolCallURLs)
 }
 
+func effectiveDisableBuiltinTools(configuredDisable, usePersonalInstructions bool) bool {
+	// The official default Agent path uses Notion's workflow prompt chain
+	// with isCustomAgent=false and supplies the instructions page via the
+	// transcript context. Do not let disable_notion_prompt turn that chain
+	// off while this mode is active. Client tool-bridge prompts remain in
+	// the user transcript and continue to work as before.
+	if usePersonalInstructions {
+		return false
+	}
+	return configuredDisable
+}
+
 // buildConfigValue constructs the Notion config value map used in transcript config entries.
 // enableWorkspaceSearch: nil = use AppConfig default, non-nil = per-request override
 // useReadOnlyMode: when true, sets Notion's ASK-mode flag — model answers
@@ -1459,9 +1506,12 @@ func buildConfigValue(notionModel string, disableBuiltinTools bool, enableWebSea
 	return configValue
 }
 
-// buildContextValue constructs the Notion context value map used in transcript context entries.
-func buildContextValue(acc *Account, datetime string) map[string]interface{} {
-	return map[string]interface{}{
+// buildContextValue constructs the Notion context value map used in transcript
+// context entries. The official Notion frontend activates the default Agent's
+// personal instructions by placing the selected instructions page ID in
+// context_page_id while keeping config.isCustomAgent=false.
+func buildContextValue(acc *Account, datetime, personalInstructionsPageID string) map[string]interface{} {
+	value := map[string]interface{}{
 		"timezone":        acc.Timezone,
 		"userName":        acc.UserName,
 		"userId":          acc.UserID,
@@ -1472,14 +1522,18 @@ func buildContextValue(acc *Account, datetime string) map[string]interface{} {
 		"currentDatetime": datetime,
 		"surface":         "ai_module",
 	}
+	if personalInstructionsPageID != "" {
+		value["context_page_id"] = personalInstructionsPageID
+	}
+	return value
 }
 
 // buildFullTranscript builds a complete transcript for the first turn of a conversation.
 // Uses ResearcherTranscriptMsg (with id field) to match Notion's real client format.
-func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel string, disableBuiltinTools bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, configID, contextID, now string) []interface{} {
+func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel string, disableBuiltinTools bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, configID, contextID, now string, usePersonalInstructions bool, personalInstructionsPageID string) []interface{} {
 	hasAttachments := len(attachments) > 0
 	configValue := buildConfigValue(notionModel, disableBuiltinTools, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, hasAttachments, false)
-	contextValue := buildContextValue(acc, now)
+	contextValue := buildContextValue(acc, now, personalInstructionsPageID)
 
 	if hasAttachments {
 		contextValue["surface"] = "workflows"
@@ -1504,14 +1558,18 @@ func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel strin
 	}
 
 	// Convert OpenAI messages to Notion transcript format
-	// System messages → prepend to first user message
+	// Existing prompt mode: system messages → prepend to first user message.
+	// Notion personal-instructions mode: ignore client behavioral system
+	// prompts; tool/function-call bridge instructions remain in user messages.
 	// User messages → "user" type with id, userId, createdAt
 	// Assistant messages → "assistant-reply" type (only for first-turn full transcript)
 	var systemPrompt string
 	for _, msg := range messages {
 		switch msg.Role {
 		case "system":
-			systemPrompt += msg.Content + "\n"
+			if !usePersonalInstructions {
+				systemPrompt += msg.Content + "\n"
+			}
 		case "user":
 			content := msg.Content
 			if systemPrompt != "" {
@@ -1556,9 +1614,9 @@ func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel strin
 
 // buildPartialTranscript builds an incremental transcript for subsequent turns.
 // It includes: config + context (reused IDs) + N updated-config placeholders + new user message.
-func buildPartialTranscript(acc *Account, newUserContent string, notionModel string, disableBuiltinTools bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, session *Session) []interface{} {
+func buildPartialTranscript(acc *Account, newUserContent string, notionModel string, disableBuiltinTools bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, session *Session, personalInstructionsPageID string) []interface{} {
 	configValue := buildConfigValue(notionModel, disableBuiltinTools, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, false, true)
-	contextValue := buildContextValue(acc, session.OriginalDatetime)
+	contextValue := buildContextValue(acc, session.OriginalDatetime, personalInstructionsPageID)
 
 	transcript := []interface{}{
 		ResearcherTranscriptMsg{
@@ -1591,6 +1649,102 @@ func buildPartialTranscript(acc *Account, newUserContent string, notionModel str
 	})
 
 	return transcript
+}
+
+// fetchNotionPersonalInstructionsPageID loads only the selected account's
+// space_view metadata and returns the default Agent instructions page ID. It
+// deliberately does not load, parse, cache, or log the page contents.
+func fetchNotionPersonalInstructionsPageID(acc *Account) (string, error) {
+	req, err := http.NewRequest("POST", NotionAPIBase+"/loadUserContent", bytes.NewReader([]byte(`{}`)))
+	if err != nil {
+		return "", fmt.Errorf("create loadUserContent request: %w", err)
+	}
+	setNotionHeadersJSON(req, acc)
+
+	client := getChromeHTTPClient(AppConfig.APITimeoutDuration())
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("send loadUserContent request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("loadUserContent API error %d", resp.StatusCode)
+	}
+
+	var parsed notionPersonalInstructionsLoadUserContent
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return "", fmt.Errorf("parse loadUserContent response: %w", err)
+	}
+	return parsed.contextPageID(acc.SpaceViewID, acc.SpaceID), nil
+}
+
+type notionAgentPersonalizationSettings struct {
+	ContextPageID string `json:"context_page_id"`
+}
+
+type notionSpaceViewValue struct {
+	ID       string `json:"id"`
+	SpaceID  string `json:"space_id"`
+	Settings struct {
+		AgentPersonalizationSettings notionAgentPersonalizationSettings `json:"agent_personalization_settings"`
+	} `json:"settings"`
+}
+
+type notionSpaceViewRecord struct {
+	Value struct {
+		Value    *notionSpaceViewValue `json:"value"`
+		ID       string                `json:"id"`
+		SpaceID  string                `json:"space_id"`
+		Settings struct {
+			AgentPersonalizationSettings notionAgentPersonalizationSettings `json:"agent_personalization_settings"`
+		} `json:"settings"`
+	} `json:"value"`
+}
+
+type notionPersonalInstructionsLoadUserContent struct {
+	RecordMap struct {
+		SpaceView map[string]notionSpaceViewRecord `json:"space_view"`
+	} `json:"recordMap"`
+}
+
+func (r notionSpaceViewRecord) value() notionSpaceViewValue {
+	if r.Value.Value != nil {
+		return *r.Value.Value
+	}
+	var value notionSpaceViewValue
+	value.ID = r.Value.ID
+	value.SpaceID = r.Value.SpaceID
+	value.Settings.AgentPersonalizationSettings = r.Value.Settings.AgentPersonalizationSettings
+	return value
+}
+
+func (r notionPersonalInstructionsLoadUserContent) contextPageID(spaceViewID, spaceID string) string {
+	if record, ok := r.RecordMap.SpaceView[spaceViewID]; ok {
+		return strings.TrimSpace(record.value().Settings.AgentPersonalizationSettings.ContextPageID)
+	}
+
+	// Old account files can lack space_view_id. Match by workspace instead,
+	// but never fall back to another workspace's settings.
+	for _, record := range r.RecordMap.SpaceView {
+		value := record.value()
+		if value.SpaceID == spaceID {
+			return strings.TrimSpace(value.Settings.AgentPersonalizationSettings.ContextPageID)
+		}
+	}
+
+	return ""
+}
+
+// extractNotionPersonalInstructionsPageID parses the space_view settings from
+// loadUserContent. It accepts both record-map envelope shapes observed in
+// Notion responses and never inspects the referenced block/page record.
+func extractNotionPersonalInstructionsPageID(body []byte, spaceViewID, spaceID string) (string, error) {
+	var parsed notionPersonalInstructionsLoadUserContent
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", err
+	}
+	return parsed.contextPageID(spaceViewID, spaceID), nil
 }
 
 func setNotionHeaders(req *http.Request, acc *Account) {

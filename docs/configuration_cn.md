@@ -33,6 +33,7 @@
 | `proxy.client_version` | `23.13.20260313.1423` | 同左 | `x-notion-client-version` 请求头 |
 | `proxy.default_model` | `claude-opus-4.6` | `claude-opus-4.6` | 请求未传 `model` 时的回退 |
 | `proxy.disable_notion_prompt` | `true` | `false` | 关闭 Notion 内置 ~33k 系统提示，节省输入 token |
+| `proxy.use_notion_personal_instructions` | `false` | `false` | `false`：保留现有客户端 system prompt 处理；`true`：使用所选账号官网默认 Notion Agent 的个人指令页面，项目只读取页面 ID、不读取正文 |
 | `proxy.enable_web_search` | `true` | `true` | 联网搜索全局开关（可被请求头覆盖） |
 | `proxy.enable_workspace_search` | `false` | `false` | 工作区搜索全局开关（可被请求头覆盖） |
 | `proxy.ask_mode_default` | 未设置 | `false` | 为 `true` 时所有对话默认走 `useReadOnlyMode=true`（即 Notion 前端的 “Ask” 开关）；请求级 `-ask` 后缀仍可覆盖 |
@@ -69,6 +70,7 @@ export API_KEY=sk-your-api-key
 export ENABLE_WEB_SEARCH=true
 export ENABLE_WORKSPACE_SEARCH=false
 export ASK_MODE_DEFAULT=false
+export USE_NOTION_PERSONAL_INSTRUCTIONS=false
 export NOTION_PROXY=socks5h://127.0.0.1:1080
 export QUOTA_LIVE_CHECK_SECONDS=5
 export REFRESH_CONCURRENCY=10
@@ -89,7 +91,7 @@ export REFRESH_CONCURRENCY=10
 | `DELETE /admin/accounts/{email}` | 删除账号 JSON + 池中条目 | Dashboard 会话 |
 | `GET /admin/models` | 模型映射 + 池内可用模型 | Dashboard 会话 |
 | `GET/POST /admin/refresh` | 查询 / 触发刷新 | Dashboard 会话 |
-| `GET/PUT /admin/settings` | 读 / 写运行时设置（`enable_web_search` / `enable_workspace_search` / `ask_mode_default` / `debug_logging` / `notion_proxy`） | Dashboard 会话 |
+| `GET/PUT /admin/settings` | 读 / 写运行时设置（`enable_web_search` / `enable_workspace_search` / `ask_mode_default` / `use_notion_personal_instructions` / `debug_logging` / `notion_proxy`） | Dashboard 会话 |
 | `GET /admin/stats` | Token 用量统计（累计 + 今日 + 24h + 30 天序列 + Top‑N） | Dashboard 会话 |
 | `POST /admin/register` | 兼容历史的同步批量注册 | Dashboard 会话 |
 | `GET /admin/register/providers` | Provider 列表 | Dashboard 会话 |

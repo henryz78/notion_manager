@@ -261,21 +261,23 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 		switch r.Method {
 		case "GET":
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"enable_web_search":       AppConfig.WebSearchEnabled(),
-				"enable_workspace_search": AppConfig.WorkspaceSearchEnabled(),
-				"ask_mode_default":        AppConfig.AskModeDefault(),
-				"disable_notion_prompt":   AppConfig.Proxy.DisableNotionPrompt,
-				"debug_logging":           AppConfig.Server.DebugLogging,
-				"notion_proxy":            AppConfig.NotionProxyURL(),
+				"enable_web_search":                AppConfig.WebSearchEnabled(),
+				"enable_workspace_search":          AppConfig.WorkspaceSearchEnabled(),
+				"ask_mode_default":                 AppConfig.AskModeDefault(),
+				"disable_notion_prompt":            AppConfig.Proxy.DisableNotionPrompt,
+				"use_notion_personal_instructions": AppConfig.NotionPersonalInstructionsEnabled(),
+				"debug_logging":                    AppConfig.Server.DebugLogging,
+				"notion_proxy":                     AppConfig.NotionProxyURL(),
 			})
 
 		case "PUT":
 			var body struct {
-				EnableWebSearch       *bool   `json:"enable_web_search"`
-				EnableWorkspaceSearch *bool   `json:"enable_workspace_search"`
-				AskModeDefault        *bool   `json:"ask_mode_default"`
-				DebugLogging          *bool   `json:"debug_logging"`
-				NotionProxy           *string `json:"notion_proxy"`
+				EnableWebSearch               *bool   `json:"enable_web_search"`
+				EnableWorkspaceSearch         *bool   `json:"enable_workspace_search"`
+				AskModeDefault                *bool   `json:"ask_mode_default"`
+				UseNotionPersonalInstructions *bool   `json:"use_notion_personal_instructions"`
+				DebugLogging                  *bool   `json:"debug_logging"`
+				NotionProxy                   *string `json:"notion_proxy"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
@@ -284,6 +286,7 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 
 			changed := false
 			rebuildTransport := false
+			clearSessions := false
 			if body.EnableWebSearch != nil {
 				AppConfig.Proxy.EnableWebSearch = body.EnableWebSearch
 				changed = true
@@ -298,6 +301,14 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				AppConfig.Proxy.AskModeDefault = body.AskModeDefault
 				changed = true
 				log.Printf("[settings] ask_mode_default → %v", *body.AskModeDefault)
+			}
+			if body.UseNotionPersonalInstructions != nil {
+				if AppConfig.Proxy.UseNotionPersonalInstructions != *body.UseNotionPersonalInstructions {
+					AppConfig.Proxy.UseNotionPersonalInstructions = *body.UseNotionPersonalInstructions
+					changed = true
+					clearSessions = true
+					log.Printf("[settings] use_notion_personal_instructions → %v", *body.UseNotionPersonalInstructions)
+				}
 			}
 			if body.DebugLogging != nil {
 				AppConfig.Server.DebugLogging = *body.DebugLogging
@@ -339,14 +350,18 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 			if rebuildTransport {
 				RebuildChromeTransport()
 			}
+			if clearSessions {
+				globalSessionManager.Clear()
+			}
 
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"enable_web_search":       AppConfig.WebSearchEnabled(),
-				"enable_workspace_search": AppConfig.WorkspaceSearchEnabled(),
-				"ask_mode_default":        AppConfig.AskModeDefault(),
-				"disable_notion_prompt":   AppConfig.Proxy.DisableNotionPrompt,
-				"debug_logging":           AppConfig.Server.DebugLogging,
-				"notion_proxy":            AppConfig.NotionProxyURL(),
+				"enable_web_search":                AppConfig.WebSearchEnabled(),
+				"enable_workspace_search":          AppConfig.WorkspaceSearchEnabled(),
+				"ask_mode_default":                 AppConfig.AskModeDefault(),
+				"disable_notion_prompt":            AppConfig.Proxy.DisableNotionPrompt,
+				"use_notion_personal_instructions": AppConfig.NotionPersonalInstructionsEnabled(),
+				"debug_logging":                    AppConfig.Server.DebugLogging,
+				"notion_proxy":                     AppConfig.NotionProxyURL(),
 			})
 
 		default:
@@ -374,6 +389,7 @@ func persistSearchSettings(configPath string) {
 		setYAMLBool(proxyNode, "enable_web_search", AppConfig.WebSearchEnabled())
 		setYAMLBool(proxyNode, "enable_workspace_search", AppConfig.WorkspaceSearchEnabled())
 		setYAMLBool(proxyNode, "ask_mode_default", AppConfig.AskModeDefault())
+		setYAMLBool(proxyNode, "use_notion_personal_instructions", AppConfig.NotionPersonalInstructionsEnabled())
 		setYAMLString(proxyNode, "notion_proxy", AppConfig.Proxy.NotionProxy)
 
 		serverNode := getOrCreateYAMLMapping(mapping, "server")

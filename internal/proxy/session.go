@@ -102,6 +102,15 @@ func (sm *SessionManager) DeleteByAccount(email string) {
 	}
 }
 
+// Clear removes every active thread binding. Prompt-mode changes call this so
+// a conversation created with client system prompts is never reused after
+// switching to Notion personal instructions (or vice versa).
+func (sm *SessionManager) Clear() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	clear(sm.sessions)
+}
+
 // Count returns the number of active sessions.
 func (sm *SessionManager) Count() int {
 	sm.mu.RLock()
@@ -291,7 +300,7 @@ func needsFreshThreadRecovery(messages []ChatMessage) bool {
 // buildFreshThreadRecoveryMessages collapses prior conversation state into a
 // single self-contained user prompt for use when we must recover onto a brand
 // new Notion thread (for example after session loss or account failover).
-func buildRecoveryMessages(messages []ChatMessage, skipEntry func(ChatMessage, string) bool) []ChatMessage {
+func buildRecoveryMessages(messages []ChatMessage, includeSystem bool, skipEntry func(ChatMessage, string) bool) []ChatMessage {
 	if !needsFreshThreadRecovery(messages) {
 		return messages
 	}
@@ -321,9 +330,11 @@ func buildRecoveryMessages(messages []ChatMessage, skipEntry func(ChatMessage, s
 	}
 
 	var systemParts []string
-	for _, m := range messages {
-		if m.Role == "system" && strings.TrimSpace(m.Content) != "" {
-			systemParts = append(systemParts, strings.TrimSpace(m.Content))
+	if includeSystem {
+		for _, m := range messages {
+			if m.Role == "system" && strings.TrimSpace(m.Content) != "" {
+				systemParts = append(systemParts, strings.TrimSpace(m.Content))
+			}
 		}
 	}
 
@@ -413,11 +424,11 @@ func buildRecoveryMessages(messages []ChatMessage, skipEntry func(ChatMessage, s
 }
 
 func buildFreshThreadRecoveryMessages(messages []ChatMessage) []ChatMessage {
-	return buildRecoveryMessages(messages, nil)
+	return buildRecoveryMessages(messages, !AppConfig.NotionPersonalInstructionsEnabled(), nil)
 }
 
 func buildToolBridgeRecoveryMessages(messages []ChatMessage) []ChatMessage {
-	return buildRecoveryMessages(messages, func(msg ChatMessage, content string) bool {
+	return buildRecoveryMessages(messages, !AppConfig.NotionPersonalInstructionsEnabled(), func(msg ChatMessage, content string) bool {
 		return msg.Role == "assistant" && detectToolBridgeNoToolResponse(content)
 	})
 }

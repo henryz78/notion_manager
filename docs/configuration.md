@@ -33,6 +33,7 @@ environment variables > config.yaml > code defaults
 | `proxy.client_version` | `23.13.20260313.1423` | same | `x-notion-client-version` header |
 | `proxy.default_model` | `claude-opus-4.6` | `claude-opus-4.6` | Fallback model when request omits one |
 | `proxy.disable_notion_prompt` | `true` | `false` | Removes Notion's ~33k system prompt for leaner API usage |
+| `proxy.use_notion_personal_instructions` | `false` | `false` | `false`: preserve existing client system-prompt behavior. `true`: use the selected account's default Notion Agent instructions page; only the page ID is read, never its contents |
 | `proxy.enable_web_search` | `true` | `true` | Global web-search toggle (overridable per-request) |
 | `proxy.enable_workspace_search` | `false` | `false` | Global workspace-search toggle (overridable per-request) |
 | `proxy.ask_mode_default` | unset | `false` | When `true`, every chat runs with `useReadOnlyMode=true` (Notion's "Ask" toggle) — the per-request `-ask` suffix overrides this |
@@ -69,6 +70,7 @@ export API_KEY=sk-your-api-key
 export ENABLE_WEB_SEARCH=true
 export ENABLE_WORKSPACE_SEARCH=false
 export ASK_MODE_DEFAULT=false
+export USE_NOTION_PERSONAL_INSTRUCTIONS=false
 export NOTION_PROXY=socks5h://127.0.0.1:1080
 export QUOTA_LIVE_CHECK_SECONDS=5
 export REFRESH_CONCURRENCY=10
@@ -89,7 +91,7 @@ An invalid `NOTION_PROXY` is logged once at startup and dropped — runtime fall
 | `DELETE /admin/accounts/{email}` | Remove account file + pool entry | Dashboard session |
 | `GET /admin/models` | Model mapping + pool-discovered models | Dashboard session |
 | `GET/POST /admin/refresh` | Refresh status / trigger refresh | Dashboard session |
-| `GET/PUT /admin/settings` | Read / update runtime settings (`enable_web_search`, `enable_workspace_search`, `ask_mode_default`, `debug_logging`, `notion_proxy`) | Dashboard session |
+| `GET/PUT /admin/settings` | Read / update runtime settings (`enable_web_search`, `enable_workspace_search`, `ask_mode_default`, `use_notion_personal_instructions`, `debug_logging`, `notion_proxy`) | Dashboard session |
 | `GET /admin/stats` | Token usage statistics (lifetime + today + 24h + 30-day series + top-N) | Dashboard session |
 | `POST /admin/register` | Legacy synchronous bulk register (kept for back-compat) | Dashboard session |
 | `GET /admin/register/providers` | List registered Providers | Dashboard session |

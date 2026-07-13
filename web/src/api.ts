@@ -250,6 +250,9 @@ export interface SearchSettings {
   // overrides this default for a single call.
   ask_mode_default: boolean
   disable_notion_prompt: boolean
+  // When enabled, the proxy ignores client behavioral system prompts and
+  // supplies the current Notion account's default Agent instructions page ID.
+  use_notion_personal_instructions: boolean
   debug_logging: boolean
   // notion_proxy is the global upstream proxy applied to every Notion-bound
   // outbound connection. Empty string means "direct dial". Editing this
@@ -265,7 +268,7 @@ export async function fetchSettings(): Promise<SearchSettings> {
   return resp.json()
 }
 
-export async function updateSettings(settings: Partial<Pick<SearchSettings, 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'debug_logging' | 'notion_proxy'>>): Promise<SearchSettings> {
+export async function updateSettings(settings: Partial<Pick<SearchSettings, 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'use_notion_personal_instructions' | 'debug_logging' | 'notion_proxy'>>): Promise<SearchSettings> {
   // Uses dashboard session cookie for auth (not API key)
   const resp = await fetch('/admin/settings', {
     method: 'PUT',
