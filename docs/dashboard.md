@@ -19,7 +19,7 @@ After signing in through `/dashboard/`, the frontend uses the `dashboard_session
 - `/admin/register` (legacy synchronous) and `/admin/register/*` (Job-based)
 - `/proxy/start`
 
-Login uses client-side SHA256(salt + password) so the plaintext password never traverses the network — see `internal/proxy/dashboard.go`.
+Login uses client-side SHA256(salt + password) so the plaintext password never traverses the network — see `internal/proxy/dashboard.go`. A signed, HttpOnly dashboard cookie remains valid for 30 days and survives Railway sleep/restarts; signing-secret changes and explicit logout invalidate it.
 
 ## Pool view
 

@@ -32,6 +32,8 @@ curl http://localhost:3000/v1/messages \
 ```
 
 如果不传 `model`，会自动使用 `proxy.default_model`。
+请通过 `GET /v1/models` 获取准确的可用模型 ID。模型名不存在、拼错或版本不可用时返回
+`404 not_found_error`，服务端不会再偷偷换成其他版本。
 
 ## 请求头
 
@@ -50,7 +52,7 @@ curl http://localhost:3000/v1/messages \
 Notion 前端有一个 **Ask** 开关，开启后模型只能回答、不会编辑页面、也不会调用 tool。notion-manager 暴露两种触发方式：
 
 1. **全局默认**：在 `config.yaml` 中 `proxy.ask_mode_default: true`，或在 Dashboard `Settings` 面板里实时切换。
-2. **请求级后缀**：在模型名末尾追加 `-ask`，server 端在模型解析前会剥掉这个后缀，因此任何别名都能用：
+2. **请求级后缀**：在准确的可用模型 ID 末尾追加 `-ask`，server 端会先剥掉后缀，再进行严格模型校验：
 
 ```bash
 # 即便全局默认是 off，这一次也强制只读

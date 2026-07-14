@@ -67,6 +67,9 @@
 ```bash
 export PORT=3000
 export API_KEY=sk-your-api-key
+export ADMIN_PASSWORD=your-dashboard-password
+# 可选的 Dashboard 登录签名密钥；不填时自动使用 ADMIN_PASSWORD。
+export DASHBOARD_SESSION_SECRET=your-stable-random-secret
 export ENABLE_WEB_SEARCH=true
 export ENABLE_WORKSPACE_SEARCH=false
 export ASK_MODE_DEFAULT=false

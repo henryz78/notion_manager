@@ -19,7 +19,7 @@
 - `/admin/register`（旧同步接口）和 `/admin/register/*`（基于 Job 的接口）
 - `/proxy/start`
 
-登录密码使用客户端 SHA256(salt + password)，明文密码永远不离开浏览器，详见 `internal/proxy/dashboard.go`。
+登录密码使用客户端 SHA256(salt + password)，明文密码永远不离开浏览器，详见 `internal/proxy/dashboard.go`。登录后写入的 HttpOnly 签名 cookie 有效期为 30 天，Railway 休眠、重启或更换容器后仍然有效；主动退出或修改签名密钥后会失效。
 
 ## 池视图
 

@@ -39,6 +39,11 @@ var ErrResearchQuotaExhausted = errors.New("research mode usage limit exceeded")
 // This typically means the account/thread is in a bad state and should be retried.
 var ErrEmptyResponse = errors.New("empty response from inference")
 
+// ErrModelNotFound is returned when a client requests a model ID that is not
+// present in the current Notion model map. Unknown names must never be sent to
+// Notion because Notion can silently fall back to a different default model.
+var ErrModelNotFound = errors.New("model not found")
+
 var (
 	NotionAPIBase        = "https://www.notion.so/api/v3"
 	DefaultClientVersion = "23.13.20260313.1423"
@@ -102,66 +107,107 @@ func ApplyConfig(cfg *Config) {
 	SetNotionResponseLoggingEnabled(cfg.Server.NotionLogResp)
 }
 
-// anthropicModelAliases maps Anthropic SDK model names to our friendly aliases
-var anthropicModelAliases = map[string]string{
-	"claude-opus-4.6":   "opus-4.6",
-	"claude-opus-4-6":   "opus-4.6",
-	"claude-opus-4-5":   "opus-4.6", // older version → best available opus
-	"claude-sonnet-4.6": "sonnet-4.6",
-	"claude-sonnet-4-6": "sonnet-4.6",
-	"claude-haiku-4.5":  "haiku-4.5",
-	"claude-haiku-4-5":  "haiku-4.5",
-	"claude-sonnet-4-5": "sonnet-4.5",
-	"claude-opus-4":     "opus-4",
-	"claude-sonnet-4":   "sonnet-4",
-	"claude-haiku-3-5":  "haiku-3.5",
+// ResolveModel maps a supported public/OpenAI/Anthropic model ID to Notion's
+// internal model ID. It deliberately performs no family-based fallback:
+// requesting a missing or misspelled version must fail instead of silently
+// running another model.
+func ResolveModel(model string) (string, bool) {
+	snap := SnapshotModelMap()
+	for _, candidate := range modelResolutionCandidates(model) {
+		if id, ok := snap[candidate]; ok {
+			return id, true
+		}
+	}
+	return "", false
 }
 
-// ResolveModel maps OpenAI/Anthropic model name → Notion internal model name
-func ResolveModel(model string) string {
-	snap := SnapshotModelMap()
-	// Direct match
-	if id, ok := snap[model]; ok {
-		return id
+// modelResolutionCandidates returns only equivalent spellings of the same
+// requested model version. It never substitutes a newer/older family member.
+func modelResolutionCandidates(model string) []string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
 	}
-	// Try Anthropic alias (e.g. "claude-opus-4-6" → "opus-4.6")
-	if alias, ok := anthropicModelAliases[model]; ok {
-		if id, ok2 := snap[alias]; ok2 {
-			return id
+
+	var candidates []string
+	seen := make(map[string]bool)
+	add := func(candidate string) {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || seen[candidate] {
+			return
 		}
+		seen[candidate] = true
+		candidates = append(candidates, candidate)
 	}
-	// Strip date suffix (e.g. "claude-opus-4-6-20250929" → "claude-opus-4-6")
-	if idx := strings.LastIndex(model, "-2"); idx > 0 && len(model)-idx >= 9 {
-		stripped := model[:idx]
-		if id, ok := snap[stripped]; ok {
-			return id
-		}
-		if alias, ok := anthropicModelAliases[stripped]; ok {
-			if id, ok2 := snap[alias]; ok2 {
-				return id
+
+	addEquivalent := func(candidate string) {
+		add(candidate)
+
+		canonical := canonicalClaudeModelID(candidate)
+		add(canonical)
+
+		// The built-in/default config historically uses keys such as
+		// "opus-4.6", while the public API exposes "claude-opus-4.6".
+		// These are equivalent names for the exact same version.
+		if strings.HasPrefix(canonical, "claude-") {
+			withoutProvider := strings.TrimPrefix(canonical, "claude-")
+			if isClaudeFamilyName(withoutProvider) {
+				add(withoutProvider)
 			}
 		}
 	}
-	// Fuzzy fallback: map unrecognized models by family keyword
-	lower := strings.ToLower(model)
-	switch {
-	case strings.Contains(lower, "opus"):
-		if id, ok := snap["opus-4.6"]; ok {
-			log.Printf("[model] fuzzy fallback %q → opus-4.6", model)
-			return id
-		}
-	case strings.Contains(lower, "sonnet"):
-		if id, ok := snap["sonnet-4.6"]; ok {
-			log.Printf("[model] fuzzy fallback %q → sonnet-4.6", model)
-			return id
-		}
-	case strings.Contains(lower, "haiku"):
-		if id, ok := snap["haiku-4.5"]; ok {
-			log.Printf("[model] fuzzy fallback %q → haiku-4.5", model)
-			return id
+
+	addEquivalent(model)
+
+	// Anthropic dated IDs append "-YYYYMMDD". Strip only that exact shape,
+	// then resolve the remaining version without changing it.
+	if stripped, ok := stripModelDateSuffix(model); ok {
+		addEquivalent(stripped)
+	}
+
+	return candidates
+}
+
+func stripModelDateSuffix(model string) (string, bool) {
+	idx := strings.LastIndex(model, "-")
+	if idx <= 0 || len(model)-idx != 9 {
+		return model, false
+	}
+	for _, r := range model[idx+1:] {
+		if r < '0' || r > '9' {
+			return model, false
 		}
 	}
-	return model
+	return model[:idx], true
+}
+
+// canonicalClaudeModelID converts Anthropic's dash-separated version spelling
+// (for example claude-opus-4-8) to the public dotted spelling
+// (claude-opus-4.8). It does not alter the requested version number.
+func canonicalClaudeModelID(model string) string {
+	parts := strings.Split(model, "-")
+	if len(parts) != 4 || parts[0] != "claude" {
+		return model
+	}
+	if parts[1] != "opus" && parts[1] != "sonnet" && parts[1] != "haiku" {
+		return model
+	}
+	if !isDecimalDigits(parts[2]) || !isDecimalDigits(parts[3]) {
+		return model
+	}
+	return strings.Join(parts[:3], "-") + "." + parts[3]
+}
+
+func isDecimalDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // StreamCallback is called for each text delta during streaming
@@ -1222,7 +1268,7 @@ func IsResearcherModel(model string) bool {
 // StripAskModeSuffix strips a trailing "-ask" mode suffix from the model
 // name and returns (stripped, askEnabled). The suffix is matched
 // case-insensitively. Callers should run this BEFORE ResolveModel so the
-// fuzzy keyword matcher (opus/sonnet/haiku) sees the canonical name.
+// strict resolver sees the canonical model ID without the mode suffix.
 //
 // Examples:
 //
@@ -1279,7 +1325,10 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 	}
 	disableBuiltinTools = effectiveDisableBuiltinTools(disableBuiltinTools, usePersonalInstructions)
 
-	notionModel := ResolveModel(model)
+	notionModel, ok := ResolveModel(model)
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrModelNotFound, model)
+	}
 	if notionModel != model {
 		log.Printf("[model] resolved %q → %q", model, notionModel)
 	}

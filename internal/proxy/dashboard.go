@@ -1,12 +1,16 @@
 package proxy
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"notion-manager/internal/web"
@@ -14,16 +18,25 @@ import (
 
 // DashboardAuth manages dashboard session authentication.
 type DashboardAuth struct {
-	adminPasswordHash string   // "$sha256$salt$hash" format
-	apiKey            string   // API key for /admin/* endpoints
-	sessions          sync.Map // sessionID → expiry time
+	adminPasswordHash string // "$sha256$salt$hash" format
+	sessionSecret     string // stable secret used to sign persistent sessions
 }
 
+const (
+	dashboardSessionCookieName = "dashboard_session"
+	dashboardSessionVersion    = "v1"
+	dashboardSessionDuration   = 30 * 24 * time.Hour
+)
+
 // NewDashboardAuth creates a new auth manager.
-func NewDashboardAuth(adminPasswordHash, apiKey string) *DashboardAuth {
+func NewDashboardAuth(adminPasswordHash, _ string, sessionSecrets ...string) *DashboardAuth {
+	sessionSecret := adminPasswordHash
+	if len(sessionSecrets) > 0 && sessionSecrets[0] != "" {
+		sessionSecret = sessionSecrets[0]
+	}
 	return &DashboardAuth{
 		adminPasswordHash: adminPasswordHash,
-		apiKey:            apiKey,
+		sessionSecret:     sessionSecret,
 	}
 }
 
@@ -32,41 +45,78 @@ func (da *DashboardAuth) HasAdminPassword() bool {
 	return da.adminPasswordHash != "" && IsAdminPasswordHashed(da.adminPasswordHash)
 }
 
-// ValidateSession checks if a dashboard session cookie is valid.
+// ValidateSession checks the signed dashboard cookie. The cookie is stateless,
+// so it remains valid when Railway sleeps, restarts, or replaces the container.
 func (da *DashboardAuth) ValidateSession(r *http.Request) bool {
-	c, err := r.Cookie("dashboard_session")
+	c, err := r.Cookie(dashboardSessionCookieName)
 	if err != nil {
 		return false
 	}
-	if exp, ok := da.sessions.Load(c.Value); ok {
-		if exp.(time.Time).After(time.Now()) {
-			return true
-		}
-		da.sessions.Delete(c.Value) // expired
-	}
-	return false
+	return da.validateSessionToken(c.Value, time.Now())
 }
 
 // CreateSession creates a new dashboard session and sets the cookie.
 func (da *DashboardAuth) CreateSession(w http.ResponseWriter) {
-	id := generateUUIDv4()
-	expiry := time.Now().Add(24 * time.Hour)
-	da.sessions.Store(id, expiry)
+	now := time.Now()
+	expiry := now.Add(dashboardSessionDuration)
 	http.SetCookie(w, &http.Cookie{
-		Name: "dashboard_session", Value: id, Path: "/",
-		HttpOnly: true, MaxAge: 86400, SameSite: http.SameSiteLaxMode,
+		Name:     dashboardSessionCookieName,
+		Value:    da.newSessionToken(now),
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   int(dashboardSessionDuration / time.Second),
+		Expires:  expiry,
+		SameSite: http.SameSiteLaxMode,
 	})
 }
 
-// DestroySession removes the dashboard session.
-func (da *DashboardAuth) DestroySession(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie("dashboard_session"); err == nil {
-		da.sessions.Delete(c.Value)
-	}
+// DestroySession clears the browser's signed session cookie.
+func (da *DashboardAuth) DestroySession(w http.ResponseWriter, _ *http.Request) {
 	http.SetCookie(w, &http.Cookie{
-		Name: "dashboard_session", Value: "", Path: "/",
+		Name: dashboardSessionCookieName, Value: "", Path: "/",
 		HttpOnly: true, MaxAge: -1,
 	})
+}
+
+func (da *DashboardAuth) newSessionToken(now time.Time) string {
+	expiresAt := now.Add(dashboardSessionDuration).Unix()
+	nonce := strings.ReplaceAll(generateUUIDv4(), "-", "")
+	payload := fmt.Sprintf("%s.%d.%s", dashboardSessionVersion, expiresAt, nonce)
+	return payload + "." + da.signSessionPayload(payload)
+}
+
+func (da *DashboardAuth) validateSessionToken(token string, now time.Time) bool {
+	parts := strings.Split(token, ".")
+	if len(parts) != 4 || parts[0] != dashboardSessionVersion || parts[2] == "" || parts[3] == "" {
+		return false
+	}
+
+	expiresAt, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || expiresAt <= now.Unix() {
+		return false
+	}
+
+	payload := strings.Join(parts[:3], ".")
+	providedSignature, err := base64.RawURLEncoding.DecodeString(parts[3])
+	if err != nil {
+		return false
+	}
+	expectedSignature, err := base64.RawURLEncoding.DecodeString(da.signSessionPayload(payload))
+	if err != nil {
+		return false
+	}
+	return hmac.Equal(providedSignature, expectedSignature)
+}
+
+func (da *DashboardAuth) signSessionPayload(payload string) string {
+	mac := hmac.New(sha256.New, da.sessionSigningKey())
+	_, _ = mac.Write([]byte(payload))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func (da *DashboardAuth) sessionSigningKey() []byte {
+	digest := sha256.Sum256([]byte("notion-manager/dashboard-session/v1\x00" + da.sessionSecret))
+	return digest[:]
 }
 
 // RequireAuth is middleware that checks for valid dashboard session.

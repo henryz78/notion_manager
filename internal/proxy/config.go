@@ -26,6 +26,11 @@ type Config struct {
 	Browser  BrowserConfig     `yaml:"browser"`
 	Register RegisterConfig    `yaml:"register"`
 	ModelMap map[string]string `yaml:"model_map"`
+
+	// dashboardSessionSecret retains the stable pre-hash ADMIN_PASSWORD (or
+	// DASHBOARD_SESSION_SECRET) so signed dashboard cookies survive restarts
+	// even when a plaintext environment password is salted again at startup.
+	dashboardSessionSecret string `yaml:"-"`
 }
 
 type ServerConfig struct {
@@ -209,6 +214,10 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if v := os.Getenv("ADMIN_PASSWORD"); v != "" {
 		cfg.Server.AdminPassword = v
+		cfg.dashboardSessionSecret = v
+	}
+	if v := os.Getenv("DASHBOARD_SESSION_SECRET"); v != "" {
+		cfg.dashboardSessionSecret = v
 	}
 	if v := os.Getenv("LOG_FILE"); v != "" {
 		cfg.Server.LogFile = v
@@ -339,6 +348,18 @@ func LoadConfig(configPath string) (*Config, error) {
 		log.Printf("[config] %s not found, using defaults", configPath)
 	}
 	return cfg, nil
+}
+
+// DashboardSessionSecret returns stable key material for stateless dashboard
+// cookies. It is intentionally not serialized or exposed by dashboard APIs.
+func (c *Config) DashboardSessionSecret() string {
+	if c == nil {
+		return ""
+	}
+	if c.dashboardSessionSecret != "" {
+		return c.dashboardSessionSecret
+	}
+	return c.Server.AdminPassword
 }
 
 // GenerateApiKey generates a random 32-character hex API key (sk-xxxx format)

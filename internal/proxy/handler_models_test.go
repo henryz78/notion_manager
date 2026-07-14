@@ -121,8 +121,49 @@ func TestResolveModelAcceptsClaudeDotAliases(t *testing.T) {
 	}
 
 	for input, want := range tests {
-		if got := ResolveModel(input); got != want {
+		got, ok := ResolveModel(input)
+		if !ok {
+			t.Fatalf("ResolveModel(%q) unexpectedly failed", input)
+		}
+		if got != want {
 			t.Fatalf("ResolveModel(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestResolveModelRejectsUnknownClaudeVersions(t *testing.T) {
+	original := SnapshotModelMap()
+	ReplaceModelMap(map[string]string{
+		"opus-4.6":        "notion-opus-46",
+		"claude-opus-4.8": "notion-opus-48",
+	})
+	t.Cleanup(func() {
+		ReplaceModelMap(original)
+	})
+
+	valid := map[string]string{
+		"claude-opus-4.8":          "notion-opus-48",
+		"claude-opus-4-8":          "notion-opus-48",
+		"claude-opus-4-8-20260713": "notion-opus-48",
+		"claude-opus-4.6":          "notion-opus-46",
+	}
+	for input, want := range valid {
+		got, ok := ResolveModel(input)
+		if !ok || got != want {
+			t.Fatalf("ResolveModel(%q) = (%q, %v), want (%q, true)", input, got, ok, want)
+		}
+	}
+
+	invalid := []string{
+		"claude-opus-4.9",
+		"claude-opus-4-9",
+		"claude-opus-4-5",
+		"opus-4.8",
+		"totally-not-opus",
+	}
+	for _, input := range invalid {
+		if got, ok := ResolveModel(input); ok {
+			t.Fatalf("ResolveModel(%q) = (%q, true), want rejection", input, got)
 		}
 	}
 }

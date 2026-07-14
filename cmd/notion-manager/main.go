@@ -179,7 +179,7 @@ func main() {
 	registry.Register(microsoft.New())
 
 	apiKey := cfg.Server.ApiKey
-	dashAuth := proxy.NewDashboardAuth(cfg.Server.AdminPassword, apiKey)
+	dashAuth := proxy.NewDashboardAuth(cfg.Server.AdminPassword, apiKey, cfg.DashboardSessionSecret())
 
 	regDeps := &proxy.RegisterJobsDeps{
 		Pool:        pool,

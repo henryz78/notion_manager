@@ -67,6 +67,9 @@ Every `server.*`, `proxy.*`, `timeouts.*`, `refresh.*`, `browser.*` field above 
 ```bash
 export PORT=3000
 export API_KEY=sk-your-api-key
+export ADMIN_PASSWORD=your-dashboard-password
+# Optional dedicated signing key; ADMIN_PASSWORD is used when omitted.
+export DASHBOARD_SESSION_SECRET=your-stable-random-secret
 export ENABLE_WEB_SEARCH=true
 export ENABLE_WORKSPACE_SEARCH=false
 export ASK_MODE_DEFAULT=false

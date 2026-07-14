@@ -781,6 +781,20 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		model = stripped
 		useReadOnlyMode := askFromModel || AppConfig.AskModeDefault()
 
+		isResearcher := IsResearcherModel(model)
+		if !isResearcher {
+			if _, ok := ResolveModel(model); !ok {
+				writeAnthropicError(
+					w,
+					requestID,
+					http.StatusNotFound,
+					fmt.Sprintf("model %q is not available; use GET /v1/models and send an exact model id", model),
+					"not_found_error",
+				)
+				return
+			}
+		}
+
 		// ── Detailed request logging ──
 		logAnthropicRequest(req, model)
 
@@ -798,7 +812,6 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		logConvertedMessages(messages)
 
 		// Detect researcher mode — skip tools and file uploads
-		isResearcher := IsResearcherModel(model)
 		if isResearcher {
 			if len(fileAttachments) > 0 {
 				log.Printf("[researcher] ignoring %d file attachment(s) — not supported in researcher mode", len(fileAttachments))
@@ -1198,7 +1211,8 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					currentSession.TurnCount = 1
 					currentSession.RawMessageCount = rawMsgCount
 					currentSession.UpdatedConfigIDs = []string{generateUUIDv4()}
-					currentSession.ModelUsed = ResolveModel(model)
+					resolvedModel, _ := ResolveModel(model)
+					currentSession.ModelUsed = resolvedModel
 					globalSessionManager.Set(fingerprint, currentSession)
 					log.Printf("[session] saved new session: thread=%s fingerprint=%s rawMsgs=%d",
 						currentSession.ThreadID, fingerprint[:8], rawMsgCount)

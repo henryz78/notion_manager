@@ -119,8 +119,8 @@ type accountHealthSnapshot struct {
 	TemporaryUnavailableUntil *time.Time
 	LastFailureReason         string
 	LastFailureAt             *time.Time
-	AuthFailureCount         int
-	AuthInvalid              bool
+	AuthFailureCount          int
+	AuthInvalid               bool
 }
 
 func (acc *Account) healthSnapshot() accountHealthSnapshot {
@@ -133,8 +133,8 @@ func (acc *Account) healthSnapshot() accountHealthSnapshot {
 		TemporaryUnavailableUntil: cloneTimePtr(acc.TemporaryUnavailableUntil),
 		LastFailureReason:         acc.LastFailureReason,
 		LastFailureAt:             cloneTimePtr(acc.LastFailureAt),
-		AuthFailureCount:         acc.AuthFailureCount,
-		AuthInvalid:              acc.AuthInvalid,
+		AuthFailureCount:          acc.AuthFailureCount,
+		AuthInvalid:               acc.AuthInvalid,
 	}
 }
 
@@ -142,9 +142,11 @@ func (acc *Account) setModels(models []ModelEntry) {
 	if acc == nil {
 		return
 	}
+	cloned := cloneModelEntries(models)
 	acc.mu.Lock()
-	defer acc.mu.Unlock()
-	acc.Models = cloneModelEntries(models)
+	acc.Models = cloned
+	acc.mu.Unlock()
+	registerModelEntries(cloned)
 }
 
 func (acc *Account) setQuotaInfo(info *QuotaInfo, checkedAt *time.Time) {
@@ -227,6 +229,7 @@ func (p *AccountPool) LoadFromDir(dir string) error {
 		// re-probe every account before the pool can refuse known-bad
 		// ones.
 		loadPersistedWorkspace(data, &acc)
+		registerModelEntries(acc.Models)
 		p.accounts = append(p.accounts, &acc)
 		log.Printf("[account] loaded: %s (%s) [%s]", acc.UserName, acc.UserEmail, acc.PlanType)
 	}
@@ -287,6 +290,7 @@ func (p *AccountPool) ReloadFromDir(dir string) {
 		}
 		acc.QuotaInfo = loadPersistedQuotaInfo(data)
 		loadPersistedWorkspace(data, &acc)
+		registerModelEntries(acc.Models)
 		p.accounts = append(p.accounts, &acc)
 		known[acc.UserID] = true
 		added++
@@ -323,6 +327,7 @@ func (p *AccountPool) LoadSingle(tokenFile string) error {
 	if acc.ClientVersion == "" || acc.ClientVersion == "unknown" {
 		acc.ClientVersion = DefaultClientVersion
 	}
+	registerModelEntries(acc.Models)
 	p.accounts = append(p.accounts, &acc)
 	log.Printf("[account] loaded single account: %s", acc.UserName)
 	return nil
@@ -982,11 +987,10 @@ func (p *AccountPool) RefreshAll(accountsDir string) {
 	log.Printf("[refresh] refreshing %d accounts (quota + models, concurrency=%d)...", len(accs), concurrency)
 
 	var (
-		modelsUpdatedFlag atomic.Bool
-		disabledNow       atomic.Int64
-		recoveredNow      atomic.Int64
-		failedChecks      atomic.Int64
-		workspaceLost     atomic.Int64
+		disabledNow   atomic.Int64
+		recoveredNow  atomic.Int64
+		failedChecks  atomic.Int64
+		workspaceLost atomic.Int64
 	)
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, concurrency)
@@ -1057,7 +1061,6 @@ func (p *AccountPool) RefreshAll(accountsDir string) {
 				log.Printf("[refresh] %s (%s): model fetch failed: %v", acc.UserName, acc.UserEmail, err)
 			} else if len(models) > 0 {
 				acc.setModels(models)
-				modelsUpdatedFlag.Store(true)
 				log.Printf("[refresh] %s (%s): fetched %d models", acc.UserName, acc.UserEmail, len(models))
 			}
 
@@ -1082,22 +1085,6 @@ func (p *AccountPool) RefreshAll(accountsDir string) {
 	}
 	wg.Wait()
 
-	modelsUpdated := modelsUpdatedFlag.Load()
-
-	if modelsUpdated {
-		// Update DefaultModelMap from fetched models
-		p.mu.RLock()
-		for _, acc := range p.accounts {
-			for _, m := range acc.modelsSnapshot() {
-				normalizedName := normalizeModelName(m.Name)
-				if normalizedName != "" {
-					SetModelID(normalizedName, m.ID)
-				}
-			}
-		}
-		p.mu.RUnlock()
-	}
-
 	// 3. Persist to disk
 	if accountsDir != "" {
 		p.SaveAccounts(accountsDir)
@@ -1113,6 +1100,15 @@ func normalizeModelName(displayName string) string {
 	s := strings.ToLower(strings.TrimSpace(displayName))
 	s = strings.ReplaceAll(s, " ", "-")
 	return s
+}
+
+func registerModelEntries(models []ModelEntry) {
+	for _, model := range models {
+		normalizedName := normalizeModelName(model.Name)
+		if normalizedName != "" && strings.TrimSpace(model.ID) != "" {
+			SetModelID(normalizedName, model.ID)
+		}
+	}
 }
 
 func publicFacingModelID(displayName, internalID string) string {
@@ -1430,9 +1426,7 @@ func (p *AccountPool) RefreshAndPersistAccount(ctx context.Context, accountsDir,
 	if mErr != nil {
 		log.Printf("[post-register] %s: models fetch failed: %v (persisting quota only)", acc.UserEmail, mErr)
 	} else if len(models) > 0 {
-		p.mu.Lock()
-		acc.Models = models
-		p.mu.Unlock()
+		acc.setModels(models)
 	}
 
 	// Workspace probe is best-effort. If it fails we still persist the

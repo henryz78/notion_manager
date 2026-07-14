@@ -36,6 +36,9 @@ curl http://localhost:3000/v1/messages \
 ```
 
 If `model` is omitted, the service falls back to `proxy.default_model`.
+Use `GET /v1/models` to obtain the exact supported model IDs. Unknown,
+misspelled, or unavailable model versions return `404 not_found_error`; the
+server never silently substitutes another model version.
 
 ## Request headers
 
@@ -57,8 +60,8 @@ ways:
 
 1. **Global default** – `proxy.ask_mode_default: true` in `config.yaml`, or
    toggled live from the dashboard `Settings` panel.
-2. **Per-request suffix** – append `-ask` to the model name. The suffix is
-   stripped server-side before model resolution, so any model alias works:
+2. **Per-request suffix** – append `-ask` to an exact supported model ID. The
+   suffix is stripped server-side before strict model resolution:
 
 ```bash
 # Force ASK mode for this single request even if the global default is off
