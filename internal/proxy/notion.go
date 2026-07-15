@@ -1988,11 +1988,9 @@ func CheckQuota(acc *Account) (*QuotaInfo, error) {
 	monthlyUsage := v2.PremiumCredits.PerSource.MonthlyAllocated.UsageTotal
 	monthlyLimit := v2.PremiumCredits.PerSource.MonthlyAllocated.Limit
 	premiumRemaining := v2.PremiumCredits.TotalCreditBalance
-	// Some workspaces report remaining premium via monthlyAllocated usage/limit,
-	// while totalCreditBalance can stay at 0.
-	if premiumRemaining <= 0 && monthlyLimit > monthlyUsage {
-		premiumRemaining = monthlyLimit - monthlyUsage
-	}
+	// Keep totalCreditBalance as the raw value. Public documentation does not
+	// define this private schema, so monthlyAllocated.limit-usageTotal must not
+	// be silently substituted and presented as an official remaining balance.
 
 	// Merge V1 + V2 into QuotaInfo
 	info := &QuotaInfo{

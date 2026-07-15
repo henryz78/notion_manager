@@ -471,19 +471,37 @@ func setYAMLString(mapping *yaml.Node, key, value string) {
 	)
 }
 
-// isFreePlan returns true if the account is on a free plan where basic credits (200 lifetime)
-// never reset. Paid plans (plus, business, enterprise) have monthly premium credits that reset.
+// planIncludesFullNotionAI reflects the current public product policy: full
+// Notion AI is included with Business and Enterprise. Free and Plus only get
+// a limited complimentary trial; the public docs do not publish a fixed count.
+func planIncludesFullNotionAI(plan string) bool {
+	switch strings.ToLower(strings.TrimSpace(plan)) {
+	case "business", "enterprise":
+		return true
+	default:
+		return false
+	}
+}
+
+// isFreePlan is retained as the internal "complimentary/trial account"
+// predicate used by failover code. A live premium signal still wins for old or
+// non-standard plan names, but Plus is no longer assumed to have monthly AI.
 func isFreePlan(acc *Account) bool {
+	if acc == nil {
+		return true
+	}
+	if planIncludesFullNotionAI(acc.PlanType) {
+		return false
+	}
 	quota := acc.quotaInfoSnapshot()
 	if quota != nil && (quota.HasPremium || quota.PremiumLimit > 0 || quota.PremiumBalance > 0) {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(acc.PlanType)) {
-	case "personal", "free", "":
+	case "personal", "free", "plus", "personal_pro", "":
 		return true
 	default:
-		// For team plans, check if they actually have a paid subscription
-		// by looking at quota info — if no premium credits exist, treat as free.
+		// Unknown/legacy plans rely on the live premium signal when present.
 		if quota != nil && !quota.HasPremium {
 			return true
 		}

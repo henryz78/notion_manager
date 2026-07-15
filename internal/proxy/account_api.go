@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -474,6 +475,111 @@ func HandleDeleteAccount(pool *AccountPool, accountsDir string, auth *DashboardA
 
 		log.Printf("[delete-account] removed: %s", email)
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}
+}
+
+// isComplimentaryPlanType reports plans that currently receive only a limited
+// complimentary Notion AI trial. Business and Enterprise are deliberately
+// excluded because full Notion AI is included with those plans.
+func isComplimentaryPlanType(plan string) bool {
+	switch strings.ToLower(strings.TrimSpace(plan)) {
+	case "free", "personal", "plus", "personal_pro":
+		return true
+	default:
+		return false
+	}
+}
+
+// isExhaustedComplimentaryAccount is intentionally narrower than the general
+// unusable-account check: bulk cleanup must not delete accounts disabled only
+// by an expired cookie, missing workspace, temporary upstream failure, or a
+// Business/Enterprise issue. A live premium signal also protects legacy or
+// add-on Plus accounts from being treated as complimentary-only.
+func isExhaustedComplimentaryAccount(acc *Account) bool {
+	if acc == nil || !isComplimentaryPlanType(acc.PlanType) || !isFreePlan(acc) {
+		return false
+	}
+	health := acc.healthSnapshot()
+	if health.AuthInvalid || (health.TemporaryUnavailableUntil != nil && health.TemporaryUnavailableUntil.After(time.Now())) {
+		return false
+	}
+	if acc.WorkspaceCheckedAt != nil && acc.SpaceCount == 0 {
+		return false
+	}
+	quota := acc.quotaSnapshot()
+	if quota.PermanentlyExhausted || quota.ExhaustedAt != nil {
+		return true
+	}
+	return quota.Info != nil && !quota.Info.IsEligible
+}
+
+func exhaustedComplimentaryEmails(pool *AccountPool) []string {
+	if pool == nil {
+		return nil
+	}
+	emails := make([]string, 0)
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+	for _, acc := range pool.accounts {
+		if isExhaustedComplimentaryAccount(acc) {
+			emails = append(emails, acc.UserEmail)
+		}
+	}
+	sort.Strings(emails)
+	return emails
+}
+
+// HandleDeleteExhaustedComplimentaryAccounts permanently removes all Free and
+// Plus accounts that are currently marked unavailable because their
+// complimentary AI trial is exhausted. Other account health failures and all
+// Business/Enterprise accounts are left untouched.
+func HandleDeleteExhaustedComplimentaryAccounts(pool *AccountPool, accountsDir string, auth *DashboardAuth) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		if auth.HasAdminPassword() && !auth.ValidateSession(r) {
+			http.Error(w, `{"error":"unauthorized, dashboard login required"}`, http.StatusUnauthorized)
+			return
+		}
+
+		emails := exhaustedComplimentaryEmails(pool)
+		deleted := make([]string, 0, len(emails))
+		failed := make(map[string]string)
+		for _, email := range emails {
+			// Re-check immediately before each irreversible deletion in case a
+			// quota refresh completed after the initial candidate snapshot.
+			var stillExhausted bool
+			pool.mu.RLock()
+			for _, acc := range pool.accounts {
+				if strings.EqualFold(acc.UserEmail, email) {
+					stillExhausted = isExhaustedComplimentaryAccount(acc)
+					break
+				}
+			}
+			pool.mu.RUnlock()
+			if !stillExhausted {
+				continue
+			}
+
+			if err := deleteAccountByEmail(pool, accountsDir, email); err != nil {
+				failed[email] = err.Error()
+				log.Printf("[delete-exhausted-trials] failed %s: %v", email, err)
+				continue
+			}
+			deleted = append(deleted, email)
+		}
+
+		log.Printf("[delete-exhausted-trials] deleted=%d failed=%d", len(deleted), len(failed))
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "ok",
+			"matched": len(emails),
+			"deleted": len(deleted),
+			"emails":  deleted,
+			"failed":  failed,
+		})
 	}
 }
 

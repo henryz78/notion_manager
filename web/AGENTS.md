@@ -102,10 +102,13 @@ Use TailwindCSS utility classes with these tokens, e.g. `bg-bg-card`, `text-text
 
 ### Research Mode
 
-Research mode is available on **paid plans only** (`plus`, `business`, `enterprise`, `team`).
-- Show `🔬 Research` badge on paid plan accounts
-- Research mode uses the same AI quota but consumes significantly more per query (7+ search rounds, 3-5 min per query)
-- Research mode uses request type `"researcher"` instead of `"workflow"`
+Current public Notion documentation guarantees full Research Mode on
+**Business and Enterprise**. Free and Plus may expose a limited trial, but the
+public docs do not publish a fixed numeric cap or reset rule.
+- Never render a hard-coded `/3` limit.
+- Display `research_mode_usage` only as a private-API diagnostic value.
+- Research mode uses request type `"researcher"` instead of `"workflow"`.
+- Custom Agents' Notion credits are separate from default Notion Agent usage.
 
 ## API Integration
 
@@ -138,7 +141,8 @@ Response shape:
     "exhausted_only": 4,
     "no_workspace": 2,
     "premium_accounts": 5,
-    "research_limited": 6,
+    "exhausted_trials": 6,
+    "research_limited": 0,
     "total_research_usage": 14,
     "total_remaining": 12345,
     "total_space_usage": 1000, "total_space_limit": 4000,
@@ -174,8 +178,9 @@ Response shape:
 - All component code lives in `App.tsx` (single-file for now; split when it grows)
 - No external UI library — TailwindCSS utility classes only
 - Responsive: 5-col summary grid → 2-col on tablet → 1-col on mobile
-- Account cards sorted server-side: healthy (most remaining first), then
-  research-limited, then exhausted, then no-workspace, then permanent
+- Account cards are sorted server-side by health, then full Notion AI plan /
+  live premium signal, then stable account name. Private quota counters are
+  not added together for ranking.
 - Search is debounced 250ms and forwarded to the server as `?q=`; the
   server filters across all accounts on email/name/plan/workspace
 - Pagination: 20 cards per page, fetched on demand (`?page=&page_size=`)

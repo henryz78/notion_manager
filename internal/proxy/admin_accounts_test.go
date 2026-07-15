@@ -25,11 +25,11 @@ func account(name, email string, override map[string]interface{}) map[string]int
 
 func TestSortAccountDetailsRanksHealthyFirst(t *testing.T) {
 	accounts := []map[string]interface{}{
-		account("alice", "alice@x.com", map[string]interface{}{"remaining": 100}),
+		account("alice", "alice@x.com", map[string]interface{}{"plan": "plus", "remaining": 100}),
 		account("bob", "bob@x.com", map[string]interface{}{"exhausted": true, "remaining": 0}),
 		account("carol", "carol@x.com", map[string]interface{}{"permanent": true}),
 		account("dan", "dan@x.com", map[string]interface{}{"no_workspace": true, "remaining": 50}),
-		account("eve", "eve@x.com", map[string]interface{}{"remaining": 200}),
+		account("eve", "eve@x.com", map[string]interface{}{"plan": "business", "remaining": 1}),
 		account("frank", "frank@x.com", map[string]interface{}{"remaining": 50, "research_usage": 5}),
 		account("gina", "gina@x.com", map[string]interface{}{"auth_invalid": true, "remaining": 300}),
 	}
@@ -41,12 +41,10 @@ func TestSortAccountDetailsRanksHealthyFirst(t *testing.T) {
 		got[i] = mapString(a, "name")
 	}
 
-	// 1. healthy w/ remaining desc (eve 200 > alice 100 > frank 50 with research limit)
-	// 2. research-limited but otherwise healthy (frank)
-	// 3. exhausted (bob)
-	// 4. no_workspace (dan)
-	// 5. auth_invalid (gina)
-	// 6. permanent (carol)
+	// 1. Business/Enterprise before trial accounts, without using private
+	//    remaining counters (eve has the lowest raw remaining but ranks first).
+	// 2. Trial accounts are stable by name (alice, frank).
+	// 3. exhausted, no_workspace, auth_invalid, permanent follow.
 	want := []string{"eve", "alice", "frank", "bob", "dan", "gina", "carol"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("sort order mismatch:\n got=%v\nwant=%v", got, want)
@@ -64,14 +62,14 @@ func TestFilterAccountDetailsMatchesEmailNamePlanSpace(t *testing.T) {
 		query string
 		want  []string
 	}{
-		{"alice", []string{"Alice"}},                // name match
-		{"BOB@", []string{"Bob"}},                   // email, case-insensitive
-		{"plus", []string{"Alice"}},                 // plan match
-		{"gamma", []string{"Carol"}},                // space match
-		{"example", []string{"Bob", "Carol"}},       // multiple matches preserve order
-		{"  ", []string{"Alice", "Bob", "Carol"}},   // whitespace == no filter
-		{"", []string{"Alice", "Bob", "Carol"}},     // empty == no filter
-		{"missing", nil},                            // zero match
+		{"alice", []string{"Alice"}},              // name match
+		{"BOB@", []string{"Bob"}},                 // email, case-insensitive
+		{"plus", []string{"Alice"}},               // plan match
+		{"gamma", []string{"Carol"}},              // space match
+		{"example", []string{"Bob", "Carol"}},     // multiple matches preserve order
+		{"  ", []string{"Alice", "Bob", "Carol"}}, // whitespace == no filter
+		{"", []string{"Alice", "Bob", "Carol"}},   // empty == no filter
+		{"missing", nil},                          // zero match
 	}
 	for _, tc := range cases {
 		t.Run(tc.query, func(t *testing.T) {
@@ -173,10 +171,13 @@ func TestSummarizeAccountsAggregates(t *testing.T) {
 	if s.PremiumAccounts != 1 {
 		t.Errorf("PremiumAccounts: want 1 got %d", s.PremiumAccounts)
 	}
-	// Only e is research-limited (a is premium so excluded; b/c/d are
-	// exhausted-or-equivalent).
-	if s.ResearchLimited != 1 {
-		t.Errorf("ResearchLimited: want 1 got %d", s.ResearchLimited)
+	if s.ExhaustedTrials != 2 {
+		t.Errorf("ExhaustedTrials: want 2 got %d", s.ExhaustedTrials)
+	}
+	// Compatibility field remains zero: the public docs do not publish a
+	// numeric Research Mode cap.
+	if s.ResearchLimited != 0 {
+		t.Errorf("ResearchLimited: want 0 got %d", s.ResearchLimited)
 	}
 	if s.TotalRemaining != 300 { // 100 + 0 + 50 + 0 + 80 + 70
 		t.Errorf("TotalRemaining: want 300 got %d", s.TotalRemaining)
@@ -189,20 +190,5 @@ func TestSummarizeAccountsAggregates(t *testing.T) {
 	}
 	if s.TotalPremiumBalance != 500 || s.TotalPremiumLimit != 500 {
 		t.Errorf("premium totals: balance=%d limit=%d", s.TotalPremiumBalance, s.TotalPremiumLimit)
-	}
-}
-
-func TestIsResearchLimitedMapPremiumExempt(t *testing.T) {
-	premium := map[string]interface{}{"research_usage": 9, "has_premium": true}
-	if isResearchLimitedMap(premium) {
-		t.Errorf("premium account should not be research-limited")
-	}
-	hot := map[string]interface{}{"research_usage": 3}
-	if !isResearchLimitedMap(hot) {
-		t.Errorf("non-premium with 3 uses should be limited")
-	}
-	cool := map[string]interface{}{"research_usage": 2}
-	if isResearchLimitedMap(cool) {
-		t.Errorf("non-premium with 2 uses should not be limited")
 	}
 }

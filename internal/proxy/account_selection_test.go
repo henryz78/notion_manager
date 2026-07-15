@@ -89,6 +89,7 @@ func TestGetBestAccountReturnsNilWhenOnlyIneligibleAccounts(t *testing.T) {
 func TestTemporaryUnavailableAccountIsSkippedUntilCooldownExpires(t *testing.T) {
 	blocked := &Account{
 		UserEmail: "blocked@example.com",
+		PlanType:  "business",
 		QuotaInfo: &QuotaInfo{
 			IsEligible: true,
 			SpaceLimit: 200,
@@ -253,35 +254,37 @@ func TestIsQuotaExhaustedUsesEligibilityFlag(t *testing.T) {
 	}
 }
 
-func TestGetBestAccountUsesEffectiveRemaining(t *testing.T) {
+func TestGetBestAccountPrefersFullNotionAIPlanOverPrivateCounterMath(t *testing.T) {
 	pool := &AccountPool{
 		accounts: []*Account{
 			{
-				UserEmail: "space-rich-user-poor@example.com",
+				UserEmail: "trial-with-high-counters@example.com",
+				PlanType:  "plus",
 				QuotaInfo: &QuotaInfo{
 					IsEligible: true,
 					SpaceLimit: 200,
-					SpaceUsage: 20,
+					SpaceUsage: 1,
 					UserLimit:  200,
-					UserUsage:  190,
+					UserUsage:  1,
 				},
 			},
 			{
-				UserEmail: "balanced@example.com",
+				UserEmail: "business@example.com",
+				PlanType:  "business",
 				QuotaInfo: &QuotaInfo{
 					IsEligible: true,
 					SpaceLimit: 200,
-					SpaceUsage: 60,
+					SpaceUsage: 199,
 					UserLimit:  200,
-					UserUsage:  60,
+					UserUsage:  199,
 				},
 			},
 		},
 	}
 
 	got := pool.GetBestAccount()
-	if got == nil || got.UserEmail != "balanced@example.com" {
-		t.Fatalf("expected account with higher effective remaining, got %#v", got)
+	if got == nil || got.UserEmail != "business@example.com" {
+		t.Fatalf("expected full Notion AI plan to win, got %#v", got)
 	}
 }
 
@@ -375,23 +378,28 @@ func TestNextExcludingRoundRobinsSkippingExcluded(t *testing.T) {
 	}
 }
 
-func TestNextForResearchAllowsPremiumAtLimit(t *testing.T) {
+func TestNextForResearchPrefersFullAIPlanWithoutNumericCap(t *testing.T) {
 	pool := &AccountPool{
 		accounts: []*Account{
 			{
-				UserEmail: "premium@example.com",
+				UserEmail: "trial@example.com",
+				PlanType:  "plus",
+				QuotaInfo: &QuotaInfo{IsEligible: true, ResearchModeUsage: 99},
+			},
+			{
+				UserEmail: "business@example.com",
+				PlanType:  "business",
 				QuotaInfo: &QuotaInfo{
 					IsEligible:        true,
-					HasPremium:        true,
-					ResearchModeUsage: 3,
+					ResearchModeUsage: 99,
 				},
 			},
 		},
 	}
 
 	got := pool.NextForResearch()
-	if got == nil || got.UserEmail != "premium@example.com" {
-		t.Fatalf("expected premium account to remain research-capable, got %#v", got)
+	if got == nil || got.UserEmail != "business@example.com" {
+		t.Fatalf("expected Business account regardless of raw research usage, got %#v", got)
 	}
 }
 
@@ -495,5 +503,17 @@ func TestIsFreePlanTreatsPersonalWithPremiumAsPaid(t *testing.T) {
 
 	if isFreePlan(acc) {
 		t.Fatal("expected personal account with premium credits to be treated as paid")
+	}
+}
+
+func TestCurrentNotionAIPlanClassification(t *testing.T) {
+	if !isFreePlan(&Account{PlanType: "plus", QuotaInfo: &QuotaInfo{}}) {
+		t.Fatal("Plus without a live premium signal should be treated as a complimentary trial")
+	}
+	if isFreePlan(&Account{PlanType: "business", QuotaInfo: &QuotaInfo{}}) {
+		t.Fatal("Business should be treated as including full Notion AI")
+	}
+	if isFreePlan(&Account{PlanType: "enterprise", QuotaInfo: &QuotaInfo{}}) {
+		t.Fatal("Enterprise should be treated as including full Notion AI")
 	}
 }

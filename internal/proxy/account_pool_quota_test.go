@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -12,7 +13,7 @@ func newPool(accs ...*Account) *AccountPool {
 	return p
 }
 
-func TestNextBestPicksHighestRemainingQuota(t *testing.T) {
+func TestNextBestPrefersFullNotionAIPlan(t *testing.T) {
 	low := &Account{
 		UserEmail: "low@example.com",
 		QuotaInfo: &QuotaInfo{IsEligible: true, SpaceLimit: 200, SpaceUsage: 180, UserLimit: 200, UserUsage: 180},
@@ -23,24 +24,27 @@ func TestNextBestPicksHighestRemainingQuota(t *testing.T) {
 	}
 	high := &Account{
 		UserEmail: "high@example.com",
+		PlanType:  "business",
 		QuotaInfo: &QuotaInfo{IsEligible: true, SpaceLimit: 200, SpaceUsage: 20, UserLimit: 200, UserUsage: 20},
 	}
 	pool := newPool(low, mid, high)
 
 	got := pool.NextBest()
 	if got == nil || got.UserEmail != "high@example.com" {
-		t.Fatalf("expected highest-remaining account, got %#v", got)
+		t.Fatalf("expected Business account, got %#v", got)
 	}
 }
 
-func TestNextBestExcludingSkipsTriedAndPicksNextHighest(t *testing.T) {
+func TestNextBestExcludingUsesServiceTiers(t *testing.T) {
 	a := &Account{
 		UserEmail: "a@example.com",
+		PlanType:  "business",
 		QuotaInfo: &QuotaInfo{IsEligible: true, SpaceLimit: 200, SpaceUsage: 20, UserLimit: 200, UserUsage: 20}, // remaining 180
 	}
 	b := &Account{
 		UserEmail: "b@example.com",
-		QuotaInfo: &QuotaInfo{IsEligible: true, SpaceLimit: 200, SpaceUsage: 100, UserLimit: 200, UserUsage: 100}, // remaining 100
+		PlanType:  "plus",
+		QuotaInfo: &QuotaInfo{IsEligible: true, HasPremium: true, SpaceLimit: 200, SpaceUsage: 100, UserLimit: 200, UserUsage: 100},
 	}
 	c := &Account{
 		UserEmail: "c@example.com",
@@ -48,13 +52,13 @@ func TestNextBestExcludingSkipsTriedAndPicksNextHighest(t *testing.T) {
 	}
 	pool := newPool(a, b, c)
 
-	// First pick should be 'a' (highest remaining).
+	// First pick is the full-AI Business plan.
 	first := pool.NextBest()
 	if first == nil || first.UserEmail != "a@example.com" {
 		t.Fatalf("expected first NextBest to be 'a', got %#v", first)
 	}
 
-	// After excluding 'a', the next best should be 'b'.
+	// After excluding 'a', the live premium signal wins over trial-only 'c'.
 	tried := map[*Account]bool{a: true}
 	second := pool.NextBestExcluding(tried)
 	if second == nil || second.UserEmail != "b@example.com" {
@@ -123,7 +127,7 @@ func TestNextBestSkipsExhaustedAccounts(t *testing.T) {
 	}
 }
 
-func TestAccountQuotaPriorityFoldsPremium(t *testing.T) {
+func TestAccountQuotaPriorityUsesServiceTierWithoutCounterArithmetic(t *testing.T) {
 	basicOnly := &Account{
 		UserEmail: "basic@example.com",
 		QuotaInfo: &QuotaInfo{IsEligible: true, SpaceLimit: 200, SpaceUsage: 50, UserLimit: 200, UserUsage: 50}, // 150
@@ -141,11 +145,11 @@ func TestAccountQuotaPriorityFoldsPremium(t *testing.T) {
 		},
 	}
 
-	if accountQuotaPriority(basicOnly) != 150 {
-		t.Fatalf("basic-only score: want 150, got %d", accountQuotaPriority(basicOnly))
+	if accountQuotaPriority(basicOnly) != 1 {
+		t.Fatalf("trial score: want 1, got %d", accountQuotaPriority(basicOnly))
 	}
-	if got := accountQuotaPriority(premiumLowBasic); got <= 150 {
-		t.Fatalf("premium with low basic should score higher than basic-only 150, got %d", got)
+	if got := accountQuotaPriority(premiumLowBasic); got != 2 {
+		t.Fatalf("live premium signal score: want 2, got %d", got)
 	}
 
 	pool := newPool(basicOnly, premiumLowBasic)
@@ -207,33 +211,68 @@ func TestApplyQuotaInfoMarksAndClearsExhaustion(t *testing.T) {
 		t.Fatal("expected QuotaInfo updated to eligible state")
 	}
 
-	// Non-eligible result on a free plan flips the permanent flag.
+	// Non-eligible result on a complimentary plan flips the retained trial flag.
 	pool.applyQuotaInfo(acc, &QuotaInfo{IsEligible: false, SpaceLimit: 200, SpaceUsage: 200, UserLimit: 200, UserUsage: 200})
 	if acc.QuotaExhaustedAt == nil {
 		t.Fatal("expected QuotaExhaustedAt set after exhaustion")
 	}
 	if !acc.PermanentlyExhausted {
-		t.Fatal("free plan exhaustion should be permanent")
+		t.Fatal("complimentary trial exhaustion should be retained as unavailable")
 	}
 
-	// Paid plan (premium-bearing) exhaustion only marks timestamp.
-	// isFreePlan treats team accounts without premium as free, so the
-	// new QuotaInfo must keep the premium signal alive to be recognised
-	// as paid even when basic credits hit zero.
+	// Business includes full Notion AI, so exhaustion only marks timestamp even
+	// if the private premium fields are empty.
 	paid := &Account{UserEmail: "biz@example.com", PlanType: "business"}
 	pool.applyQuotaInfo(paid, &QuotaInfo{
-		IsEligible:     false,
-		HasPremium:     true,
-		PremiumBalance: 0,
-		PremiumLimit:   1000,
-		SpaceLimit:     200, SpaceUsage: 200,
+		IsEligible: false,
+		SpaceLimit: 200, SpaceUsage: 200,
 		UserLimit: 200, UserUsage: 200,
 	})
 	if paid.PermanentlyExhausted {
-		t.Fatal("business plan with premium credits must not be marked permanent on exhaustion")
+		t.Fatal("Business plan with full Notion AI must not be marked as trial exhausted")
 	}
 	if paid.QuotaExhaustedAt == nil {
 		t.Fatal("paid plan should still have QuotaExhaustedAt set")
+	}
+}
+
+func TestRefreshAllRechecksTrialExhaustedAccountForUpgradeRecovery(t *testing.T) {
+	originalQuotaFetcher := quotaFetcher
+	originalModelsFetcher := modelsFetcher
+	originalWorkspaceProbe := workspaceProbe
+	t.Cleanup(func() {
+		quotaFetcher = originalQuotaFetcher
+		modelsFetcher = originalModelsFetcher
+		workspaceProbe = originalWorkspaceProbe
+	})
+
+	var quotaCalls atomic.Int32
+	quotaFetcher = func(*Account) (*QuotaInfo, error) {
+		quotaCalls.Add(1)
+		return &QuotaInfo{IsEligible: true}, nil
+	}
+	modelsFetcher = func(*Account) ([]ModelEntry, error) { return nil, nil }
+	workspaceProbe = func(*Account) (int, error) { return 1, nil }
+
+	now := time.Now()
+	acc := &Account{
+		UserEmail:            "upgraded@example.com",
+		PlanType:             "plus",
+		QuotaInfo:            &QuotaInfo{IsEligible: false},
+		QuotaExhaustedAt:     &now,
+		PermanentlyExhausted: true,
+	}
+	pool := newPool(acc)
+	pool.RefreshAll("")
+
+	if quotaCalls.Load() != 1 {
+		t.Fatalf("expected trial-exhausted account to be rechecked once, got %d", quotaCalls.Load())
+	}
+	if acc.PermanentlyExhausted || acc.QuotaExhaustedAt != nil {
+		t.Fatalf("expected upgraded account to recover, permanent=%v exhaustedAt=%v", acc.PermanentlyExhausted, acc.QuotaExhaustedAt)
+	}
+	if acc.QuotaInfo == nil || !acc.QuotaInfo.IsEligible {
+		t.Fatalf("expected refreshed eligibility, got %#v", acc.QuotaInfo)
 	}
 }
 

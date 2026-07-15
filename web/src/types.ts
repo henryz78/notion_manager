@@ -112,7 +112,8 @@ export interface AccountSummary {
   no_workspace: number
   auth_invalid: number
   premium_accounts: number
-  research_limited: number
+  exhausted_trials: number
+  research_limited: number // deprecated compatibility field; current backend returns 0
   total_research_usage: number
   total_remaining: number
   total_space_usage: number

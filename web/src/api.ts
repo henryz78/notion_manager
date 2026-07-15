@@ -278,6 +278,26 @@ export async function addAccount(tokenV2: string): Promise<AddAccountResult> {
   return data
 }
 
+export interface DeleteExhaustedTrialsResult {
+  status: string
+  matched: number
+  deleted: number
+  emails: string[]
+  failed: Record<string, string>
+}
+
+export async function deleteExhaustedTrials(): Promise<DeleteExhaustedTrialsResult> {
+  const resp = await fetch('/admin/accounts/delete-exhausted-complimentary', {
+    method: 'POST',
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+  })
+  return readJson<DeleteExhaustedTrialsResult>(resp, '清理已用完试用账号时返回了无效响应').then(data => {
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    return data
+  })
+}
+
 // --- Settings API ---
 
 export interface SearchSettings {

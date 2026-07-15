@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import type { DashboardData, AccountInfo, AccountSummary, RefreshStatus, TokenStats } from './types'
-import { fetchDashboardData, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats } from './api'
+import { fetchDashboardData, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats, deleteExhaustedTrials } from './api'
 import type { SearchSettings } from './api'
 import { fmt, formatTokens, getQuotaStatusByUsage, getQuotaPct, avatarColor, avatarLetter, formatCheckedAt, formatTimestampMs, providerDisplay } from './utils'
 import { AccountMenu } from './components/AccountMenu'
@@ -316,6 +316,11 @@ function hasPremiumAccess(account: AccountInfo): boolean {
   return !!account.has_premium || (account.premium_limit || 0) > 0 || (account.premium_balance || 0) > 0
 }
 
+function planIncludesFullNotionAI(plan: string): boolean {
+  const normalized = (plan || '').trim().toLowerCase()
+  return normalized === 'business' || normalized === 'enterprise'
+}
+
 function getSpaceQuota(account: AccountInfo) {
   const usage = account.space_usage ?? account.usage ?? 0
   const limit = account.space_limit ?? account.limit ?? 0
@@ -332,10 +337,6 @@ function getUserQuota(account: AccountInfo) {
 
 function isSameQuota(a: { usage: number; limit: number }, b: { usage: number; limit: number }): boolean {
   return a.limit > 0 && a.limit === b.limit && a.usage === b.usage
-}
-
-function isResearchLimited(account: AccountInfo): boolean {
-  return !hasPremiumAccess(account) && (account.research_usage ?? 0) >= 3
 }
 
 function mergeQuotaStatus(statuses: Array<'ok' | 'low' | 'exhausted'>): 'ok' | 'low' | 'exhausted' {
@@ -383,21 +384,24 @@ function TotalQuotaBar({ summary }: { summary?: AccountSummary | null }) {
   return (
     <div className="mb-5 space-y-3">
       <div className="flex justify-between items-center">
-        <span className="text-[11px] text-text-secondary uppercase tracking-wider flex items-center gap-1.5"><IconBarChart /> Basic 额度概览</span>
+        <span className="text-[11px] text-text-secondary uppercase tracking-wider flex items-center gap-1.5"><IconBarChart /> Notion 私有接口计数（诊断）</span>
         {totalPremiumLimit > 0 && (
           <span className="text-[12px] text-text-muted tabular-nums">
-            Premium 剩余 <span className="text-[#7eb8ff] font-semibold">{fmt(totalPremiumBalance)}</span> / {fmt(totalPremiumLimit)}
+            Premium balance <span className="text-[#7eb8ff] font-semibold">{fmt(totalPremiumBalance)}</span> · monthly limit {fmt(totalPremiumLimit)}
           </span>
         )}
       </div>
       {sameBasicQuota ? (
-        <OverviewBar label="Basic" usage={totalSpaceUsage} limit={totalSpaceLimit} />
+        <OverviewBar label="Basic raw" usage={totalSpaceUsage} limit={totalSpaceLimit} />
       ) : (
         <>
-          <OverviewBar label="Space" usage={totalSpaceUsage} limit={totalSpaceLimit} />
-          <OverviewBar label="User" usage={totalUserUsage} limit={totalUserLimit} />
+          <OverviewBar label="Space raw" usage={totalSpaceUsage} limit={totalSpaceLimit} />
+          <OverviewBar label="User raw" usage={totalUserUsage} limit={totalUserLimit} />
         </>
       )}
+      <div className="text-[10px] text-text-muted leading-relaxed">
+        以上是 Notion 私有接口返回的诊断计数，官网未公开字段定义；Custom Agents 的 Notion credits 不在这里。
+      </div>
     </div>
   )
 }
@@ -446,7 +450,7 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
   const userQuota = getUserQuota(account)
   const sameBasicQuota = isSameQuota(spaceQuota, userQuota)
   const premium = hasPremiumAccess(account)
-  const researchLimited = isResearchLimited(account)
+  const fullNotionAI = planIncludesFullNotionAI(account.plan)
   const noWorkspace = !!account.no_workspace
   const authInvalid = !!account.auth_invalid
   const temporarilyUnavailable = !authInvalid && !!account.temporarily_unavailable
@@ -515,17 +519,20 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
       {/* Badges */}
       <div className="flex gap-3 flex-wrap mt-3 mb-2.5 items-center">
         <Badge variant="plan">{account.plan || 'unknown'}</Badge>
+        <Badge variant={fullNotionAI ? 'premium' : 'plan'}>
+          {fullNotionAI ? 'Notion AI 已包含' : 'AI 有限试用'}
+        </Badge>
         {account.registered_via && (
           <Badge variant="plan">via {providerDisplay(account.registered_via)}</Badge>
         )}
-        {premium && <Badge variant="premium">AI Premium</Badge>}
+        {premium && <Badge variant="premium">Premium 接口信号</Badge>}
         {(account.research_usage != null && account.research_usage > 0) && (
-          <Badge variant={researchLimited ? 'warning' : 'research'}>
-            <IconFlask /> Research 已用 {account.research_usage}{premium ? '' : '/3'}
+          <Badge variant="research">
+            <IconFlask /> Research 用量 {account.research_usage}（接口值）
           </Badge>
         )}
-        {account.exhausted && !account.permanent && <Badge variant="warning">Basic blocked</Badge>}
-        {account.permanent && <Badge variant="warning">Free cap</Badge>}
+        {account.exhausted && !account.permanent && <Badge variant="warning">AI 当前不可用</Badge>}
+        {account.permanent && <Badge variant="warning">AI 试用已用完</Badge>}
         {authInvalid && <Badge variant="warning">Cookie 失效</Badge>}
         {noWorkspace && <Badge variant="warning">无工作区</Badge>}
         {temporarilyUnavailable && (
@@ -543,17 +550,17 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
 
       {/* Quotas */}
       {sameBasicQuota ? (
-        <QuotaBar label="Basic" usage={spaceQuota.usage} limit={spaceQuota.limit} />
+        <QuotaBar label="Basic raw" usage={spaceQuota.usage} limit={spaceQuota.limit} />
       ) : (
         <>
-          <QuotaBar label="Space" usage={spaceQuota.usage} limit={spaceQuota.limit} />
-          {userQuota.limit > 0 && <QuotaBar label="User" usage={userQuota.usage} limit={userQuota.limit} />}
+          <QuotaBar label="Space raw" usage={spaceQuota.usage} limit={spaceQuota.limit} />
+          {userQuota.limit > 0 && <QuotaBar label="User raw" usage={userQuota.usage} limit={userQuota.limit} />}
         </>
       )}
-      {premium && <QuotaBar label="Premium" labelClass="text-[#7eb8ff]" usage={account.premium_usage} limit={account.premium_limit} />}
+      {premium && <QuotaBar label="Premium monthlyAllocated raw" labelClass="text-[#7eb8ff]" usage={account.premium_usage} limit={account.premium_limit} />}
       <div className="flex flex-wrap gap-3 mt-2 text-[10px] text-text-muted">
-        <span>Basic 剩余 {fmt(account.remaining || 0)}</span>
-        {premium && <span>Premium 剩余 {fmt(account.premium_balance || 0)}</span>}
+        <span>Basic 估算余量 {fmt(account.remaining || 0)}</span>
+        {premium && <span>Premium balance 原始值 {fmt(account.premium_balance || 0)}</span>}
       </div>
 
       {/* Models (expandable) */}
@@ -591,6 +598,7 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [quotaRefreshing, setQuotaRefreshing] = useState(false)
+  const [deletingExhaustedTrials, setDeletingExhaustedTrials] = useState(false)
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus | null>(null)
   const [query, setQuery] = useState('')
   const [refreshTime, setRefreshTime] = useState('')
@@ -700,6 +708,28 @@ export default function App() {
     setQuotaRefreshing(false)
   }
 
+  const handleDeleteExhaustedTrials = async () => {
+    const count = data?.summary?.exhausted_trials ?? 0
+    if (count <= 0 || deletingExhaustedTrials) return
+    const confirmed = window.confirm(
+      `将永久删除 ${count} 个已用完 AI 试用额度的 Free/Plus 账号及其登录文件。\n\nBusiness、Enterprise、临时故障和 Cookie 失效账号不会删除。建议先刷新配额。\n\n确定继续吗？`,
+    )
+    if (!confirmed) return
+    setDeletingExhaustedTrials(true)
+    try {
+      const result = await deleteExhaustedTrials()
+      const failedCount = Object.keys(result.failed || {}).length
+      window.alert(failedCount > 0
+        ? `已删除 ${result.deleted} 个账号，${failedCount} 个删除失败。`
+        : `已删除 ${result.deleted} 个已用完试用额度的账号。`)
+      await loadData()
+    } catch (e: any) {
+      window.alert(`清理失败：${e?.message || '请求失败'}`)
+    } finally {
+      setDeletingExhaustedTrials(false)
+    }
+  }
+
   const toggleSetting = async (key: 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'use_notion_personal_instructions' | 'debug_logging') => {
     if (!settings) return
     const newVal = !settings[key]
@@ -792,7 +822,6 @@ export default function App() {
       totalPremiumBalance: s?.total_premium_balance ?? 0,
       totalPremiumLimit: s?.total_premium_limit ?? 0,
       premiumAccounts: s?.premium_accounts ?? 0,
-      researchLimited: s?.research_limited ?? 0,
       sameBasicQuota,
     }
   }, [data])
@@ -856,16 +885,16 @@ export default function App() {
               color="var(--color-ok)"
             />
             <StatCard
-              label="Basic 剩余" value={fmt(summary.totalRemaining)}
+              label="接口 Basic 估算余量" value={fmt(summary.totalRemaining)}
               sub={summary.sameBasicQuota
-                ? 'Space / User 配额一致'
-                : `Space ${fmt(summary.totalSpaceRemaining)} · User ${fmt(summary.totalUserRemaining)}`}
+                ? 'Space / User 返回值一致 · 非官网承诺额度'
+                : `Space ${fmt(summary.totalSpaceRemaining)} · User ${fmt(summary.totalUserRemaining)}（接口值）`}
             />
             <StatCard
-              label="Premium 剩余" value={fmt(summary.totalPremiumBalance)}
+              label="Premium balance 原始值" value={fmt(summary.totalPremiumBalance)}
               sub={summary.totalPremiumLimit > 0
-                ? `${summary.premiumAccounts} 个 premium 账号 · Research 用量 ${summary.totalResearchUsage}`
-                : `无 premium credits · Research 受限 ${summary.researchLimited}`}
+                ? `${summary.premiumAccounts} 个接口信号 · Research 接口用量 ${summary.totalResearchUsage}`
+                : '接口未返回 Premium 数值 · 不代表 Custom Agents credits'}
               color="var(--color-research, #9b51e0)"
             />
             <StatCard
@@ -922,6 +951,14 @@ export default function App() {
             className={`inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border disabled:opacity-50 disabled:cursor-not-allowed ${refreshing ? 'animate-pulse' : ''}`}
           >
             <IconRefresh /> 刷新数据
+          </button>
+          <button
+            onClick={handleDeleteExhaustedTrials}
+            disabled={deletingExhaustedTrials || (data?.summary?.exhausted_trials ?? 0) <= 0 || !!refreshStatus?.refreshing}
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-err/10 hover:bg-err/20 text-err rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-err/25 disabled:opacity-40 disabled:cursor-not-allowed"
+            title="仅永久删除因 complimentary AI responses 用完而禁用的 Free/Plus 账号；不会删除其他故障账号"
+          >
+            <IconTrash /> {deletingExhaustedTrials ? '正在清理...' : `清理已用完试用账号（${data?.summary?.exhausted_trials ?? 0}）`}
           </button>
           <button
             onClick={() => setShowAddModal(true)}

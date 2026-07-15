@@ -26,9 +26,10 @@ Login uses client-side SHA256(salt + password) so the plaintext password never t
 `/dashboard/` lists every account in the pool with:
 
 - Email, plan type, workspace
-- Remaining quota (basic / premium balance), space + user usage, research usage
+- Private-API diagnostic counters (basic / premium / space / user / research), clearly labeled as non-public schema
 - Discovered models, last-checked timestamp
 - Per-row actions: **Open proxy**, **Copy token**, **Delete account**
+- Bulk cleanup for Free / Plus accounts explicitly disabled after exhausting complimentary AI responses. It requires confirmation and excludes Business / Enterprise, temporary failures, invalid cookies, and no-workspace accounts
 
 The list is fetched from `GET /admin/accounts?q=&page=&page_size=`. The Go server applies the same sort the dashboard previously did client-side, then filters and paginates, so big pools (1k+ accounts) stay responsive. The response includes a pool-wide `summary` block (premium count, total remaining, etc.) for the headline cards regardless of pagination.
 
@@ -39,8 +40,12 @@ When `q`/`page`/`page_size` are all absent, the response keeps its historical sh
 Pool-wide aggregates rendered from the `summary` block:
 
 - Total / available / exhausted / no-workspace / premium accounts
-- Research-limited accounts (non-premium accounts that have used ≥ 3 research-mode runs this billing cycle)
-- Total remaining basic quota, total premium balance/limit, total user/space usage
+- Full Notion AI plan signals versus complimentary-trial accounts
+- Estimated basic remainder and raw premium/user/space values, explicitly not presented as public product guarantees
+
+Notion's public docs do not publish a fixed complimentary-response count or a
+numeric Research Mode trial cap. Custom Agents' Notion credits are separate and
+are not included in these private default-Agent counters.
 
 ## Token usage statistics
 

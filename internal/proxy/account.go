@@ -339,9 +339,11 @@ func (p *AccountPool) Next() *Account {
 	return p.pickNextRoundRobin(nil)
 }
 
-// NextForResearch returns the next available account suitable for research mode.
-// Premium accounts are treated as research-capable regardless of research_usage.
-// For non-premium accounts, it prefers research_usage < 3 and falls back if needed.
+// NextForResearch returns the next usable account for research mode. Current
+// public docs only guarantee Research Mode on Business and Enterprise and do
+// not publish a numeric trial limit, so routing must not hard-code "/3".
+// Full-AI plans (or accounts with a live premium signal) are preferred; trial
+// accounts remain a fallback and the real request result decides eligibility.
 func (p *AccountPool) NextForResearch() *Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -350,33 +352,18 @@ func (p *AccountPool) NextForResearch() *Account {
 		return nil
 	}
 	start := p.index.Add(1) - 1
-	// First pass: prefer premium accounts and accounts with lower research usage.
 	var fallback *Account
-	bestUsage := int(^uint(0) >> 1)
 	for i := 0; i < n; i++ {
 		acc := p.accounts[(start+uint64(i))%uint64(n)]
 		if p.isUnusable(acc) {
 			continue
 		}
 		quota := acc.quotaInfoSnapshot()
-		if quota == nil {
-			if fallback == nil {
-				fallback = acc
-			}
-			continue
-		}
-		if quota.HasPremium {
+		if planIncludesFullNotionAI(acc.PlanType) || (quota != nil && quota.HasPremium) {
 			return acc
 		}
-		if quota.ResearchModeUsage < 3 {
-			if fallback == nil || quota.ResearchModeUsage < bestUsage {
-				fallback = acc
-				bestUsage = quota.ResearchModeUsage
-			}
-			continue
-		}
 		if fallback == nil {
-			fallback = acc // keep a usable fallback if no fresher account exists
+			fallback = acc
 		}
 	}
 	return fallback // nil if all exhausted
@@ -411,15 +398,14 @@ func (p *AccountPool) pickNextRoundRobin(exclude map[*Account]bool) *Account {
 	return nil
 }
 
-// pickBestAccountLocked returns the available account with the highest
-// effective remaining quota. Used by GetBestAccount (dashboard) and
-// NextBest/NextBestExcluding (request routing).
+// pickBestAccountLocked returns the best available account by evidence-backed
+// service tier. Used by GetBestAccount (dashboard) and request routing.
 //
 // Selection rules:
 //  1. Skip exhausted/excluded accounts.
-//  2. Among accounts with known quota (QuotaInfo != nil), pick the one with
-//     the most basic remaining (space ⊓ user). Premium accounts are treated
-//     as effectively unlimited (priority overrides basic remaining).
+//  2. Prefer Business/Enterprise, then a live premium signal, then other
+//     eligible trial accounts. Private Space/User/Premium counters are not
+//     added together because their public semantics are undocumented.
 //  3. If no scored account is available (e.g. all accounts are unrefreshed),
 //     fall back to the first usable account in rotation order so freshly
 //     loaded accounts can still serve traffic before the first refresh
@@ -460,9 +446,8 @@ func (p *AccountPool) pickBestAccountLocked(exclude map[*Account]bool) *Account 
 	return fallback
 }
 
-// NextBest returns the next available account, preferring accounts with the
-// highest remaining basic quota. Used for new conversations (no existing
-// session) so high-quota accounts get used first instead of round-robin.
+// NextBest returns the next available account, preferring full Notion AI plans
+// without inventing arithmetic across undocumented private counters.
 func (p *AccountPool) NextBest() *Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -479,8 +464,8 @@ func (p *AccountPool) NextBestExcluding(exclude map[*Account]bool) *Account {
 
 // MarkQuotaExhausted marks an account as quota-exhausted with a timestamp.
 // Recovery only happens when RefreshAll confirms isEligible=true via API.
-// Free plan accounts (200 lifetime credits) will stay exhausted permanently.
-// Paid plan accounts recover when monthly credits reset at billing cycle boundary.
+// Trial accounts are retained and rechecked by RefreshAll so a later plan
+// upgrade can recover them. No account file is deleted solely for exhaustion.
 func (p *AccountPool) MarkQuotaExhausted(acc *Account) {
 	if !acc.markQuotaExhausted(time.Now(), false) {
 		return // already marked
@@ -616,10 +601,11 @@ func (p *AccountPool) applyWorkspaceCount(acc *Account, count int) (prev int, ch
 	return prev, changed
 }
 
-// MarkPermanentlyExhausted marks a free-plan account as permanently exhausted (never recovers).
+// MarkPermanentlyExhausted marks a complimentary/trial account unavailable.
+// RefreshAll still rechecks it so upgrading the Notion plan can recover it.
 func (p *AccountPool) MarkPermanentlyExhausted(acc *Account) {
 	acc.markQuotaExhausted(time.Now(), true)
-	log.Printf("[quota] marked %s (%s) as PERMANENTLY exhausted (free plan, no recovery)", acc.UserName, acc.UserEmail)
+	log.Printf("[quota] marked %s (%s) as trial exhausted (retained for future re-check)", acc.UserName, acc.UserEmail)
 }
 
 // quotaApplyResult describes how applyQuotaInfo changed the account state.
@@ -666,16 +652,9 @@ func (p *AccountPool) applyQuotaInfo(acc *Account, info *QuotaInfo) quotaApplyRe
 	if acc.QuotaExhaustedAt == nil {
 		acc.QuotaExhaustedAt = &now
 	}
-	isFree := false
-	if !(info.HasPremium || info.PremiumLimit > 0 || info.PremiumBalance > 0) {
-		switch strings.ToLower(strings.TrimSpace(acc.PlanType)) {
-		case "personal", "free", "":
-			isFree = true
-		default:
-			isFree = !info.HasPremium
-		}
-	}
-	if isFree {
+	isTrial := !planIncludesFullNotionAI(acc.PlanType) &&
+		!(info.HasPremium || info.PremiumLimit > 0 || info.PremiumBalance > 0)
+	if isTrial {
 		acc.PermanentlyExhausted = true
 		res.NowPermanent = true
 	}
@@ -788,55 +767,6 @@ func (p *AccountPool) isQuotaExhaustedRLock(acc *Account) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.isQuotaExhausted(acc)
-}
-
-// RemoveAccount removes an account from the pool and deletes its JSON file from disk.
-// Used for free-plan accounts that are confirmed exhausted (e.g. premium feature unavailable).
-func (p *AccountPool) RemoveAccount(acc *Account) {
-	p.mu.Lock()
-	for i, a := range p.accounts {
-		if a == acc {
-			p.accounts = append(p.accounts[:i], p.accounts[i+1:]...)
-			break
-		}
-	}
-	p.mu.Unlock()
-
-	// Delete the JSON file from disk
-	dir := ""
-	if AppConfig != nil {
-		dir = AppConfig.Server.AccountsDir
-	}
-	if dir == "" {
-		return
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		path := filepath.Join(dir, entry.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var existing map[string]interface{}
-		if err := json.Unmarshal(data, &existing); err != nil {
-			continue
-		}
-		email, _ := existing["user_email"].(string)
-		if email == acc.UserEmail {
-			if err := os.Remove(path); err != nil {
-				log.Printf("[account] failed to delete %s: %v", path, err)
-			} else {
-				log.Printf("[account] deleted exhausted free account file: %s (%s)", path, acc.UserEmail)
-			}
-			break
-		}
-	}
 }
 
 // RemoveAccountByEmail drops the in-memory pool entry whose user_email
@@ -996,23 +926,9 @@ func (p *AccountPool) RefreshAll(accountsDir string) {
 	sem := make(chan struct{}, concurrency)
 
 	for _, acc := range accs {
-		quota := acc.quotaSnapshot()
-		// Skip permanently exhausted accounts (free plan, no recovery possible)
-		if quota.PermanentlyExhausted {
-			if isFreePlan(acc) {
-				log.Printf("[refresh] %s (%s): permanently exhausted, skipped", acc.UserName, acc.UserEmail)
-				p.refreshMu.Lock()
-				p.refreshDone++
-				p.refreshMu.Unlock()
-				continue
-			}
-			log.Printf("[refresh] %s (%s): clearing stale permanent exhaustion flag before re-check", acc.UserName, acc.UserEmail)
-			p.ClearQuotaExhausted(acc)
-		}
-
 		wg.Add(1)
 		sem <- struct{}{} // acquire semaphore slot
-		go func(acc *Account, quota accountQuotaSnapshot) {
+		go func(acc *Account) {
 			defer wg.Done()
 			defer func() { <-sem }() // release semaphore slot
 
@@ -1081,7 +997,7 @@ func (p *AccountPool) RefreshAll(accountsDir string) {
 					log.Printf("[refresh] %s (%s): %d workspace(s) accessible", acc.UserName, acc.UserEmail, count)
 				}
 			}
-		}(acc, quota)
+		}(acc)
 	}
 	wg.Wait()
 
@@ -1703,31 +1619,25 @@ func basicRemaining(info *QuotaInfo) int {
 	return best
 }
 
-// accountQuotaPriority returns a sortable score for an account's remaining
-// quota. Higher = more preferred when picking the "best" account.
+// accountQuotaPriority returns a coarse, evidence-backed service-tier score.
+// Higher = more preferred when picking the "best" account.
 //
-//   - Unknown quota (QuotaInfo == nil): -1 (treated as fallback in pickBest).
-//   - Premium account: basicRemaining + premiumRemaining (premium credits add
-//     significant headroom so a premium account with low basic credits should
-//     still rank above a basic-only account that's nearly drained).
-//   - Basic-only account: basicRemaining (space ⊓ user).
+//   - Unknown quota: -1 (fallback until refreshed).
+//   - Business/Enterprise: 3.
+//   - Other plans with a live premium signal: 2.
+//   - Other eligible trial accounts: 1.
 func accountQuotaPriority(acc *Account) int {
 	quota := acc.quotaInfoSnapshot()
 	if quota == nil {
 		return -1
 	}
-	score := basicRemaining(quota)
-	if quota.HasPremium {
-		// Premium balance often dwarfs basic credits — fold it in so premium
-		// accounts win over basic-only accounts when both are eligible.
-		score += quota.PremiumBalance
-		// If both basic and premium look exhausted but isEligible is still
-		// true (rare), keep premium accounts above unknown-quota fallback.
-		if score <= 0 {
-			score = 1
-		}
+	if planIncludesFullNotionAI(acc.PlanType) {
+		return 3
 	}
-	return score
+	if quota.HasPremium {
+		return 2
+	}
+	return 1
 }
 
 func generateUUIDv4() string {

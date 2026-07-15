@@ -952,9 +952,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					}
 					log.Printf("[session] bound account %s %s, will pick a new account and replay history",
 						session.AccountEmail, reason)
-					if bound != nil && isFreePlan(bound) {
-						pool.RemoveAccount(bound)
-					} else if bound != nil {
+					if bound != nil {
 						pool.MarkQuotaExhausted(bound)
 					}
 					globalSessionManager.Delete(fingerprint)
@@ -973,12 +971,12 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 						acc = pool.NextExcluding(tried)
 					}
 				} else if attempt == 0 {
-					// New-conversation routing: pick the account with the
-					// highest remaining quota so high-quota accounts get used
-					// first, instead of round-robin.
+					// New-conversation routing: prefer full Notion AI plans,
+					// then live premium signals, without adding undocumented
+					// private counters together.
 					acc = pool.NextBest()
 				} else {
-					// Failover: still prefer high-quota accounts among
+					// Failover: keep the same service-tier preference among
 					// accounts we haven't tried yet.
 					acc = pool.NextBestExcluding(tried)
 				}
@@ -993,11 +991,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			if !isResearcher && !pool.RefreshAccountQuota(acc, liveCheckInterval) {
 				log.Printf("[quota-live] %s skipped (exhausted on live check)", acc.UserEmail)
 				tried[acc] = true
-				if isFreePlan(acc) {
-					pool.RemoveAccount(acc)
-				} else {
-					pool.MarkQuotaExhausted(acc)
-				}
+				pool.MarkQuotaExhausted(acc)
 				continue
 			}
 			tried[acc] = true
@@ -1114,12 +1108,8 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				continue
 			}
 			if reqErr != nil && errors.Is(reqErr, ErrQuotaExhausted) {
-				if isFreePlan(acc) {
-					log.Printf("[quota] %s (free plan) quota exhausted — removing account", acc.UserEmail)
-					pool.RemoveAccount(acc)
-				} else {
-					pool.MarkQuotaExhausted(acc)
-				}
+				log.Printf("[quota] %s quota exhausted — retaining account for future re-check", acc.UserEmail)
+				pool.MarkQuotaExhausted(acc)
 				log.Printf("[quota] %s quota exhausted, trying next account (%d/%d available)",
 					acc.UserEmail, pool.AvailableCount(), pool.Count())
 				// Clear session if the bound account was exhausted
@@ -1167,8 +1157,8 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			if reqErr != nil && errors.Is(reqErr, ErrPremiumFeatureUnavailable) {
 				// Premium feature unavailable — for free accounts this means quota is permanently gone
 				if isFreePlan(acc) {
-					log.Printf("[premium] %s (free plan) premium feature unavailable — removing account", acc.UserEmail)
-					pool.RemoveAccount(acc)
+					log.Printf("[premium] %s complimentary trial unavailable — retaining account for future re-check", acc.UserEmail)
+					pool.MarkPermanentlyExhausted(acc)
 				} else {
 					log.Printf("[premium] %s premium feature unavailable, trying next account", acc.UserEmail)
 					pool.MarkTemporarilyUnavailable(acc, "premium_unavailable", defaultAccountFailureCooldown)

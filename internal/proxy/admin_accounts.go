@@ -16,7 +16,8 @@ type AccountSummary struct {
 	NoWorkspace         int   `json:"no_workspace"`
 	AuthInvalid         int   `json:"auth_invalid"`
 	PremiumAccounts     int   `json:"premium_accounts"`
-	ResearchLimited     int   `json:"research_limited"`
+	ExhaustedTrials     int   `json:"exhausted_trials"`
+	ResearchLimited     int   `json:"research_limited"` // deprecated: kept as 0 for API compatibility
 	TotalResearchUsage  int   `json:"total_research_usage"`
 	TotalRemaining      int   `json:"total_remaining"`
 	TotalSpaceUsage     int   `json:"total_space_usage"`
@@ -51,8 +52,8 @@ func summarizeAccounts(accounts []map[string]interface{}) AccountSummary {
 		if hasPremiumMap(a) {
 			s.PremiumAccounts++
 		}
-		if !exh && !perm && !nws && !authInvalid && isResearchLimitedMap(a) {
-			s.ResearchLimited++
+		if isExhaustedComplimentaryMap(a) {
+			s.ExhaustedTrials++
 		}
 		s.TotalResearchUsage += mapInt(a, "research_usage")
 		s.TotalRemaining += mapInt(a, "remaining")
@@ -66,6 +67,16 @@ func summarizeAccounts(accounts []map[string]interface{}) AccountSummary {
 		s.TotalPremiumLimit += int64(mapInt(a, "premium_limit"))
 	}
 	return s
+}
+
+func isExhaustedComplimentaryMap(a map[string]interface{}) bool {
+	if !isComplimentaryPlanType(mapString(a, "plan")) || hasPremiumMap(a) {
+		return false
+	}
+	if mapBool(a, "auth_invalid") || mapBool(a, "temporarily_unavailable") || mapBool(a, "no_workspace") {
+		return false
+	}
+	return mapBool(a, "exhausted") || mapBool(a, "permanent")
 }
 
 // filterAccountDetails keeps only entries whose email/name/plan/space
@@ -101,9 +112,9 @@ func matchAccountQuery(a map[string]interface{}, qLower string) bool {
 //  2. Auth-invalid accounts to the bottom.
 //  3. Accounts with no accessible workspace to the bottom.
 //  4. Quota-exhausted accounts to the bottom.
-//  5. More remaining basic quota first.
-//  6. Research-limited accounts (no premium, research >= 3) to the bottom.
-//  7. Stable fallback by name (lower-cased).
+//  5. Full Notion AI plans, then a live premium signal, then trial plans.
+//  6. Stable fallback by name (lower-cased). Private quota counters are not
+//     used for ordering because their public semantics are undocumented.
 func sortAccountDetails(accounts []map[string]interface{}) {
 	sort.SliceStable(accounts, func(i, j int) bool {
 		ai, aj := mapBool(accounts[i], "permanent"), mapBool(accounts[j], "permanent")
@@ -122,17 +133,23 @@ func sortAccountDetails(accounts []map[string]interface{}) {
 		if ai != aj {
 			return !ai
 		}
-		ri, rj := mapInt(accounts[i], "remaining"), mapInt(accounts[j], "remaining")
-		if ri != rj {
-			return ri > rj
-		}
-		ri2, rj2 := isResearchLimitedMap(accounts[i]), isResearchLimitedMap(accounts[j])
-		if ri2 != rj2 {
-			return !ri2
+		ti, tj := notionAITierMap(accounts[i]), notionAITierMap(accounts[j])
+		if ti != tj {
+			return ti > tj
 		}
 		return strings.ToLower(mapString(accounts[i], "name")) <
 			strings.ToLower(mapString(accounts[j], "name"))
 	})
+}
+
+func notionAITierMap(a map[string]interface{}) int {
+	if planIncludesFullNotionAI(mapString(a, "plan")) {
+		return 2
+	}
+	if hasPremiumMap(a) {
+		return 1
+	}
+	return 0
 }
 
 // paginateAccounts returns the slice [page*pageSize : page*pageSize+pageSize].
@@ -170,15 +187,6 @@ func hasPremiumMap(a map[string]interface{}) bool {
 		return true
 	}
 	return false
-}
-
-// isResearchLimitedMap mirrors the frontend rule: non-premium accounts
-// that have used >= 3 research-mode requests this billing cycle.
-func isResearchLimitedMap(a map[string]interface{}) bool {
-	if hasPremiumMap(a) {
-		return false
-	}
-	return mapInt(a, "research_usage") >= 3
 }
 
 // mapBool / mapInt / mapString are tiny accessors that paper over the

@@ -26,9 +26,10 @@
 `/dashboard/` 列出池内每个账号：
 
 - 邮箱、计划类型、workspace
-- 剩余额度（basic / premium 余额）、space / user 用量、研究用量
+- 私有接口诊断计数（basic / premium / space / user / research），明确标注为非公开字段
 - 已发现模型、最近一次检查时间
 - 单行操作：**打开代理**、**复制 token**、**删除账号**
+- 批量操作：清理所有已明确因 complimentary AI responses 用完而禁用的 Free / Plus 账号。执行前会二次确认，不会删除 Business / Enterprise、临时故障、Cookie 失效或无工作区账号
 
 列表来源于 `GET /admin/accounts?q=&page=&page_size=`。Server 端先按 Dashboard 旧的客户端排序规则排序，再按关键字过滤、再分页，所以 1k+ 大池也不卡。响应里始终带一份池级 `summary`（付费账号数、总剩余等），保证 headline 卡片不被分页影响。
 
@@ -39,8 +40,12 @@
 来自 `summary` 的池级聚合：
 
 - 总数 / 可用 / 已耗尽 / 没有 workspace / 付费账号数
-- 研究受限账号数（非付费 + 当月研究用量 ≥ 3）
-- 总剩余 basic 额度、总 premium 余额 / 上限、总 user / space 用量
+- 完整 Notion AI 套餐信号与 complimentary trial 账号
+- Basic 估算余量以及 premium / user / space 原始值，不将其描述成官网承诺额度
+
+Notion 官网当前没有公布 complimentary responses 的固定次数，也没有公布
+Research Mode 试用的数字上限。Custom Agents 的 Notion credits 是独立体系，
+不计入这里的默认 Agent 私有接口计数。
 
 ## Token 用量统计
 

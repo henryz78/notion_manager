@@ -130,6 +130,6 @@ notion-manager/
 
 - `admin_password` 留空会自动生成随机密码并打印到控制台，哈希后写回 `config.yaml`。**首次启动一定要保存控制台显示的明文密码**，事后无法恢复
 - 反向代理优先使用包含 `full_cookie` 的账号；Microsoft SSO 注册器生成的账号自带可用的 `full_cookie`
-- 免费账号一旦额度耗尽可能长期不可用，付费账号更适合稳定池
+- Free / Plus 的 complimentary trial 用完后可能长期不可用，但账号文件会保留并持续复查，升级到 Business / Enterprise 后可自动恢复
 - 修改 `web/` 前端源码后需要在 `web/` 目录执行 `npm run build`，并把产物同步到 `internal/web/dist/`，否则运行时仍走旧资源
 - `accounts/.register_inputs/<job_id>.json` 里有明文凭据，**不要**纳入版本控制；`.gitignore` 已排除该目录
