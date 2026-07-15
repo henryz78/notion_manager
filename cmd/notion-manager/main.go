@@ -175,7 +175,7 @@ func main() {
 	// backups but never contains prompts, answers, tool arguments, or Notion
 	// personal-instruction content.
 	requestHistoryPath := filepath.Join(accountsDir, ".request_history.json")
-	requestHistory, err := proxy.NewRequestHistoryStore(requestHistoryPath, 1000)
+	requestHistory, err := proxy.NewRequestHistoryStore(requestHistoryPath, 100)
 	if err != nil {
 		log.Printf("[request-history] load %s: %v (starting with empty history)", requestHistoryPath, err)
 	}

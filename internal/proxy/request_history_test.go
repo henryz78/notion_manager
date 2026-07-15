@@ -50,6 +50,19 @@ func TestRequestHistoryStoreRetentionFilteringAndNewestFirst(t *testing.T) {
 	}
 }
 
+func TestRequestHistoryStoreDefaultLimitIsOneHundred(t *testing.T) {
+	store, err := NewRequestHistoryStore("", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 101; i++ {
+		store.Record(RequestHistoryEntry{ID: generateUUIDv4(), Status: "success"})
+	}
+	if got := store.Snapshot(RequestHistoryQuery{PageSize: 200}).Total; got != 100 {
+		t.Fatalf("expected default retention limit 100, got %d", got)
+	}
+}
+
 func TestRequestHistoryStoreConcurrentRecord(t *testing.T) {
 	store, err := NewRequestHistoryStore("", 1000)
 	if err != nil {

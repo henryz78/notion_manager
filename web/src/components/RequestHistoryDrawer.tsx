@@ -242,7 +242,7 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
 
         <div className="flex items-center justify-between gap-3 px-5 py-3 border-t border-border">
           <span className="text-[11px] text-text-muted">
-            最多保留最近 1000 条 · 服务重启后仍保留
+            最多保留最近 100 条 · 服务重启后仍保留
           </span>
           <div className="flex items-center gap-2">
             <button

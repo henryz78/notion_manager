@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	defaultRequestHistoryLimit    = 1000
+	defaultRequestHistoryLimit    = 100
 	defaultRequestHistoryPageSize = 50
 	maxRequestHistoryPageSize     = 200
 	maxRequestHistoryErrorLength  = 500
