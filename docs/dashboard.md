@@ -21,6 +21,18 @@ After signing in through `/dashboard/`, the frontend uses the `dashboard_session
 
 Login uses client-side SHA256(salt + password) so the plaintext password never traverses the network — see `internal/proxy/dashboard.go`. A signed, HttpOnly dashboard cookie remains valid for 30 days and survives Railway sleep/restarts; signing-secret changes and explicit logout invalidate it.
 
+## Page layout
+
+The dashboard header now switches between two focused pages:
+
+- **Accounts** — pool summary, quota diagnostics, refresh/add/register/cleanup actions, search, and account cards
+- **Settings & history** — API key/base URL, global proxy, feature toggles, request history, registration jobs, and the running build version
+
+The header and settings page display the current short commit. The HTML shell is
+served with `no-store`, while hashed JS/CSS assets remain immutable. The full
+version is also available in the `X-Notion-Manager-Version` response header on
+`GET /health`.
+
 ## Pool view
 
 `/dashboard/` lists every account in the pool with:
@@ -70,12 +82,14 @@ Top-right `+ Register` button. Streams a job's progress live. See [Bulk Registra
 
 A history drawer (`History` button) shows the most recent jobs from `/admin/register/jobs`, with per-job snapshot, retry, and delete actions.
 
-## Settings panel
+## Settings & history page
 
 Editable knobs persisted into `config.yaml`:
 
 - `enable_web_search`, `enable_workspace_search`
 - `ask_mode_default` — when ON, every request behaves as if the user toggled Notion's "Ask" (read-only). The per-request `-ask` model suffix overrides this for one call
+- `use_client_system_prompt` and `use_notion_personal_instructions` are independent: either, both, or neither may be enabled
+- `enable_tool_bridge` separately controls external Tools/function-call compatibility. Turning it off leaves normal chat active but client tools are treated as plain requests
 - `debug_logging`
 - `notion_proxy` — paste an `http`/`https`/`socks5`/`socks5h` URL to tunnel **all** Notion-bound traffic. Bad schemes are rejected with a 400; clearing the field reverts to direct dial. Idle pooled connections are dropped on save so the next dial picks up the new upstream
 

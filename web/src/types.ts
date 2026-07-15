@@ -186,7 +186,7 @@ export interface TokenStats {
 
 export type RequestHistoryStatus = 'success' | 'error'
 export type RequestHistoryAPI = 'anthropic' | 'openai_chat' | 'openai_responses'
-export type RequestPromptMode = 'existing_prompt' | 'notion_personal_instructions' | 'not_applicable'
+export type RequestPromptMode = 'existing_prompt' | 'notion_personal_instructions' | 'client_and_notion_personal' | 'no_behavior_prompt' | 'not_applicable'
 
 // Metadata-only API diagnostics. The backend never includes request messages,
 // system prompts, response text, tool arguments, or personal-instruction text.

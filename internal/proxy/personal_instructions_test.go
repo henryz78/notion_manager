@@ -43,6 +43,41 @@ func TestNotionPersonalInstructionsConfigDefaultsAndEnv(t *testing.T) {
 	}
 }
 
+func TestIndependentPromptAndToolSettingsDefaultsAndEnv(t *testing.T) {
+	t.Setenv("USE_CLIENT_SYSTEM_PROMPT", "")
+	t.Setenv("ENABLE_TOOL_BRIDGE", "")
+
+	defaults := DefaultConfig()
+	if !defaults.ClientSystemPromptEnabled() {
+		t.Fatal("client system prompt must default to true")
+	}
+	if !defaults.ToolBridgeEnabled() {
+		t.Fatal("tool bridge must default to true")
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("proxy:\n  default_model: claude-opus-4.6\n"), 0o644); err != nil {
+		t.Fatalf("write old config: %v", err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig old config: %v", err)
+	}
+	if !cfg.ClientSystemPromptEnabled() || !cfg.ToolBridgeEnabled() {
+		t.Fatal("old configs must retain client prompts and tool compatibility")
+	}
+
+	t.Setenv("USE_CLIENT_SYSTEM_PROMPT", "false")
+	t.Setenv("ENABLE_TOOL_BRIDGE", "false")
+	cfg, err = LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig env overrides: %v", err)
+	}
+	if cfg.ClientSystemPromptEnabled() || cfg.ToolBridgeEnabled() {
+		t.Fatal("environment variables should independently disable both settings")
+	}
+}
+
 func TestLoadOldConfigDefaultsPersonalInstructionsOff(t *testing.T) {
 	previous := AppConfig
 	t.Cleanup(func() { AppConfig = previous })
@@ -77,7 +112,7 @@ func TestAdminSettingsReadsUpdatesAndPersistsPersonalInstructions(t *testing.T) 
 	}
 
 	handler := HandleAdminSettings(configPath, NewDashboardAuth("", ""))
-	put := httptest.NewRequest(http.MethodPut, "/admin/settings", strings.NewReader(`{"use_notion_personal_instructions":true}`))
+	put := httptest.NewRequest(http.MethodPut, "/admin/settings", strings.NewReader(`{"use_client_system_prompt":false,"use_notion_personal_instructions":true,"enable_tool_bridge":false}`))
 	put.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, put)
@@ -95,6 +130,9 @@ func TestAdminSettingsReadsUpdatesAndPersistsPersonalInstructions(t *testing.T) 
 	if !AppConfig.NotionPersonalInstructionsEnabled() {
 		t.Fatal("runtime config was not updated")
 	}
+	if AppConfig.ClientSystemPromptEnabled() || AppConfig.ToolBridgeEnabled() {
+		t.Fatal("independent prompt/tool settings were not updated")
+	}
 	if globalSessionManager.Count() != 0 {
 		t.Fatal("prompt-mode change must clear existing Notion thread sessions")
 	}
@@ -105,6 +143,10 @@ func TestAdminSettingsReadsUpdatesAndPersistsPersonalInstructions(t *testing.T) 
 	}
 	if !strings.Contains(string(persisted), "use_notion_personal_instructions: true") {
 		t.Fatalf("setting was not persisted:\n%s", persisted)
+	}
+	if !strings.Contains(string(persisted), "use_client_system_prompt: false") ||
+		!strings.Contains(string(persisted), "enable_tool_bridge: false") {
+		t.Fatalf("independent settings were not persisted:\n%s", persisted)
 	}
 
 	get := httptest.NewRequest(http.MethodGet, "/admin/settings", nil)
@@ -119,6 +161,12 @@ func TestAdminSettingsReadsUpdatesAndPersistsPersonalInstructions(t *testing.T) 
 	}
 	if enabled, _ := current["use_notion_personal_instructions"].(bool); !enabled {
 		t.Fatalf("GET response did not expose setting: %#v", current)
+	}
+	if enabled, _ := current["use_client_system_prompt"].(bool); enabled {
+		t.Fatalf("GET response did not expose disabled client prompt: %#v", current)
+	}
+	if enabled, _ := current["enable_tool_bridge"].(bool); enabled {
+		t.Fatalf("GET response did not expose disabled tool bridge: %#v", current)
 	}
 }
 
@@ -229,6 +277,7 @@ func TestBuildFullTranscriptPersonalInstructionsMode(t *testing.T) {
 		"config-id",
 		"context-id",
 		"2026-07-13T00:00:00Z",
+		false,
 		true,
 		"page-a",
 	)
@@ -286,6 +335,7 @@ func TestPersonalInstructionsModePreservesInjectedToolBridge(t *testing.T) {
 		"config-id",
 		"context-id",
 		"2026-07-13T00:00:00Z",
+		false,
 		true,
 		"page-a",
 	)
@@ -328,6 +378,7 @@ func TestBuildFullTranscriptExistingModeUnchanged(t *testing.T) {
 		"config-id",
 		"context-id",
 		"2026-07-13T00:00:00Z",
+		true,
 		false,
 		"",
 	)
@@ -339,6 +390,94 @@ func TestBuildFullTranscriptExistingModeUnchanged(t *testing.T) {
 	userText := transcript[2].(ResearcherTranscriptMsg).Value.([][]string)[0][0]
 	if !strings.Contains(userText, "existing system") || !strings.Contains(userText, "hello") {
 		t.Fatalf("existing system-prompt behavior changed: %q", userText)
+	}
+}
+
+func TestBuildFullTranscriptSupportsBothPromptSourcesAndNeither(t *testing.T) {
+	previous := AppConfig
+	AppConfig = DefaultConfig()
+	t.Cleanup(func() { AppConfig = previous })
+
+	acc := &Account{UserID: "user-a", SpaceID: "space-a"}
+	build := func(useClient, usePersonal bool, pageID string) []interface{} {
+		return buildFullTranscript(
+			acc,
+			[]ChatMessage{
+				{Role: "system", Content: "client system"},
+				{Role: "user", Content: "hello"},
+			},
+			"model-a",
+			false,
+			true,
+			nil,
+			false,
+			nil,
+			"config-id",
+			"context-id",
+			"2026-07-13T00:00:00Z",
+			useClient,
+			usePersonal,
+			pageID,
+		)
+	}
+
+	both := build(true, true, "page-a")
+	bothContext := both[1].(ResearcherTranscriptMsg).Value.(map[string]interface{})
+	bothText := both[2].(ResearcherTranscriptMsg).Value.([][]string)[0][0]
+	if bothContext["context_page_id"] != "page-a" || !strings.Contains(bothText, "client system") {
+		t.Fatalf("both prompt sources were not included: context=%#v text=%q", bothContext, bothText)
+	}
+
+	neither := build(false, false, "")
+	neitherContext := neither[1].(ResearcherTranscriptMsg).Value.(map[string]interface{})
+	neitherText := neither[2].(ResearcherTranscriptMsg).Value.([][]string)[0][0]
+	if _, ok := neitherContext["context_page_id"]; ok || strings.Contains(neitherText, "client system") {
+		t.Fatalf("disabled prompt sources were included: context=%#v text=%q", neitherContext, neitherText)
+	}
+	if !strings.Contains(neitherText, "hello") {
+		t.Fatalf("normal user message was lost: %q", neitherText)
+	}
+}
+
+func TestCurrentRequestPromptModeSupportsAllCombinations(t *testing.T) {
+	previous := AppConfig
+	AppConfig = DefaultConfig()
+	t.Cleanup(func() { AppConfig = previous })
+
+	tests := []struct {
+		client   bool
+		personal bool
+		want     string
+	}{
+		{true, false, RequestPromptModeExisting},
+		{false, true, RequestPromptModePersonalInstructions},
+		{true, true, RequestPromptModeClientAndPersonal},
+		{false, false, RequestPromptModeNone},
+	}
+	for _, tt := range tests {
+		AppConfig.Proxy.UseClientSystemPrompt = tt.client
+		AppConfig.Proxy.UseNotionPersonalInstructions = tt.personal
+		if got := currentRequestPromptMode(); got != tt.want {
+			t.Fatalf("client=%v personal=%v: got %q, want %q", tt.client, tt.personal, got, tt.want)
+		}
+	}
+}
+
+func TestToolBridgeSettingControlsExternalToolHandling(t *testing.T) {
+	previous := AppConfig
+	AppConfig = DefaultConfig()
+	t.Cleanup(func() { AppConfig = previous })
+
+	if !toolBridgeActive(false, 1) {
+		t.Fatal("default configuration should handle client tools")
+	}
+	AppConfig.Proxy.EnableToolBridge = false
+	if toolBridgeActive(false, 1) {
+		t.Fatal("disabled tool bridge should treat tool requests as normal chat")
+	}
+	AppConfig.Proxy.EnableToolBridge = true
+	if toolBridgeActive(true, 1) || toolBridgeActive(false, 0) {
+		t.Fatal("researcher requests and requests without tools should skip the bridge")
 	}
 }
 
@@ -368,6 +507,7 @@ func TestBuildPartialTranscriptUsesCurrentAccountsPageID(t *testing.T) {
 func TestRecoveryPromptOmitsClientSystemInPersonalInstructionsMode(t *testing.T) {
 	previous := AppConfig
 	AppConfig = DefaultConfig()
+	AppConfig.Proxy.UseClientSystemPrompt = false
 	AppConfig.Proxy.UseNotionPersonalInstructions = true
 	t.Cleanup(func() { AppConfig = previous })
 

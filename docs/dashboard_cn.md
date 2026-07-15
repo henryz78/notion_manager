@@ -21,6 +21,17 @@
 
 登录密码使用客户端 SHA256(salt + password)，明文密码永远不离开浏览器，详见 `internal/proxy/dashboard.go`。登录后写入的 HttpOnly 签名 cookie 有效期为 30 天，Railway 休眠、重启或更换容器后仍然有效；主动退出或修改签名密钥后会失效。
 
+## 页面布局
+
+Dashboard 顶部拆成两个页面：
+
+- **账号管理**：账号概览、额度诊断、刷新、添加/注册、批量清理、搜索与账号卡片
+- **设置与记录**：API Key / Base URL、全局代理、功能开关、调用记录、注册任务和当前运行版本
+
+顶栏和“设置与记录”页都会显示当前短提交号。入口 HTML 使用 `no-store`，
+新版本部署后刷新页面即可拿到新的带哈希 JS/CSS，不再依赖手动清理缓存。
+`GET /health` 的 `X-Notion-Manager-Version` 响应头也会返回完整版本。
+
 ## 池视图
 
 `/dashboard/` 列出池内每个账号：
@@ -70,12 +81,13 @@ Research Mode 试用的数字上限。Custom Agents 的 Notion credits 是独立
 
 `History` 按钮打开历史抽屉，列出 `/admin/register/jobs` 返回的最近 Job，每条都支持查看快照、重试、删除。
 
-## 设置面板
+## 设置与记录页面
 
 可在线编辑、写回 `config.yaml`：
 
 - `enable_web_search`、`enable_workspace_search`
 - `ask_mode_default` —— 打开后所有请求等同于 Notion 前端的 “Ask”（read-only）模式；请求级 `-ask` 后缀仍可对单次请求覆盖
+- 三个开关互相独立，可任意组合：`use_client_system_prompt`、`use_notion_personal_instructions`、`enable_tool_bridge`。关闭工具兼容后普通聊天继续使用，客户端 Tools/函数调用停止处理
 - `debug_logging`
 - `notion_proxy` —— 填入 `http`/`https`/`socks5`/`socks5h` URL，会代理**所有**指向 Notion 的连接。错误 scheme 会立即 400；清空回退到直连。保存时会丢弃空闲连接，下一次拨号即采用新上游
 

@@ -424,11 +424,11 @@ func buildRecoveryMessages(messages []ChatMessage, includeSystem bool, skipEntry
 }
 
 func buildFreshThreadRecoveryMessages(messages []ChatMessage) []ChatMessage {
-	return buildRecoveryMessages(messages, !AppConfig.NotionPersonalInstructionsEnabled(), nil)
+	return buildRecoveryMessages(messages, AppConfig.ClientSystemPromptEnabled(), nil)
 }
 
 func buildToolBridgeRecoveryMessages(messages []ChatMessage) []ChatMessage {
-	return buildRecoveryMessages(messages, !AppConfig.NotionPersonalInstructionsEnabled(), func(msg ChatMessage, content string) bool {
+	return buildRecoveryMessages(messages, AppConfig.ClientSystemPromptEnabled(), func(msg ChatMessage, content string) bool {
 		return msg.Role == "assistant" && detectToolBridgeNoToolResponse(content)
 	})
 }

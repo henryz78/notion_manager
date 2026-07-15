@@ -33,7 +33,9 @@
 | `proxy.client_version` | `23.13.20260313.1423` | 同左 | `x-notion-client-version` 请求头 |
 | `proxy.default_model` | `claude-opus-4.6` | `claude-opus-4.6` | 请求未传 `model` 时的回退 |
 | `proxy.disable_notion_prompt` | `true` | `false` | 关闭 Notion 内置 ~33k 系统提示，节省输入 token |
-| `proxy.use_notion_personal_instructions` | `false` | `false` | `false`：保留现有客户端 system prompt 处理；`true`：使用所选账号官网默认 Notion Agent 的个人指令页面，项目只读取页面 ID、不读取正文 |
+| `proxy.use_client_system_prompt` | `true` | `true` | 是否带上客户端传来的 System Prompt；与官网个人指令互相独立 |
+| `proxy.use_notion_personal_instructions` | `false` | `false` | 使用所选账号官网默认 Notion Agent 的个人指令页面；项目只读取页面 ID、不读取正文 |
+| `proxy.enable_tool_bridge` | `true` | `true` | 把外部 Tools / 函数调用转换成 Claude Code 等客户端所需的兼容格式 |
 | `proxy.enable_web_search` | `true` | `true` | 联网搜索全局开关（可被请求头覆盖） |
 | `proxy.enable_workspace_search` | `false` | `false` | 工作区搜索全局开关（可被请求头覆盖） |
 | `proxy.ask_mode_default` | 未设置 | `false` | 为 `true` 时所有对话默认走 `useReadOnlyMode=true`（即 Notion 前端的 “Ask” 开关）；请求级 `-ask` 后缀仍可覆盖 |
@@ -68,12 +70,16 @@
 export PORT=3000
 export API_KEY=sk-your-api-key
 export ADMIN_PASSWORD=your-dashboard-password
+# 可选：手动覆盖 Dashboard 显示的版本；Railway 仓库部署通常会自动提供提交号
+export APP_VERSION=your-version
 # 可选的 Dashboard 登录签名密钥；不填时自动使用 ADMIN_PASSWORD。
 export DASHBOARD_SESSION_SECRET=your-stable-random-secret
 export ENABLE_WEB_SEARCH=true
 export ENABLE_WORKSPACE_SEARCH=false
 export ASK_MODE_DEFAULT=false
+export USE_CLIENT_SYSTEM_PROMPT=true
 export USE_NOTION_PERSONAL_INSTRUCTIONS=false
+export ENABLE_TOOL_BRIDGE=true
 export NOTION_PROXY=socks5h://127.0.0.1:1080
 export QUOTA_LIVE_CHECK_SECONDS=5
 export REFRESH_CONCURRENCY=10
@@ -94,7 +100,7 @@ export REFRESH_CONCURRENCY=10
 | `DELETE /admin/accounts/{email}` | 删除账号 JSON + 池中条目 | Dashboard 会话 |
 | `GET /admin/models` | 模型映射 + 池内可用模型 | Dashboard 会话 |
 | `GET/POST /admin/refresh` | 查询 / 触发刷新 | Dashboard 会话 |
-| `GET/PUT /admin/settings` | 读 / 写运行时设置（`enable_web_search` / `enable_workspace_search` / `ask_mode_default` / `use_notion_personal_instructions` / `debug_logging` / `notion_proxy`） | Dashboard 会话 |
+| `GET/PUT /admin/settings` | 读 / 写运行时设置（`enable_web_search` / `enable_workspace_search` / `ask_mode_default` / `use_client_system_prompt` / `use_notion_personal_instructions` / `enable_tool_bridge` / `debug_logging` / `notion_proxy`） | Dashboard 会话 |
 | `GET /admin/stats` | Token 用量统计（累计 + 今日 + 24h + 30 天序列 + Top‑N） | Dashboard 会话 |
 | `POST /admin/register` | 兼容历史的同步批量注册 | Dashboard 会话 |
 | `GET /admin/register/providers` | Provider 列表 | Dashboard 会话 |

@@ -114,6 +114,10 @@ public docs do not publish a fixed numeric cap or reset rule.
 
 ### Data Source
 
+The settings page exposes three independent request-processing switches:
+`use_client_system_prompt`, `use_notion_personal_instructions`, and
+`enable_tool_bridge`. Do not render them as a mutually-exclusive mode picker.
+
 The dashboard fetches from `GET /admin/accounts` with the dashboard
 session cookie (or `Authorization: Bearer <api-key>`).
 
@@ -172,6 +176,13 @@ Response shape:
 - Click account card → `GET /proxy/start?email=<email>` (opens in new tab)
 - "Open Best" button → `GET /proxy/start?best=true`
 - Both create a `np_session` cookie and redirect to `/ai` (Notion reverse proxy)
+
+### Dashboard Navigation & Version
+
+- `#accounts` is the account-pool page: summary, quota diagnostics, actions, search, cards, and pagination.
+- `#settings` is the settings/history page: API connection details, proxy, feature toggles, request history, registration jobs, and version details.
+- The Go dashboard handler injects `<meta name="app-version">`; render its short form in the header and preserve the full value in the title.
+- `index.html` is served with `Cache-Control: no-store`; hashed assets stay immutable.
 
 ## Conventions
 

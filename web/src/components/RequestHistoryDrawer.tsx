@@ -129,7 +129,7 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
         className="relative w-full max-w-[1180px] h-full bg-bg-secondary border-l border-border shadow-2xl flex flex-col"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="flex items-center justify-between gap-4 px-5 py-3.5 border-b border-border">
+        <div className="flex items-center justify-between gap-4 px-5 py-3.5 border-b border-border max-sm:px-3">
           <div className="flex items-center gap-2 text-text-primary min-w-0">
             <IconActivity size={16} />
             <span className="text-[14px] font-semibold tracking-tight">调用记录</span>
@@ -169,7 +169,7 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
           </div>
         </div>
 
-        <div className="px-5 py-3 border-b border-border bg-[#171717]">
+        <div className="px-5 py-3 border-b border-border bg-[#171717] max-sm:px-3">
           <div className="text-[11px] text-text-secondary mb-3 leading-relaxed">
             这里只保存模型、账号、提示词模式、Tools 数量、Token、耗时和错误原因。
             <span className="text-ok ml-1">不会保存问题、回答、System Prompt、工具参数或官网个人指令正文。</span>
@@ -194,8 +194,10 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
             </FilterSelect>
             <FilterSelect value={promptMode} onChange={setPromptMode}>
               <option value="all">全部提示词模式</option>
-              <option value="existing_prompt">现有提示词</option>
+              <option value="existing_prompt">客户端 System Prompt</option>
               <option value="notion_personal_instructions">官网个人指令</option>
+              <option value="client_and_notion_personal">客户端 + 官网个人指令</option>
+              <option value="no_behavior_prompt">两者都关</option>
               <option value="not_applicable">不适用</option>
             </FilterSelect>
           </div>
@@ -344,7 +346,7 @@ function RequestRow({
       </div>
 
       {!success && entry.error && (
-        <details className="mt-2 ml-[376px] max-w-[690px] group">
+        <details className="mt-2 ml-[376px] max-w-[690px] group max-sm:ml-0">
           <summary className="text-[11px] text-err/90 hover:text-err cursor-pointer select-none truncate">
             {entry.error}
           </summary>
@@ -384,10 +386,14 @@ function formatPromptMode(mode: string): string {
   switch (mode) {
     case 'notion_personal_instructions':
       return '官网个人指令'
+    case 'client_and_notion_personal':
+      return '客户端 + 官网个人指令'
+    case 'no_behavior_prompt':
+      return '两者都关'
     case 'not_applicable':
       return '不适用'
     case 'existing_prompt':
-      return '现有提示词'
+      return '客户端 System Prompt'
     default:
       return mode || '—'
   }

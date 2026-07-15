@@ -231,8 +231,21 @@ function LoginPage({ onSuccess }: { onSuccess: () => void }) {
 
 // --- Header ---
 
-function Header({ query, onQuery, onLogout, authRequired }: {
-  query: string; onQuery: (q: string) => void; onLogout: () => void; authRequired: boolean
+type DashboardPage = 'accounts' | 'settings'
+
+function displayVersion(version: string): string {
+  const value = (version || 'dev').trim()
+  return /^[0-9a-f]{12,}$/i.test(value) ? value.slice(0, 7) : value
+}
+
+function Header({ query, onQuery, onLogout, authRequired, activePage, onPageChange, version }: {
+  query: string
+  onQuery: (q: string) => void
+  onLogout: () => void
+  authRequired: boolean
+  activePage: DashboardPage
+  onPageChange: (page: DashboardPage) => void
+  version: string
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -263,16 +276,36 @@ function Header({ query, onQuery, onLogout, authRequired }: {
   }, [])
 
   return (
-    <header className="sticky top-0 z-50 flex items-center justify-between px-6 py-2.5 border-b border-border bg-bg-secondary/80 backdrop-blur-xl">
-      <div className="flex items-center gap-2.5">
+    <header className="sticky top-0 z-50 flex items-center gap-5 px-6 py-2.5 border-b border-border bg-bg-secondary/90 backdrop-blur-xl max-md:flex-wrap max-md:gap-2 max-md:px-3">
+      <div className="flex items-center gap-2.5 min-w-0 max-md:flex-1">
         <div className="w-7 h-7 bg-[#333] rounded-md flex items-center justify-center text-sm font-extrabold text-white">N</div>
         <span className="text-[15px] font-semibold tracking-tight">
           notion-manager
-          <span className="text-text-secondary font-normal text-[13px] ml-1.5">dashboard</span>
+          <span className="text-text-secondary font-normal text-[13px] ml-1.5 max-sm:hidden">dashboard</span>
+        </span>
+        <span
+          className="text-[10px] text-text-muted font-mono bg-white/[.04] border border-white/[.06] rounded px-1.5 py-0.5"
+          title={`当前运行版本：${version}`}
+        >
+          {displayVersion(version)}
         </span>
       </div>
-      <div className="flex items-center gap-3">
-        <div className="relative w-72">
+      <nav className="flex items-center rounded-lg bg-black/20 p-1 border border-white/[.05] max-md:order-2 max-md:w-full">
+        <button
+          onClick={() => onPageChange('accounts')}
+          className={`px-3 py-1.5 rounded-md text-[12px] font-medium cursor-pointer border-none transition-colors max-md:flex-1 ${activePage === 'accounts' ? 'bg-white/10 text-white shadow-sm' : 'bg-transparent text-text-muted hover:text-text-primary'}`}
+        >
+          账号管理
+        </button>
+        <button
+          onClick={() => onPageChange('settings')}
+          className={`px-3 py-1.5 rounded-md text-[12px] font-medium cursor-pointer border-none transition-colors max-md:flex-1 ${activePage === 'settings' ? 'bg-white/10 text-white shadow-sm' : 'bg-transparent text-text-muted hover:text-text-primary'}`}
+        >
+          设置与记录
+        </button>
+      </nav>
+      <div className="flex items-center gap-3 ml-auto max-md:order-3 max-md:ml-0 max-md:w-full">
+        {activePage === 'accounts' && <div className="relative w-72 max-md:flex-1">
           <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
           </svg>
@@ -284,7 +317,7 @@ function Header({ query, onQuery, onLogout, authRequired }: {
             className="w-full py-1.5 pl-8 pr-10 bg-bg-input border border-border rounded-md text-[13px] text-text-primary outline-none focus:border-white/20 transition-colors placeholder:text-text-muted"
           />
           <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] text-text-muted bg-bg-card border border-border rounded px-1.5 py-0.5">/</kbd>
-        </div>
+        </div>}
         {authRequired && (
           <button
             onClick={onLogout}
@@ -301,12 +334,12 @@ function Header({ query, onQuery, onLogout, authRequired }: {
 
 function StatCard({ label, value, sub, color, icon }: { label: string; value: string | number; sub: string; color?: string; icon?: React.ReactNode }) {
   return (
-    <div className="px-6 py-5">
+    <div className="px-6 py-5 max-sm:px-3 max-sm:py-3">
       <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-1 flex items-center gap-1.5">
         {icon}
         <span>{label}</span>
       </div>
-      <div className="text-2xl font-bold tracking-tight tabular-nums" style={color ? { color } : undefined}>{value}</div>
+      <div className="text-2xl font-bold tracking-tight tabular-nums max-sm:text-xl" style={color ? { color } : undefined}>{value}</div>
       <div className="text-[11px] text-text-muted mt-1 truncate">{sub}</div>
     </div>
   )
@@ -491,7 +524,7 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
 
   return (
     <div
-      className={`rounded-lg p-4 border ${authInvalid || noWorkspace || temporarilyUnavailable ? 'cursor-not-allowed' : 'cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30'} transition-all duration-200 ${cardBg}`}
+      className={`rounded-lg p-4 border max-sm:p-3 ${authInvalid || noWorkspace || temporarilyUnavailable ? 'cursor-not-allowed' : 'cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30'} transition-all duration-200 ${cardBg}`}
       onClick={handleClick}
       title={authInvalid ? '账号 Cookie/token 已失效，请重新导入账号' : noWorkspace ? '账号无可访问工作区，已被排除出选号池' : temporarilyUnavailable ? `临时跳过：${account.last_failure_reason || 'temporary_failure'}` : undefined}
     >
@@ -611,6 +644,8 @@ export default function App() {
   const [requestHistoryOpen, setRequestHistoryOpen] = useState(false)
   const [copiedField, setCopiedField] = useState<'key' | 'base' | null>(null)
   const [showAddModal, setShowAddModal] = useState(false)
+  const [activePage, setActivePage] = useState<DashboardPage>(() => window.location.hash === '#settings' ? 'settings' : 'accounts')
+  const appVersion = document.querySelector('meta[name="app-version"]')?.getAttribute('content') || 'dev'
   const copyToClipboard = (text: string, field: 'key' | 'base') => {
     navigator.clipboard.writeText(text)
     setCopiedField(field)
@@ -622,6 +657,7 @@ export default function App() {
   const [proxyDraft, setProxyDraft] = useState('')
   const [proxyError, setProxyError] = useState<string | null>(null)
   const [proxySaving, setProxySaving] = useState(false)
+  const [promptModeSaving, setPromptModeSaving] = useState(false)
   const PAGE_SIZE = 20
 
   // Debounced query: typing in the search box shouldn't fire a request
@@ -633,6 +669,18 @@ export default function App() {
     const handle = setTimeout(() => setDebouncedQuery(query.trim()), 250)
     return () => clearTimeout(handle)
   }, [query])
+
+  useEffect(() => {
+    const syncPageFromHash = () => setActivePage(window.location.hash === '#settings' ? 'settings' : 'accounts')
+    window.addEventListener('hashchange', syncPageFromHash)
+    return () => window.removeEventListener('hashchange', syncPageFromHash)
+  }, [])
+
+  const changePage = (nextPage: DashboardPage) => {
+    setActivePage(nextPage)
+    const nextHash = nextPage === 'settings' ? '#settings' : '#accounts'
+    if (window.location.hash !== nextHash) window.history.replaceState(null, '', nextHash)
+  }
 
   // Check auth on mount
   useEffect(() => {
@@ -730,13 +778,24 @@ export default function App() {
     }
   }
 
-  const toggleSetting = async (key: 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'use_notion_personal_instructions' | 'debug_logging') => {
+  const toggleSetting = async (key: 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'debug_logging') => {
     if (!settings) return
     const newVal = !settings[key]
     try {
       const updated = await updateSettings({ [key]: newVal })
       setSettings(updated)
     } catch { /* ignore */ }
+  }
+
+  const togglePromptSetting = async (key: 'use_client_system_prompt' | 'use_notion_personal_instructions' | 'enable_tool_bridge') => {
+    if (!settings || promptModeSaving) return
+    setPromptModeSaving(true)
+    try {
+      const updated = await updateSettings({ [key]: !settings[key] })
+      setSettings(updated)
+    } finally {
+      setPromptModeSaving(false)
+    }
   }
 
   // saveProxy commits the proxy input draft. We skip the round trip when
@@ -869,12 +928,20 @@ export default function App() {
 
   return (
     <div className="min-h-screen">
-      <Header query={query} onQuery={setQuery} onLogout={handleLogout} authRequired={authRequired} />
+      <Header
+        query={query}
+        onQuery={setQuery}
+        onLogout={handleLogout}
+        authRequired={authRequired}
+        activePage={activePage}
+        onPageChange={changePage}
+        version={appVersion}
+      />
 
-      <main className="max-w-[1280px] mx-auto px-6 py-6">
+      <main className="max-w-[1280px] mx-auto px-6 py-6 max-sm:px-3 max-sm:py-4">
         {/* Summary */}
-        {summary && (
-          <div className="grid grid-cols-5 divide-x divide-white/[.05] mb-6 max-lg:grid-cols-3 max-md:grid-cols-2 max-md:divide-x-0 max-sm:grid-cols-1">
+        {activePage === 'accounts' && summary && (
+          <div className="grid grid-cols-5 divide-x divide-white/[.05] mb-6 max-lg:grid-cols-3 max-md:grid-cols-2 max-md:divide-x-0 max-sm:mb-4">
             <StatCard
               label="总账号" value={data!.total}
               sub={accountSummaryParts}
@@ -910,10 +977,10 @@ export default function App() {
         )}
 
         {/* Total Quota Bar */}
-        <TotalQuotaBar summary={data?.summary} />
+        {activePage === 'accounts' && <TotalQuotaBar summary={data?.summary} />}
 
         {/* Refresh Status Banner */}
-        {refreshStatus?.refreshing && (
+        {activePage === 'accounts' && refreshStatus?.refreshing && (
           <div className="bg-notion-blue/10 border border-notion-blue/20 rounded-lg p-3 mb-5 flex items-center gap-3">
             <div className="w-4 h-4 border-2 border-notion-blue/30 border-t-notion-blue rounded-full animate-spin shrink-0" />
             <div className="flex-1 min-w-0">
@@ -931,7 +998,7 @@ export default function App() {
         )}
 
         {/* Actions */}
-        <div className="flex items-center gap-2.5 mb-5 flex-wrap">
+        {activePage === 'accounts' && <div className="flex items-center gap-2.5 mb-5 flex-wrap max-sm:grid max-sm:grid-cols-2 max-sm:gap-2 max-sm:[&>button]:justify-center max-sm:[&>button]:px-2 max-sm:[&>button]:text-[12px]">
           <button
             onClick={openBestProxy}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-white hover:bg-white/90 text-[#111] rounded-md text-[13px] font-medium cursor-pointer transition-colors border-none"
@@ -972,44 +1039,118 @@ export default function App() {
           >
             <IconUserPlus size={13} /> 注册账号
           </button>
-          <button
-            onClick={() => setRequestHistoryOpen(true)}
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border"
-          >
-            <IconActivity /> 调用记录
-          </button>
-          <button
-            onClick={() => setHistoryOpen(true)}
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border"
-          >
-            <IconHistory size={13} /> 历史任务
-          </button>
           {refreshTime && (
-            <span className="text-[11px] text-text-muted">
+            <span className="text-[11px] text-text-muted max-sm:col-span-2">
               更新于 {refreshTime}
               {refreshStatus?.last_refresh_at && !refreshStatus.refreshing && (
                 <> · 配额刷新于 {new Date(refreshStatus.last_refresh_at).toLocaleTimeString('zh-CN')}</>
               )}
             </span>
           )}
-        </div>
+        </div>}
+
+        {activePage === 'settings' && (
+          <div className="mb-6">
+            <div className="mb-5">
+              <h2 className="text-[18px] font-semibold text-text-primary">设置与记录</h2>
+              <p className="text-[12px] text-text-muted mt-1">集中管理 API、代理、功能开关和运行记录。</p>
+            </div>
+            <div className="grid grid-cols-3 gap-3 max-md:grid-cols-1">
+              <div className="bg-bg-card border border-border rounded-lg p-4">
+                <div className="text-[11px] text-text-muted uppercase tracking-wider">当前版本</div>
+                <div className="text-[20px] font-semibold font-mono mt-1" title={appVersion}>{displayVersion(appVersion)}</div>
+                <div className="text-[11px] text-text-muted mt-1">用于确认 Railway 是否已经更新</div>
+              </div>
+              <button
+                onClick={() => setRequestHistoryOpen(true)}
+                className="text-left bg-bg-card hover:bg-bg-card-hover border border-border rounded-lg p-4 cursor-pointer transition-colors"
+              >
+                <div className="flex items-center gap-2 text-[13px] font-medium"><IconActivity /> 调用记录</div>
+                <div className="text-[11px] text-text-muted mt-2">查看最近 100 条模型、账号、耗时和错误记录</div>
+              </button>
+              <button
+                onClick={() => setHistoryOpen(true)}
+                className="text-left bg-bg-card hover:bg-bg-card-hover border border-border rounded-lg p-4 cursor-pointer transition-colors"
+              >
+                <div className="flex items-center gap-2 text-[13px] font-medium"><IconHistory size={13} /> 注册任务</div>
+                <div className="text-[11px] text-text-muted mt-2">查看批量注册历史、结果和重试状态</div>
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* API Settings */}
-        {settings && (() => {
+        {activePage === 'settings' && settings && (() => {
           const apiKey = document.querySelector('meta[name="api-key"]')?.getAttribute('content') || ''
           const apiBase = `${window.location.origin}/v1`
           const maskedKey = apiKey ? apiKey.slice(0, 5) + '•'.repeat(Math.max(0, apiKey.length - 9)) + apiKey.slice(-4) : ''
           return (
-            <div className="mb-6 px-4 py-3 bg-[#171717] border border-white/5 rounded-lg shadow-inner">
-              <div className="flex items-center gap-6 flex-wrap">
-                <span className="text-[12px] text-text-secondary font-medium flex items-center gap-2 shrink-0">
-                  <IconSettings /> API 设置
-                </span>
-                <div className="flex items-center gap-6 flex-wrap">
-                  <div className="flex items-center gap-1.5">
+            <div className="mb-6 px-5 py-5 bg-[#171717] border border-white/5 rounded-lg shadow-inner max-sm:px-3 max-sm:py-4">
+              <div className="mb-4">
+                <div className="text-[14px] text-text-primary font-semibold flex items-center gap-2"><IconSettings /> API 与功能设置</div>
+                <div className="text-[11px] text-text-muted mt-1">修改后立即保存；服务重启后继续生效。</div>
+              </div>
+              <div className="mb-5 rounded-lg border border-white/[.07] bg-white/[.025] p-3.5">
+                <div className="flex items-center justify-between gap-3 mb-3 max-sm:items-start">
+                  <div>
+                    <div className="text-[13px] font-medium text-text-primary">提示词与工具处理</div>
+                    <div className="text-[11px] text-text-muted mt-0.5">三个开关互相独立，可以任意组合；修改后会从新会话开始生效。</div>
+                  </div>
+                  <span className="text-[10px] text-ok bg-ok/10 border border-ok/20 rounded px-2 py-0.5 shrink-0">
+                    {promptModeSaving ? '保存中' : '已保存'}
+                  </span>
+                </div>
+                <div className="grid grid-cols-3 gap-2 max-lg:grid-cols-1">
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={settings.use_client_system_prompt}
+                    onClick={() => togglePromptSetting('use_client_system_prompt')}
+                    disabled={promptModeSaving}
+                    className={`text-left rounded-lg border p-3 cursor-pointer transition-colors disabled:cursor-wait ${settings.use_client_system_prompt ? 'border-notion-blue/60 bg-notion-blue/10' : 'border-border bg-bg-card hover:bg-bg-card-hover'}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[12px] font-semibold text-text-primary">客户端 System Prompt</span>
+                      <span className={`text-[10px] ${settings.use_client_system_prompt ? 'text-ok' : 'text-text-muted'}`}>{settings.use_client_system_prompt ? '开启' : '关闭'}</span>
+                    </div>
+                    <div className="text-[11px] text-text-muted mt-1.5 leading-relaxed">开启：保留客户端传来的 system prompt。关闭：忽略这部分，但普通问题仍会发送。</div>
+                  </button>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={settings.use_notion_personal_instructions}
+                    onClick={() => togglePromptSetting('use_notion_personal_instructions')}
+                    disabled={promptModeSaving}
+                    className={`text-left rounded-lg border p-3 cursor-pointer transition-colors disabled:cursor-wait ${settings.use_notion_personal_instructions ? 'border-notion-blue/60 bg-notion-blue/10' : 'border-border bg-bg-card hover:bg-bg-card-hover'}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[12px] font-semibold text-text-primary">Notion 官网个人指令</span>
+                      <span className={`text-[10px] ${settings.use_notion_personal_instructions ? 'text-ok' : 'text-text-muted'}`}>{settings.use_notion_personal_instructions ? '开启' : '关闭'}</span>
+                    </div>
+                    <div className="text-[11px] text-text-muted mt-1.5 leading-relaxed">开启：由当前 Notion 账号的默认 Agent 加载官网保存的个人指令，可和左侧同时开启。</div>
+                  </button>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={settings.enable_tool_bridge}
+                    onClick={() => togglePromptSetting('enable_tool_bridge')}
+                    disabled={promptModeSaving}
+                    className={`text-left rounded-lg border p-3 cursor-pointer transition-colors disabled:cursor-wait ${settings.enable_tool_bridge ? 'border-notion-blue/60 bg-notion-blue/10' : 'border-border bg-bg-card hover:bg-bg-card-hover'}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[12px] font-semibold text-text-primary">外部工具兼容</span>
+                      <span className={`text-[10px] ${settings.enable_tool_bridge ? 'text-ok' : 'text-text-muted'}`}>{settings.enable_tool_bridge ? '开启' : '关闭'}</span>
+                    </div>
+                    <div className="text-[11px] text-text-muted mt-1.5 leading-relaxed">开启：让 Claude Code、Tools 和函数调用正常工作。关闭：按普通聊天发送，外部工具调用停用。</div>
+                  </button>
+                </div>
+              </div>
+              <div className="flex items-center gap-6 flex-wrap max-sm:flex-col max-sm:items-stretch max-sm:gap-4">
+                <div className="flex items-center gap-6 flex-wrap max-sm:flex-col max-sm:items-stretch max-sm:gap-3 max-sm:w-full">
+                  <div className="flex items-center gap-1.5 max-sm:flex-wrap">
                     <span className="text-[11px] text-text-muted">API Key</span>
                     <code
-                      className={`text-[11px] bg-white/[.05] px-1.5 py-0.5 rounded cursor-pointer hover:bg-white/[.1] transition-colors font-mono ${copiedField === 'key' ? 'text-ok' : 'text-text-primary'}`}
+                      className={`text-[11px] bg-white/[.05] px-1.5 py-0.5 rounded cursor-pointer hover:bg-white/[.1] transition-colors font-mono max-sm:max-w-[220px] max-sm:truncate ${copiedField === 'key' ? 'text-ok' : 'text-text-primary'}`}
                       onClick={() => copyToClipboard(apiKey, 'key')}
                       title="点击复制"
                     >
@@ -1031,17 +1172,17 @@ export default function App() {
                       )}
                     </button>
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 max-sm:flex-wrap">
                     <span className="text-[11px] text-text-muted">Base URL</span>
                     <code
-                      className={`text-[11px] bg-white/[.05] px-1.5 py-0.5 rounded cursor-pointer hover:bg-white/[.1] transition-colors font-mono ${copiedField === 'base' ? 'text-ok' : 'text-text-primary'}`}
+                      className={`text-[11px] bg-white/[.05] px-1.5 py-0.5 rounded cursor-pointer hover:bg-white/[.1] transition-colors font-mono break-all ${copiedField === 'base' ? 'text-ok' : 'text-text-primary'}`}
                       onClick={() => copyToClipboard(apiBase, 'base')}
                       title="点击复制"
                     >
                       {copiedField === 'base' ? '✓ 已复制' : apiBase}
                     </code>
                   </div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 max-sm:grid max-sm:grid-cols-[auto_8px_1fr]">
                     <span className="text-[11px] text-text-muted">全局代理</span>
                     <span
                       className={`inline-block w-1.5 h-1.5 rounded-full ${proxyError ? 'bg-err' : settings.notion_proxy ? 'bg-ok' : 'bg-text-muted/60'}`}
@@ -1062,12 +1203,12 @@ export default function App() {
                       }}
                       placeholder="留空 = 直连"
                       disabled={proxySaving}
-                      className={`text-[11px] bg-white/[.05] px-1.5 py-0.5 rounded font-mono outline-none border w-[160px] focus:w-[280px] transition-[width,border-color] duration-150 ${proxyError ? 'border-err text-err' : 'border-transparent focus:border-white/20 text-text-primary'} placeholder:text-text-muted/60`}
+                      className={`text-[11px] bg-white/[.05] px-1.5 py-0.5 rounded font-mono outline-none border w-[160px] focus:w-[280px] transition-[width,border-color] duration-150 max-sm:w-full max-sm:focus:w-full ${proxyError ? 'border-err text-err' : 'border-transparent focus:border-white/20 text-text-primary'} placeholder:text-text-muted/60`}
                       title={proxyError || (settings.notion_proxy ? `当前: ${settings.notion_proxy}` : '当前: 直连')}
                     />
                   </div>
                 </div>
-                <div className="flex items-center gap-5 ml-auto flex-wrap justify-end">
+                <div className="flex items-center gap-5 ml-auto flex-wrap justify-end max-sm:ml-0 max-sm:grid max-sm:grid-cols-2 max-sm:w-full max-sm:gap-3 max-[360px]:grid-cols-1">
                   <label className="flex items-center gap-2 cursor-pointer select-none">
                     <button
                       onClick={() => toggleSetting('enable_web_search')}
@@ -1098,18 +1239,6 @@ export default function App() {
                     </button>
                     <span className="text-[12px] text-text-primary">ASK 模式</span>
                   </label>
-                  <label
-                    className="flex items-center gap-2 cursor-pointer select-none"
-                    title="关闭：使用项目现有提示词处理方式。开启：忽略客户端行为类 system prompt，使用当前 Notion 账号在官网保存的默认 Agent 个人指令；工具调用协议仍会保留。"
-                  >
-                    <button
-                      onClick={() => toggleSetting('use_notion_personal_instructions')}
-                      className={`relative w-7 h-4 rounded-full transition-colors duration-200 cursor-pointer border-none ${settings.use_notion_personal_instructions ? 'bg-[#4dab9a]' : 'bg-white/10 border border-white/5'}`}
-                    >
-                      <span className={`absolute top-[2px] left-[2px] w-3 h-3 rounded-full transition-all duration-200 ${settings.use_notion_personal_instructions ? 'bg-white shadow-sm translate-x-[12px]' : 'bg-white/40'}`} />
-                    </button>
-                    <span className="text-[12px] text-text-primary">官网个人指令</span>
-                  </label>
                   <label className="flex items-center gap-2 cursor-pointer select-none">
                     <button
                       onClick={() => toggleSetting('debug_logging')}
@@ -1125,6 +1254,7 @@ export default function App() {
           )
         })()}
 
+        {activePage === 'accounts' && <>
         {/* Section Title */}
         <div className="text-[12px] font-semibold text-text-secondary uppercase tracking-wider mb-3.5 flex items-center gap-1.5">
           <span>账号池</span>
@@ -1137,7 +1267,7 @@ export default function App() {
             没有找到匹配的账号
           </div>
         ) : (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(340px,1fr))] gap-2.5 mb-4">
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(340px,1fr))] gap-2.5 mb-4 max-sm:grid-cols-1">
             {paged.map(acc => (
               <AccountCard key={acc.email} account={acc} onChanged={loadData} />
             ))}
@@ -1150,7 +1280,7 @@ export default function App() {
             <button
               onClick={() => setPage(0)}
               disabled={page === 0}
-              className="px-2.5 py-1.5 bg-bg-card hover:bg-bg-card-hover text-text-secondary rounded-md text-[12px] cursor-pointer transition-colors border border-border disabled:opacity-30 disabled:cursor-not-allowed"
+              className="px-2.5 py-1.5 bg-bg-card hover:bg-bg-card-hover text-text-secondary rounded-md text-[12px] cursor-pointer transition-colors border border-border disabled:opacity-30 disabled:cursor-not-allowed max-sm:hidden"
             >
               «
             </button>
@@ -1174,12 +1304,13 @@ export default function App() {
             <button
               onClick={() => setPage(totalPages - 1)}
               disabled={page >= totalPages - 1}
-              className="px-2.5 py-1.5 bg-bg-card hover:bg-bg-card-hover text-text-secondary rounded-md text-[12px] cursor-pointer transition-colors border border-border disabled:opacity-30 disabled:cursor-not-allowed"
+              className="px-2.5 py-1.5 bg-bg-card hover:bg-bg-card-hover text-text-secondary rounded-md text-[12px] cursor-pointer transition-colors border border-border disabled:opacity-30 disabled:cursor-not-allowed max-sm:hidden"
             >
               »
             </button>
           </div>
         )}
+        </>}
       </main>
       {showAddModal && <AddAccountModal onClose={() => setShowAddModal(false)} onSuccess={loadData} />}
 

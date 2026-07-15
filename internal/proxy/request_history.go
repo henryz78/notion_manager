@@ -22,8 +22,25 @@ const (
 
 	RequestPromptModeExisting             = "existing_prompt"
 	RequestPromptModePersonalInstructions = "notion_personal_instructions"
+	RequestPromptModeClientAndPersonal    = "client_and_notion_personal"
+	RequestPromptModeNone                 = "no_behavior_prompt"
 	RequestPromptModeNotApplicable        = "not_applicable"
 )
+
+func currentRequestPromptMode() string {
+	clientPrompt := AppConfig.ClientSystemPromptEnabled()
+	personalInstructions := AppConfig.NotionPersonalInstructionsEnabled()
+	switch {
+	case clientPrompt && personalInstructions:
+		return RequestPromptModeClientAndPersonal
+	case clientPrompt:
+		return RequestPromptModeExisting
+	case personalInstructions:
+		return RequestPromptModePersonalInstructions
+	default:
+		return RequestPromptModeNone
+	}
+}
 
 // RequestHistoryEntry contains diagnostic metadata for one client API request.
 // It deliberately has no fields for messages, prompts, tool arguments, model
@@ -355,17 +372,13 @@ type RequestDiagnostic struct {
 
 func newRequestDiagnostic(api string) *RequestDiagnostic {
 	started := time.Now()
-	promptMode := RequestPromptModeExisting
-	if AppConfig.NotionPersonalInstructionsEnabled() {
-		promptMode = RequestPromptModePersonalInstructions
-	}
 	return &RequestDiagnostic{
 		started: started,
 		entry: RequestHistoryEntry{
 			ID:         generateUUIDv4(),
 			CreatedAt:  started.UTC(),
 			API:        api,
-			PromptMode: promptMode,
+			PromptMode: currentRequestPromptMode(),
 			Status:     "success",
 			HTTPStatus: http.StatusOK,
 		},

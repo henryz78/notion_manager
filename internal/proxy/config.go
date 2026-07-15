@@ -53,7 +53,9 @@ type ProxyConfig struct {
 	ClientVersion                 string `yaml:"client_version"`
 	DefaultModel                  string `yaml:"default_model"`
 	DisableNotionPrompt           bool   `yaml:"disable_notion_prompt"`
+	UseClientSystemPrompt         bool   `yaml:"use_client_system_prompt"`
 	UseNotionPersonalInstructions bool   `yaml:"use_notion_personal_instructions"`
+	EnableToolBridge              bool   `yaml:"enable_tool_bridge"`
 	EnableWebSearch               *bool  `yaml:"enable_web_search"`
 	EnableWorkspaceSearch         *bool  `yaml:"enable_workspace_search"`
 	// AskModeDefault toggles Notion's ASK mode (frontend "Answers only,
@@ -133,7 +135,9 @@ func DefaultConfig() *Config {
 			NotionAPIBase:                 "https://www.notion.so/api/v3",
 			ClientVersion:                 "23.13.20260313.1423",
 			DefaultModel:                  "claude-opus-4.6",
+			UseClientSystemPrompt:         true,
 			UseNotionPersonalInstructions: false,
+			EnableToolBridge:              true,
 			EnableWebSearch:               boolPtr(true),
 			EnableWorkspaceSearch:         boolPtr(false),
 			AskModeDefault:                boolPtr(false),
@@ -249,8 +253,14 @@ func LoadConfig(configPath string) (*Config, error) {
 	if v := os.Getenv("DEFAULT_MODEL"); v != "" {
 		cfg.Proxy.DefaultModel = v
 	}
+	if v := os.Getenv("USE_CLIENT_SYSTEM_PROMPT"); v != "" {
+		cfg.Proxy.UseClientSystemPrompt = strings.EqualFold(v, "true") || v == "1"
+	}
 	if v := os.Getenv("USE_NOTION_PERSONAL_INSTRUCTIONS"); v != "" {
 		cfg.Proxy.UseNotionPersonalInstructions = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv("ENABLE_TOOL_BRIDGE"); v != "" {
+		cfg.Proxy.EnableToolBridge = strings.EqualFold(v, "true") || v == "1"
 	}
 	if v := os.Getenv("INFERENCE_TIMEOUT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -626,11 +636,25 @@ func (c *Config) AskModeDefault() bool {
 	return *c.Proxy.AskModeDefault
 }
 
-// NotionPersonalInstructionsEnabled reports whether requests should use the
-// current Notion account's default Agent instructions page instead of client
-// system prompts. The default is false for backward compatibility.
+// ClientSystemPromptEnabled reports whether client-supplied system messages
+// should be included in the Notion transcript. It defaults to true so old
+// configuration files retain the original request behavior.
+func (c *Config) ClientSystemPromptEnabled() bool {
+	return c == nil || c.Proxy.UseClientSystemPrompt
+}
+
+// NotionPersonalInstructionsEnabled reports whether requests should include
+// the current Notion account's default Agent instructions page. This source is
+// independent of client system messages and defaults to false.
 func (c *Config) NotionPersonalInstructionsEnabled() bool {
 	return c != nil && c.Proxy.UseNotionPersonalInstructions
+}
+
+// ToolBridgeEnabled reports whether client tool definitions should be
+// translated through the compatibility bridge. It defaults to true so old
+// configuration files keep tools/function calling working as before.
+func (c *Config) ToolBridgeEnabled() bool {
+	return c == nil || c.Proxy.EnableToolBridge
 }
 
 // NotionProxyURL returns the upstream proxy applied to all notion-bound

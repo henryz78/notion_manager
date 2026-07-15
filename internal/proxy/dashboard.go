@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io/fs"
 	"log"
 	"net/http"
@@ -297,18 +298,22 @@ func HandleDashboard(apiKey string, auth *DashboardAuth) http.Handler {
 			return
 		}
 
-		// For index.html, inject the API key meta tag
+		// For index.html, inject runtime metadata. The version lets operators
+		// confirm which Railway/GHCR deployment is actually serving the page.
 		if path == "/index.html" {
 			data, err := fs.ReadFile(distFS, "index.html")
 			if err != nil {
 				http.Error(w, "index.html not found", http.StatusInternalServerError)
 				return
 			}
-			html := strings.Replace(string(data), "<head>",
-				`<head><meta name="api-key" content="`+apiKey+`">`, 1)
+			metadata := `<meta name="api-key" content="` + html.EscapeString(apiKey) + `">` +
+				`<meta name="app-version" content="` + html.EscapeString(CurrentBuildVersion()) + `">`
+			pageHTML := strings.Replace(string(data), "<head>", "<head>"+metadata, 1)
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-cache")
-			w.Write([]byte(html))
+			w.Header().Set("Cache-Control", "no-store, max-age=0")
+			w.Header().Set("Pragma", "no-cache")
+			w.Header().Set("Expires", "0")
+			_, _ = w.Write([]byte(pageHTML))
 			return
 		}
 

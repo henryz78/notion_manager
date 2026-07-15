@@ -45,10 +45,12 @@ proxy:
     # When true, removes Notion AI identity, built-in tools, and web search.
     # Reduces input tokens from ~33k to ~757. Recommended for pure API proxy usage.
     disable_notion_prompt: true
-    # Prompt handling mode. false = preserve the project's current system-prompt
-    # behavior. true = use the selected Notion account's default Agent personal
-    # instructions page (env: USE_NOTION_PERSONAL_INSTRUCTIONS).
+    # Independent prompt/tool controls. Client system prompts and the selected
+    # account's default Agent personal instructions may both be enabled.
+    use_client_system_prompt: true
     use_notion_personal_instructions: false
+    # Convert external Tools/functions to the Notion-compatible bridge format.
+    enable_tool_bridge: true
     # Enable web search (internet search) for AI responses.
     # Can be overridden per-request via X-Web-Search header.
     enable_web_search: true

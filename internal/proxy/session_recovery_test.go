@@ -53,6 +53,10 @@ func TestCountNonSystemMessagesIgnoresWrapperOnlyUserMessage(t *testing.T) {
 }
 
 func TestBuildFreshThreadRecoveryMessagesCollapsesHistory(t *testing.T) {
+	previous := AppConfig
+	AppConfig = DefaultConfig()
+	t.Cleanup(func() { AppConfig = previous })
+
 	messages := []ChatMessage{
 		{Role: "system", Content: "Answer in Chinese."},
 		{Role: "user", Content: "opus4.6什么时候推出的"},
@@ -84,6 +88,10 @@ func TestBuildFreshThreadRecoveryMessagesCollapsesHistory(t *testing.T) {
 }
 
 func TestBuildToolBridgeRecoveryMessagesSkipsIdentityDriftAssistantText(t *testing.T) {
+	previous := AppConfig
+	AppConfig = DefaultConfig()
+	t.Cleanup(func() { AppConfig = previous })
+
 	messages := []ChatMessage{
 		{Role: "system", Content: "Answer in Chinese."},
 		{Role: "user", Content: "修改 internal/web/dist/assets/index-DlVudHMF.js"},

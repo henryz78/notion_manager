@@ -843,8 +843,10 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			log.Printf("[search] X-Workspace-Search header override: %v", b)
 		}
 
-		// Convert Anthropic tools to OpenAI tools format for tool injection
-		hasTools := !isResearcher && len(req.Tools) > 0
+		// Convert Anthropic tools only while the external tool compatibility
+		// bridge is enabled. When disabled, client tool definitions are ignored
+		// and the request continues as a normal chat request.
+		hasTools := toolBridgeActive(isResearcher, len(req.Tools))
 		enableWebSearch := effectiveWebSearch
 
 		// ── Multi-turn session management ──
@@ -1245,6 +1247,10 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		writeAnthropicError(w, requestID, http.StatusServiceUnavailable,
 			"all accounts exhausted after retries", "overloaded_error")
 	}
+}
+
+func toolBridgeActive(isResearcher bool, toolCount int) bool {
+	return !isResearcher && toolCount > 0 && AppConfig.ToolBridgeEnabled()
 }
 
 // convertAnthropicMessages converts Anthropic system + messages to internal ChatMessage format.

@@ -40,6 +40,7 @@ type publicModel struct {
 // HandleHealth returns an HTTP handler for the /health endpoint
 func HandleHealth(pool *AccountPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Notion-Manager-Version", CurrentBuildVersion())
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]interface{}{
 			"status":    "ok",
@@ -265,7 +266,9 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				"enable_workspace_search":          AppConfig.WorkspaceSearchEnabled(),
 				"ask_mode_default":                 AppConfig.AskModeDefault(),
 				"disable_notion_prompt":            AppConfig.Proxy.DisableNotionPrompt,
+				"use_client_system_prompt":         AppConfig.ClientSystemPromptEnabled(),
 				"use_notion_personal_instructions": AppConfig.NotionPersonalInstructionsEnabled(),
+				"enable_tool_bridge":               AppConfig.ToolBridgeEnabled(),
 				"debug_logging":                    AppConfig.Server.DebugLogging,
 				"notion_proxy":                     AppConfig.NotionProxyURL(),
 			})
@@ -275,7 +278,9 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				EnableWebSearch               *bool   `json:"enable_web_search"`
 				EnableWorkspaceSearch         *bool   `json:"enable_workspace_search"`
 				AskModeDefault                *bool   `json:"ask_mode_default"`
+				UseClientSystemPrompt         *bool   `json:"use_client_system_prompt"`
 				UseNotionPersonalInstructions *bool   `json:"use_notion_personal_instructions"`
+				EnableToolBridge              *bool   `json:"enable_tool_bridge"`
 				DebugLogging                  *bool   `json:"debug_logging"`
 				NotionProxy                   *string `json:"notion_proxy"`
 			}
@@ -302,12 +307,28 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				changed = true
 				log.Printf("[settings] ask_mode_default → %v", *body.AskModeDefault)
 			}
+			if body.UseClientSystemPrompt != nil {
+				if AppConfig.Proxy.UseClientSystemPrompt != *body.UseClientSystemPrompt {
+					AppConfig.Proxy.UseClientSystemPrompt = *body.UseClientSystemPrompt
+					changed = true
+					clearSessions = true
+					log.Printf("[settings] use_client_system_prompt → %v", *body.UseClientSystemPrompt)
+				}
+			}
 			if body.UseNotionPersonalInstructions != nil {
 				if AppConfig.Proxy.UseNotionPersonalInstructions != *body.UseNotionPersonalInstructions {
 					AppConfig.Proxy.UseNotionPersonalInstructions = *body.UseNotionPersonalInstructions
 					changed = true
 					clearSessions = true
 					log.Printf("[settings] use_notion_personal_instructions → %v", *body.UseNotionPersonalInstructions)
+				}
+			}
+			if body.EnableToolBridge != nil {
+				if AppConfig.Proxy.EnableToolBridge != *body.EnableToolBridge {
+					AppConfig.Proxy.EnableToolBridge = *body.EnableToolBridge
+					changed = true
+					clearSessions = true
+					log.Printf("[settings] enable_tool_bridge → %v", *body.EnableToolBridge)
 				}
 			}
 			if body.DebugLogging != nil {
@@ -359,7 +380,9 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				"enable_workspace_search":          AppConfig.WorkspaceSearchEnabled(),
 				"ask_mode_default":                 AppConfig.AskModeDefault(),
 				"disable_notion_prompt":            AppConfig.Proxy.DisableNotionPrompt,
+				"use_client_system_prompt":         AppConfig.ClientSystemPromptEnabled(),
 				"use_notion_personal_instructions": AppConfig.NotionPersonalInstructionsEnabled(),
+				"enable_tool_bridge":               AppConfig.ToolBridgeEnabled(),
 				"debug_logging":                    AppConfig.Server.DebugLogging,
 				"notion_proxy":                     AppConfig.NotionProxyURL(),
 			})
@@ -389,7 +412,9 @@ func persistSearchSettings(configPath string) {
 		setYAMLBool(proxyNode, "enable_web_search", AppConfig.WebSearchEnabled())
 		setYAMLBool(proxyNode, "enable_workspace_search", AppConfig.WorkspaceSearchEnabled())
 		setYAMLBool(proxyNode, "ask_mode_default", AppConfig.AskModeDefault())
+		setYAMLBool(proxyNode, "use_client_system_prompt", AppConfig.ClientSystemPromptEnabled())
 		setYAMLBool(proxyNode, "use_notion_personal_instructions", AppConfig.NotionPersonalInstructionsEnabled())
+		setYAMLBool(proxyNode, "enable_tool_bridge", AppConfig.ToolBridgeEnabled())
 		setYAMLString(proxyNode, "notion_proxy", AppConfig.Proxy.NotionProxy)
 
 		serverNode := getOrCreateYAMLMapping(mapping, "server")

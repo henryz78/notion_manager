@@ -145,15 +145,15 @@ export function RegisterModal({ open, onClose, onJobFinished }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4 max-sm:px-0 max-sm:items-end"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-[800px] max-h-[90vh] bg-bg-secondary border border-border rounded-xl shadow-2xl flex flex-col overflow-hidden"
+        className="w-full max-w-[800px] max-h-[90vh] bg-bg-secondary border border-border rounded-xl shadow-2xl flex flex-col overflow-hidden max-sm:max-h-[96vh] max-sm:rounded-b-none"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-3.5 border-b border-border">
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-border max-sm:px-3">
           <div className="flex items-center gap-2 text-text-primary">
             <IconUserPlus size={16} />
             <span className="text-[14px] font-semibold tracking-tight">批量注册账号</span>
@@ -194,10 +194,10 @@ export function RegisterModal({ open, onClose, onJobFinished }: Props) {
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between gap-2 px-5 py-3 border-t border-border bg-bg-secondary">
+        <div className="flex items-center justify-between gap-2 px-5 py-3 border-t border-border bg-bg-secondary max-sm:px-3">
           {!job ? (
             <>
-              <span className="text-[11px] text-text-muted">关闭模态框不会取消已提交的任务，可在「历史任务」中查看。</span>
+              <span className="text-[11px] text-text-muted max-sm:hidden">关闭模态框不会取消已提交的任务，可在「历史任务」中查看。</span>
               <div className="flex gap-2">
                 <button
                   onClick={onClose}

@@ -1318,13 +1318,10 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 		return callResearcherInference(acc, messages, cb, &opt)
 	}
 
+	useClientSystemPrompt := AppConfig.ClientSystemPromptEnabled()
 	usePersonalInstructions := AppConfig.NotionPersonalInstructionsEnabled()
 	if opt.RequestDiagnostic != nil {
-		if usePersonalInstructions {
-			opt.RequestDiagnostic.SetPromptMode(RequestPromptModePersonalInstructions)
-		} else {
-			opt.RequestDiagnostic.SetPromptMode(RequestPromptModeExisting)
-		}
+		opt.RequestDiagnostic.SetPromptMode(currentRequestPromptMode())
 	}
 	personalInstructionsPageID := ""
 	if usePersonalInstructions {
@@ -1416,6 +1413,7 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 			configID,
 			contextID,
 			now,
+			useClientSystemPrompt,
 			usePersonalInstructions,
 			personalInstructionsPageID,
 		)
@@ -1593,9 +1591,12 @@ func buildContextValue(acc *Account, datetime, personalInstructionsPageID string
 
 // buildFullTranscript builds a complete transcript for the first turn of a conversation.
 // Uses ResearcherTranscriptMsg (with id field) to match Notion's real client format.
-func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel string, disableBuiltinTools bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, configID, contextID, now string, usePersonalInstructions bool, personalInstructionsPageID string) []interface{} {
+func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel string, disableBuiltinTools bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, configID, contextID, now string, useClientSystemPrompt bool, usePersonalInstructions bool, personalInstructionsPageID string) []interface{} {
 	hasAttachments := len(attachments) > 0
 	configValue := buildConfigValue(notionModel, disableBuiltinTools, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, hasAttachments, false)
+	if !usePersonalInstructions {
+		personalInstructionsPageID = ""
+	}
 	contextValue := buildContextValue(acc, now, personalInstructionsPageID)
 
 	if hasAttachments {
@@ -1621,16 +1622,17 @@ func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel strin
 	}
 
 	// Convert OpenAI messages to Notion transcript format
-	// Existing prompt mode: system messages → prepend to first user message.
-	// Notion personal-instructions mode: ignore client behavioral system
-	// prompts; tool/function-call bridge instructions remain in user messages.
+	// Client system messages and Notion personal instructions are independent:
+	// enabled client system messages are prepended to the first user message,
+	// while personal instructions are activated separately through context.
+	// Tool/function-call bridge instructions already live in user messages.
 	// User messages → "user" type with id, userId, createdAt
 	// Assistant messages → "assistant-reply" type (only for first-turn full transcript)
 	var systemPrompt string
 	for _, msg := range messages {
 		switch msg.Role {
 		case "system":
-			if !usePersonalInstructions {
+			if useClientSystemPrompt {
 				systemPrompt += msg.Content + "\n"
 			}
 		case "user":

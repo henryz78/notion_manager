@@ -135,7 +135,7 @@ export function HistoryDrawer({ open, onClose, onRetryStarted }: Props) {
         className="relative w-full max-w-[640px] h-full bg-bg-secondary border-l border-border shadow-2xl flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-5 py-3.5 border-b border-border">
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-border max-sm:px-3">
           <div className="flex items-center gap-2 text-text-primary">
             <IconHistory size={16} />
             <span className="text-[14px] font-semibold tracking-tight">历史任务</span>
