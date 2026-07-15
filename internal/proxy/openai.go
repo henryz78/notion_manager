@@ -494,9 +494,9 @@ func (t *openAIResponsesStreamTranscoder) ensureMessageItem() error {
 		return err
 	}
 	return t.emit("response.content_part.added", map[string]interface{}{
-		"response_id":  t.responseID,
-		"item_id":      t.messageItemID,
-		"output_index": t.messageIndex,
+		"response_id":   t.responseID,
+		"item_id":       t.messageItemID,
+		"output_index":  t.messageIndex,
 		"content_index": 0,
 		"part": map[string]interface{}{
 			"type":        "output_text",
@@ -840,6 +840,15 @@ func HandleOpenAIChatCompletions(pool *AccountPool) http.HandlerFunc {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid request body: "+err.Error(), "invalid_request_error", "")
 			return
 		}
+		if diagnostic := RequestDiagnosticFromContext(r.Context()); diagnostic != nil {
+			model := req.Model
+			usedDefaultModel := model == ""
+			if usedDefaultModel {
+				model = AppConfig.Proxy.DefaultModel
+			}
+			diagnostic.SetRequestedModel(model, usedDefaultModel)
+			diagnostic.SetToolCount(len(req.Tools) + len(req.Functions))
+		}
 		anthReq, err := convertOpenAIChatCompletionRequest(&req)
 		if err != nil {
 			writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "")
@@ -890,6 +899,15 @@ func HandleOpenAIResponses(pool *AccountPool) http.HandlerFunc {
 		if err := json.Unmarshal(bodyBytes, &req); err != nil {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid request body: "+err.Error(), "invalid_request_error", "")
 			return
+		}
+		if diagnostic := RequestDiagnosticFromContext(r.Context()); diagnostic != nil {
+			model := req.Model
+			usedDefaultModel := model == ""
+			if usedDefaultModel {
+				model = AppConfig.Proxy.DefaultModel
+			}
+			diagnostic.SetRequestedModel(model, usedDefaultModel)
+			diagnostic.SetToolCount(len(req.Tools))
 		}
 		anthReq, err := convertOpenAIResponsesRequest(&req)
 		if err != nil {
@@ -1900,6 +1918,7 @@ func ensureJSONSchemaObject(schema interface{}) interface{} {
 }
 
 func writeOpenAIError(w http.ResponseWriter, status int, message, errType, param string) {
+	markRequestDiagnosticError(w, status, message)
 	payload := OpenAIErrorResponse{Error: OpenAIError{Message: message, Type: errType, Param: param}}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

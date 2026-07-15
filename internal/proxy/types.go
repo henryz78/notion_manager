@@ -38,8 +38,8 @@ type Account struct {
 	TemporaryUnavailableUntil *time.Time `json:"-"`
 	LastFailureReason         string     `json:"-"`
 	LastFailureAt             *time.Time `json:"-"`
-	AuthFailureCount         int        `json:"-"`
-	AuthInvalid              bool       `json:"-"`
+	AuthFailureCount          int        `json:"-"`
+	AuthInvalid               bool       `json:"-"`
 	// Workspace probe state. SpaceCount is the number of `space_views`
 	// returned by /api/v3/loadUserContent for this account's user_root.
 	// 0 with WorkspaceCheckedAt != nil means the Notion onboarding
@@ -262,6 +262,7 @@ type CallOptions struct {
 	KnownToolCallURLs     *map[string][]string  // tool call id -> ordered web result URLs for resolving tool citations
 	Session               *Session              // multi-turn session (nil = first turn)
 	RequestID             string                // top-level API request ID for log correlation
+	RequestDiagnostic     *RequestDiagnostic    // metadata-only Dashboard request trace
 }
 
 // ========== Researcher Mode NDJSON Event Types ==========

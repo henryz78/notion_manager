@@ -6,6 +6,7 @@ import { fmt, formatTokens, getQuotaStatusByUsage, getQuotaPct, avatarColor, ava
 import { AccountMenu } from './components/AccountMenu'
 import { RegisterModal } from './components/RegisterModal'
 import { HistoryDrawer } from './components/HistoryDrawer'
+import { RequestHistoryDrawer } from './components/RequestHistoryDrawer'
 import { IconUserPlus, IconHistory } from './components/Icons'
 
 // --- Icons ---
@@ -599,6 +600,7 @@ export default function App() {
   const [apiKeyRevealed, setApiKeyRevealed] = useState(false)
   const [registerOpen, setRegisterOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [requestHistoryOpen, setRequestHistoryOpen] = useState(false)
   const [copiedField, setCopiedField] = useState<'key' | 'base' | null>(null)
   const [showAddModal, setShowAddModal] = useState(false)
   const copyToClipboard = (text: string, field: 'key' | 'base') => {
@@ -934,6 +936,12 @@ export default function App() {
             <IconUserPlus size={13} /> 注册账号
           </button>
           <button
+            onClick={() => setRequestHistoryOpen(true)}
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border"
+          >
+            <IconActivity /> 调用记录
+          </button>
+          <button
             onClick={() => setHistoryOpen(true)}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border"
           >
@@ -1160,6 +1168,10 @@ export default function App() {
           // own poller picks up live counters in the meantime.
           window.setTimeout(() => { loadData() }, 4000)
         }}
+      />
+      <RequestHistoryDrawer
+        open={requestHistoryOpen}
+        onClose={() => setRequestHistoryOpen(false)}
       />
     </div>
   )

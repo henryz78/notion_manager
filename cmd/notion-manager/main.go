@@ -48,13 +48,13 @@ func apiKeyAuthMiddleware(apiKey string, next http.Handler) http.Handler {
 	})
 }
 
-func newMux(pool *proxy.AccountPool, accountsDir string, apiKey string, dashAuth *proxy.DashboardAuth, usageStats *proxy.UsageStats, regDeps *proxy.RegisterJobsDeps) *http.ServeMux {
+func newMux(pool *proxy.AccountPool, accountsDir string, apiKey string, dashAuth *proxy.DashboardAuth, usageStats *proxy.UsageStats, requestHistory *proxy.RequestHistoryStore, regDeps *proxy.RegisterJobsDeps) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// Anthropic + OpenAI-compatible API endpoints
-	mux.HandleFunc("/v1/messages", proxy.HandleAnthropicMessages(pool))
-	mux.HandleFunc("/v1/chat/completions", proxy.HandleOpenAIChatCompletions(pool))
-	mux.HandleFunc("/v1/responses", proxy.HandleOpenAIResponses(pool))
+	mux.HandleFunc("/v1/messages", proxy.TrackRequestHistory("anthropic", requestHistory, proxy.HandleAnthropicMessages(pool)))
+	mux.HandleFunc("/v1/chat/completions", proxy.TrackRequestHistory("openai_chat", requestHistory, proxy.HandleOpenAIChatCompletions(pool)))
+	mux.HandleFunc("/v1/responses", proxy.TrackRequestHistory("openai_responses", requestHistory, proxy.HandleOpenAIResponses(pool)))
 	mux.HandleFunc("/v1/models", proxy.HandlePublicModels(pool))
 	mux.HandleFunc("/models", proxy.HandlePublicModels(pool))
 
@@ -69,6 +69,7 @@ func newMux(pool *proxy.AccountPool, accountsDir string, apiKey string, dashAuth
 	mux.HandleFunc("/admin/refresh", proxy.HandleAdminRefresh(pool, accountsDir, dashAuth))
 	mux.HandleFunc("/admin/settings", proxy.HandleAdminSettings("config.yaml", dashAuth))
 	mux.HandleFunc("/admin/stats", proxy.HandleAdminStats(usageStats, dashAuth))
+	mux.HandleFunc("/admin/request-history", proxy.HandleAdminRequestHistory(requestHistory, dashAuth))
 
 	// Bulk Microsoft-SSO registration. The legacy synchronous endpoint is
 	// kept for parity with the dashboard's older "submit + wait" UI; the
@@ -170,6 +171,16 @@ func main() {
 	usageStats := proxy.InitUsageStats(statsPath)
 	usageStats.StartFlushLoop(5 * time.Second)
 
+	// Metadata-only API request diagnostics. The file lives beside account
+	// backups but never contains prompts, answers, tool arguments, or Notion
+	// personal-instruction content.
+	requestHistoryPath := filepath.Join(accountsDir, ".request_history.json")
+	requestHistory, err := proxy.NewRequestHistoryStore(requestHistoryPath, 1000)
+	if err != nil {
+		log.Printf("[request-history] load %s: %v (starting with empty history)", requestHistoryPath, err)
+	}
+	requestHistory.StartFlushLoop(2 * time.Second)
+
 	// Async batch-register store + provider registry.
 	regStore, err := regjob.NewStore(cfg.Register.HistoryFile, cfg.Register.HistoryMemoryCap)
 	if err != nil {
@@ -202,7 +213,7 @@ func main() {
 		})
 	}
 
-	mux := newMux(pool, accountsDir, apiKey, dashAuth, usageStats, regDeps)
+	mux := newMux(pool, accountsDir, apiKey, dashAuth, usageStats, requestHistory, regDeps)
 
 	log.Printf("=== notion-manager ===")
 	log.Printf("Listening on :%s", port)
@@ -222,6 +233,7 @@ func main() {
 	log.Printf("  GET  /admin/models")
 	log.Printf("  GET  /admin/settings              (search/proxy/ASK settings)")
 	log.Printf("  GET  /admin/stats                 (token usage stats)")
+	log.Printf("  GET  /admin/request-history       (metadata-only API diagnostics)")
 	log.Printf("  POST /admin/register              (bulk MS-SSO register, sync)")
 	log.Printf("  POST /admin/register/start        (async job)")
 	log.Printf("  GET  /admin/register/jobs/{id}/events (SSE progress)")

@@ -763,8 +763,14 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		}
 
 		model := req.Model
+		usedDefaultModel := model == ""
 		if model == "" {
 			model = AppConfig.Proxy.DefaultModel
+		}
+		requestDiagnostic := RequestDiagnosticFromContext(r.Context())
+		if requestDiagnostic != nil {
+			requestDiagnostic.SetRequestedModel(model, usedDefaultModel)
+			requestDiagnostic.SetToolCount(len(req.Tools))
 		}
 
 		// ── ASK mode resolution ──
@@ -1051,6 +1057,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 
 			log.Printf("[req] %s model=%s messages=%d stream=%v tools=%d attachments=%d account=%s session=%v (attempt %d/%d) [anthropic]",
 				requestID, model, len(req.Messages), req.Stream, len(req.Tools), len(fileAttachments), acc.UserEmail, !isFirstTurn, attempt+1, maxAttempts)
+			if requestDiagnostic != nil {
+				requestDiagnostic.BeginAttempt(acc.UserEmail)
+			}
 
 			// Upload file attachments to Notion (if any) — skip for researcher mode
 			var uploadedAttachments []UploadedAttachment
@@ -1077,14 +1086,14 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				// Researcher mode — always use thinking blocks for research progress
 				hasThinking = true
 				if req.Stream {
-					reqErr = handleResearcherStream(w, acc, requestMessages, model, requestID, hasThinking)
+					reqErr = handleResearcherStream(w, acc, requestMessages, model, requestID, hasThinking, requestDiagnostic)
 				} else {
-					reqErr = handleResearcherNonStream(w, acc, requestMessages, model, requestID, hasThinking)
+					reqErr = handleResearcherNonStream(w, acc, requestMessages, model, requestID, hasThinking, requestDiagnostic)
 				}
 			} else if req.Stream {
-				reqErr = handleAnthropicStream(w, acc, requestMessages, model, requestID, hasTools, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession)
+				reqErr = handleAnthropicStream(w, acc, requestMessages, model, requestID, hasTools, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic)
 			} else {
-				reqErr = handleAnthropicNonStream(w, acc, requestMessages, model, requestID, hasTools, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession)
+				reqErr = handleAnthropicNonStream(w, acc, requestMessages, model, requestID, hasTools, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic)
 			}
 
 			// Trigger an async live quota refresh after every call so the next
@@ -1467,9 +1476,7 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 	var thinkingForLog strings.Builder
 	var finalUsage *UsageInfo
 	defer func() {
-		if finalUsage != nil && acc != nil {
-			GlobalUsageStats().Record(acc.UserEmail, model, finalUsage.PromptTokens, finalUsage.CompletionTokens)
-		}
+		recordCompletedAttemptUsage(acc, model, finalUsage, callOpts.RequestDiagnostic)
 	}()
 	var knownCitationURLs []string
 	var knownCitationDocs []CitationCandidate
@@ -1717,13 +1724,11 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 }
 
 // handleAnthropicStream handles streaming Anthropic response
-func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools bool, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session) error {
+func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools bool, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic) error {
 	var fullContent strings.Builder
 	var finalUsage *UsageInfo
 	defer func() {
-		if finalUsage != nil && acc != nil {
-			GlobalUsageStats().Record(acc.UserEmail, model, finalUsage.PromptTokens, finalUsage.CompletionTokens)
-		}
+		recordCompletedAttemptUsage(acc, model, finalUsage, requestDiagnostic)
 	}()
 	var nativeToolUses []AgentValueEntry
 	var thinkingBlocks []ThinkingBlock
@@ -1744,6 +1749,7 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 		KnownToolCallURLs:     &knownToolCallURLs,
 		Session:               session,
 		RequestID:             requestID,
+		RequestDiagnostic:     requestDiagnostic,
 	}
 
 	if !hasTools {
@@ -1994,13 +2000,11 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 }
 
 // handleAnthropicNonStream handles non-streaming Anthropic response
-func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools bool, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session) error {
+func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools bool, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic) error {
 	var fullContent strings.Builder
 	var finalUsage *UsageInfo
 	defer func() {
-		if finalUsage != nil && acc != nil {
-			GlobalUsageStats().Record(acc.UserEmail, model, finalUsage.PromptTokens, finalUsage.CompletionTokens)
-		}
+		recordCompletedAttemptUsage(acc, model, finalUsage, requestDiagnostic)
 	}()
 	var nativeToolUses []AgentValueEntry
 	var thinkingBlocks []ThinkingBlock
@@ -2021,6 +2025,7 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 		KnownToolCallURLs:     &knownToolCallURLs,
 		Session:               session,
 		RequestID:             requestID,
+		RequestDiagnostic:     requestDiagnostic,
 	}
 	if hasThinking {
 		callOpts.ThinkingCallback = func(delta string, done bool, signature string) {
@@ -2343,7 +2348,7 @@ func generateFakeSignature() string {
 //
 // SSE headers are deferred until the first actual data arrives, so that quota-
 // exhaustion retries don't produce duplicate headers.
-func handleResearcherStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasThinking bool) error {
+func handleResearcherStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasThinking bool, requestDiagnostic *RequestDiagnostic) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeAnthropicError(w, requestID, http.StatusInternalServerError, "streaming not supported", "api_error")
@@ -2352,9 +2357,7 @@ func handleResearcherStream(w http.ResponseWriter, acc *Account, messages []Chat
 
 	var finalUsage *UsageInfo
 	defer func() {
-		if finalUsage != nil && acc != nil {
-			GlobalUsageStats().Record(acc.UserEmail, model, finalUsage.PromptTokens, finalUsage.CompletionTokens)
-		}
+		recordCompletedAttemptUsage(acc, model, finalUsage, requestDiagnostic)
 	}()
 	var thinkingForLog strings.Builder
 	var textForLog strings.Builder
@@ -2418,8 +2421,9 @@ func handleResearcherStream(w http.ResponseWriter, acc *Account, messages []Chat
 	}
 
 	callOpts := CallOptions{
-		IsResearcher: true,
-		RequestID:    requestID,
+		IsResearcher:      true,
+		RequestID:         requestID,
+		RequestDiagnostic: requestDiagnostic,
 	}
 
 	// Set up ThinkingCallback — always needed for researcher mode
@@ -2564,20 +2568,19 @@ func handleResearcherStream(w http.ResponseWriter, acc *Account, messages []Chat
 
 // handleResearcherNonStream handles non-streaming Anthropic response for researcher mode.
 // Collects all content first, then returns a complete JSON response.
-func handleResearcherNonStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasThinking bool) error {
+func handleResearcherNonStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasThinking bool, requestDiagnostic *RequestDiagnostic) error {
 	var fullContent strings.Builder
 	var finalUsage *UsageInfo
 	defer func() {
-		if finalUsage != nil && acc != nil {
-			GlobalUsageStats().Record(acc.UserEmail, model, finalUsage.PromptTokens, finalUsage.CompletionTokens)
-		}
+		recordCompletedAttemptUsage(acc, model, finalUsage, requestDiagnostic)
 	}()
 	var thinkingBlocks []ThinkingBlock
 
 	callOpts := CallOptions{
-		IsResearcher:   true,
-		ThinkingBlocks: &thinkingBlocks,
-		RequestID:      requestID,
+		IsResearcher:      true,
+		ThinkingBlocks:    &thinkingBlocks,
+		RequestID:         requestID,
+		RequestDiagnostic: requestDiagnostic,
 	}
 
 	cbErr := CallInference(acc, messages, model, false, func(delta string, done bool, usage *UsageInfo) {
@@ -2643,7 +2646,21 @@ func handleResearcherNonStream(w http.ResponseWriter, acc *Account, messages []C
 	return nil
 }
 
+// recordCompletedAttemptUsage feeds both the existing aggregate counters and
+// the metadata-only per-request diagnostic. It is called once per Notion
+// attempt after the final cumulative usage value is known.
+func recordCompletedAttemptUsage(acc *Account, model string, usage *UsageInfo, requestDiagnostic *RequestDiagnostic) {
+	if usage == nil || acc == nil {
+		return
+	}
+	GlobalUsageStats().Record(acc.UserEmail, model, usage.PromptTokens, usage.CompletionTokens)
+	if requestDiagnostic != nil {
+		requestDiagnostic.AddUsage(usage.PromptTokens, usage.CompletionTokens)
+	}
+}
+
 func writeAnthropicError(w http.ResponseWriter, requestID string, status int, message, errType string) {
+	markRequestDiagnosticError(w, status, message)
 	payload := map[string]interface{}{
 		"type": "error",
 		"error": map[string]interface{}{

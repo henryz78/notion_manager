@@ -1,4 +1,4 @@
-import type { DashboardData, JobStartResponse, ProviderInfo, RegisterJob, TokenStats } from './types'
+import type { DashboardData, JobStartResponse, ProviderInfo, RegisterJob, RequestHistoryPage, TokenStats } from './types'
 
 // --- Auth API ---
 
@@ -203,6 +203,45 @@ export async function fetchTokenStats(): Promise<TokenStats> {
   const resp = await fetch('/admin/stats')
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
   return resp.json()
+}
+
+export interface RequestHistoryParams {
+  page?: number
+  pageSize?: number
+  status?: string
+  api?: string
+  promptMode?: string
+  query?: string
+}
+
+export async function fetchRequestHistory(params: RequestHistoryParams = {}): Promise<RequestHistoryPage> {
+  const sp = new URLSearchParams()
+  if (params.page !== undefined) sp.set('page', String(params.page))
+  if (params.pageSize !== undefined) sp.set('page_size', String(params.pageSize))
+  if (params.status && params.status !== 'all') sp.set('status', params.status)
+  if (params.api && params.api !== 'all') sp.set('api', params.api)
+  if (params.promptMode && params.promptMode !== 'all') sp.set('prompt_mode', params.promptMode)
+  if (params.query?.trim()) sp.set('q', params.query.trim())
+  const suffix = sp.toString() ? `?${sp.toString()}` : ''
+  const resp = await fetch(`/admin/request-history${suffix}`, {
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+  })
+  const data = await readJson<RequestHistoryPage & { error?: string }>(resp, '调用记录接口返回了无效响应')
+  if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`)
+  return data
+}
+
+export async function clearRequestHistory(): Promise<void> {
+  const resp = await fetch('/admin/request-history', {
+    method: 'DELETE',
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+  })
+  if (!resp.ok) {
+    const data = await readJson<{ error?: string }>(resp, `HTTP ${resp.status}`)
+    throw new Error(data.error || `HTTP ${resp.status}`)
+  }
 }
 
 export function openProxy(email: string) {

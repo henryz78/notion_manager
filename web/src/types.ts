@@ -182,3 +182,36 @@ export interface TokenStats {
   top_accounts: TokenAccountRow[]
   last_record_at: number
 }
+
+export type RequestHistoryStatus = 'success' | 'error'
+export type RequestHistoryAPI = 'anthropic' | 'openai_chat' | 'openai_responses'
+export type RequestPromptMode = 'existing_prompt' | 'notion_personal_instructions' | 'not_applicable'
+
+// Metadata-only API diagnostics. The backend never includes request messages,
+// system prompts, response text, tool arguments, or personal-instruction text.
+export interface RequestHistoryEntry {
+  id: string
+  created_at: string
+  api: RequestHistoryAPI | string
+  requested_model: string
+  used_default_model?: boolean
+  notion_model?: string
+  account_email?: string
+  prompt_mode: RequestPromptMode | string
+  tool_count: number
+  input_tokens: number
+  output_tokens: number
+  duration_ms: number
+  status: RequestHistoryStatus | string
+  http_status: number
+  error?: string
+  attempts: number
+}
+
+export interface RequestHistoryPage {
+  total: number
+  filtered_total: number
+  page: number
+  page_size: number
+  entries: RequestHistoryEntry[]
+}

@@ -1311,10 +1311,21 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 	isResearcher := opt.IsResearcher || IsResearcherModel(model)
 
 	if isResearcher {
+		if opt.RequestDiagnostic != nil {
+			opt.RequestDiagnostic.SetNotionModel("researcher")
+			opt.RequestDiagnostic.SetPromptMode(RequestPromptModeNotApplicable)
+		}
 		return callResearcherInference(acc, messages, cb, &opt)
 	}
 
 	usePersonalInstructions := AppConfig.NotionPersonalInstructionsEnabled()
+	if opt.RequestDiagnostic != nil {
+		if usePersonalInstructions {
+			opt.RequestDiagnostic.SetPromptMode(RequestPromptModePersonalInstructions)
+		} else {
+			opt.RequestDiagnostic.SetPromptMode(RequestPromptModeExisting)
+		}
+	}
 	personalInstructionsPageID := ""
 	if usePersonalInstructions {
 		var err error
@@ -1328,6 +1339,9 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 	notionModel, ok := ResolveModel(model)
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrModelNotFound, model)
+	}
+	if opt.RequestDiagnostic != nil {
+		opt.RequestDiagnostic.SetNotionModel(notionModel)
 	}
 	if notionModel != model {
 		log.Printf("[model] resolved %q → %q", model, notionModel)
