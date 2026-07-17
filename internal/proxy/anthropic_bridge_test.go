@@ -15,6 +15,31 @@ func TestExtractAnthropicSessionSalt(t *testing.T) {
 	}
 }
 
+func TestExtractAnthropicSessionSaltSupportsDirectConversationIDs(t *testing.T) {
+	if got := extractAnthropicSessionSalt(map[string]interface{}{"session_id": " sess-direct "}); got != "sess-direct" {
+		t.Fatalf("direct session_id = %q, want %q", got, "sess-direct")
+	}
+	if got := extractAnthropicSessionSalt(map[string]interface{}{"conversation_id": "conv-456"}); got != "conv-456" {
+		t.Fatalf("direct conversation_id = %q, want %q", got, "conv-456")
+	}
+	if got := extractAnthropicSessionSalt(map[string]interface{}{"user_id": "user-constant"}); got != "" {
+		t.Fatalf("plain user_id must not be used as a conversation id, got %q", got)
+	}
+}
+
+func TestAmbiguousSingleTurnStartsFreshWithoutConversationID(t *testing.T) {
+	session := &Session{RawMessageCount: 1}
+	if !shouldStartFreshForAmbiguousSingleTurn(session, 1, "") {
+		t.Fatal("same one-message fingerprint without a conversation id should start fresh")
+	}
+	if shouldStartFreshForAmbiguousSingleTurn(session, 1, "conversation-a") {
+		t.Fatal("stable conversation id should keep the matching Notion thread")
+	}
+	if shouldStartFreshForAmbiguousSingleTurn(&Session{RawMessageCount: 3}, 3, "") {
+		t.Fatal("multi-turn history should keep its existing Notion thread")
+	}
+}
+
 func TestComputeSessionFingerprintWithSalt_IgnoresBillingHeaderDrift(t *testing.T) {
 	turn1 := []ChatMessage{
 		{Role: "system", Content: "x-anthropic-billing-header: cc_version=2.1.81.a; cch=aaaa;\nYou are Claude Code, Anthropic's official CLI for Claude.\nSystem body"},

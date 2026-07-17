@@ -610,7 +610,7 @@ func extractAnthropicSessionSalt(metadata map[string]interface{}) string {
 		return ""
 	}
 
-	extractFromValue := func(v interface{}) string {
+	extractNestedSessionID := func(v interface{}) string {
 		switch tv := v.(type) {
 		case string:
 			trimmed := strings.TrimSpace(tv)
@@ -619,25 +619,55 @@ func extractAnthropicSessionSalt(metadata map[string]interface{}) string {
 			}
 			var parsed map[string]interface{}
 			if json.Unmarshal([]byte(trimmed), &parsed) == nil {
-				if sid, ok := parsed["session_id"].(string); ok && sid != "" {
-					return sid
+				for _, key := range []string{"session_id", "conversation_id"} {
+					if sid, ok := parsed[key].(string); ok && strings.TrimSpace(sid) != "" {
+						return strings.TrimSpace(sid)
+					}
 				}
 			}
 			return ""
 		case map[string]interface{}:
-			if sid, ok := tv["session_id"].(string); ok && sid != "" {
-				return sid
+			for _, key := range []string{"session_id", "conversation_id"} {
+				if sid, ok := tv[key].(string); ok && strings.TrimSpace(sid) != "" {
+					return strings.TrimSpace(sid)
+				}
 			}
 		}
 		return ""
 	}
 
-	for _, key := range []string{"session_id", "conversation_id", "user_id"} {
-		if sid := extractFromValue(metadata[key]); sid != "" {
-			return sid
+	// Prefer explicit conversation identifiers. Plain strings are valid here
+	// and should not have to contain a JSON object.
+	for _, key := range []string{"session_id", "conversation_id"} {
+		if value, ok := metadata[key]; ok {
+			if sid := extractNestedSessionID(value); sid != "" {
+				return sid
+			}
+			if sid, ok := value.(string); ok && strings.TrimSpace(sid) != "" {
+				return strings.TrimSpace(sid)
+			}
 		}
 	}
+
+	// Claude Code places a JSON object containing session_id inside user_id.
+	// A plain user_id identifies a user rather than a conversation, so it must
+	// not merge every chat from that user into one Notion thread.
+	if sid := extractNestedSessionID(metadata["user_id"]); sid != "" {
+		return sid
+	}
 	return ""
+}
+
+func shouldStartFreshForAmbiguousSingleTurn(session *Session, rawMsgCount int, sessionSalt string) bool {
+	if session == nil || strings.TrimSpace(sessionSalt) != "" {
+		return false
+	}
+	// Without a client conversation ID, two separate new chats containing the
+	// same first message produce the same legacy fingerprint. Treat a new
+	// one-message request as a new chat instead of reusing the prior Notion
+	// thread. Multi-turn clients send the earlier assistant/user history and
+	// therefore have a larger raw message count.
+	return rawMsgCount == 1 && session.RawMessageCount == 1
 }
 
 func stripStructuredOutputSystemNoise(content string) string {
@@ -864,7 +894,11 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			rawMsgCount = countNonSystemMessages(messages)
 
 			if session != nil {
-				if rawMsgCount < session.RawMessageCount {
+				if shouldStartFreshForAmbiguousSingleTurn(session, rawMsgCount, sessionSalt) {
+					log.Printf("[session] same first message without conversation id; starting a fresh Notion thread")
+					globalSessionManager.Delete(fingerprint)
+					session = nil
+				} else if rawMsgCount < session.RawMessageCount {
 					// Message count decreased (edit/rollback) — invalidate session
 					log.Printf("[session] message rollback detected (rawMsgs=%d < prev=%d), clearing session",
 						rawMsgCount, session.RawMessageCount)
