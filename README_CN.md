@@ -58,7 +58,7 @@ http://localhost:8081/dashboard/
 
 **添加第一个账号**（任选其一）：
 
-- **已登录的 Notion 会话** —— 在 Chrome 打开 `notion.so` → `F12` → **Application** → **Cookies** → 复制 `token_v2`，在 Dashboard 点击 **「+ 添加账号」** 粘贴即可。
+- **已登录的 Notion 会话** —— 在 Chrome 打开 `notion.so` → `F12` → **Application** → **Cookies** → 复制 `token_v2`，在 Dashboard 点击 **「+ 添加账号」**，一行粘贴一个；单个和批量导入都支持。
 - **Microsoft SSO 批量注册** —— 在 Dashboard 点击 **「注册账号」**，粘贴 `email----password----client_id----refresh_token` 多行凭据。凭据准备方式见 [批量注册文档](docs/registration_cn.md)。
 
 只要有新的 JSON 文件落到 `accounts/` 下，账号池会自动热加载，无需重启。

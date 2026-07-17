@@ -58,7 +58,7 @@ http://localhost:8081/dashboard/
 
 **Add your first account** (pick one):
 
-- **Existing Notion session** — In Chrome open `notion.so` → `F12` → **Application** → **Cookies** → copy `token_v2`. In the Dashboard click **「+ 添加账号」** and paste it.
+- **Existing Notion session** — In Chrome open `notion.so` → `F12` → **Application** → **Cookies** → copy `token_v2`. In the Dashboard click **「+ 添加账号」** and paste one token per line; single and bulk import are both supported.
 - **Bulk Microsoft-SSO** — In the Dashboard click **「注册账号」** and paste `email----password----client_id----refresh_token` lines. See [Bulk Registration](docs/registration.md) for credential prep.
 
 The pool hot-reloads as soon as a new JSON lands in `accounts/` — no restart needed.

@@ -64,56 +64,130 @@ const IconTrash = () => (
 
 // --- Add Account Modal ---
 
+type AccountImportRow = {
+  line: number
+  status: 'success' | 'error' | 'skipped'
+  title: string
+  detail: string
+}
+
 function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
   const [token, setToken] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [result, setResult] = useState<{ name: string; email: string; space: string; plan_type: string } | null>(null)
+  const [results, setResults] = useState<AccountImportRow[]>([])
+  const [progress, setProgress] = useState({ done: 0, total: 0 })
+  const [completed, setCompleted] = useState(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+
+  const parsedLines = useMemo(
+    () => token
+      .split(/\r?\n/)
+      .map((value, index) => ({ line: index + 1, token: value.trim() }))
+      .filter(item => item.token),
+    [token],
+  )
+  const uniqueTokenCount = useMemo(
+    () => new Set(parsedLines.map(item => item.token)).size,
+    [parsedLines],
+  )
+  const successCount = results.filter(item => item.status === 'success').length
+  const failureCount = results.filter(item => item.status === 'error').length
+  const skippedCount = results.filter(item => item.status === 'skipped').length
 
   useEffect(() => { inputRef.current?.focus() }, [])
 
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !loading) onClose()
+    }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [onClose])
+  }, [loading, onClose])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    const trimmed = token.trim()
-    if (!trimmed) return
+    if (parsedLines.length === 0 || loading) return
+
+    const firstLineByToken = new Map<string, number>()
+    const candidates: Array<{ line: number; token: string }> = []
+    const initialResults: AccountImportRow[] = []
+    for (const item of parsedLines) {
+      const firstLine = firstLineByToken.get(item.token)
+      if (firstLine !== undefined) {
+        initialResults.push({
+          line: item.line,
+          status: 'skipped',
+          title: `第 ${item.line} 行已跳过`,
+          detail: `内容与第 ${firstLine} 行重复`,
+        })
+        continue
+      }
+      firstLineByToken.set(item.token, item.line)
+      candidates.push(item)
+    }
+
     setLoading(true)
     setError('')
-    setResult(null)
-    try {
-      const res = await addAccount(trimmed)
-      if (res.error) {
-        setError(res.error)
-      } else if (res.account) {
-        setResult(res.account)
-        setTimeout(() => {
-          onSuccess()
-          onClose()
-        }, 1500)
+    setCompleted(false)
+    setResults(initialResults)
+    setProgress({ done: 0, total: candidates.length })
+
+    let added = 0
+    for (let index = 0; index < candidates.length; index++) {
+      const item = candidates[index]
+      let row: AccountImportRow
+      try {
+        const res = await addAccount(item.token)
+        if (res.error || !res.account) {
+          row = {
+            line: item.line,
+            status: 'error',
+            title: `第 ${item.line} 行导入失败`,
+            detail: res.error || '账号信息为空',
+          }
+        } else {
+          added++
+          row = {
+            line: item.line,
+            status: 'success',
+            title: res.account.email || res.account.name || `第 ${item.line} 行`,
+            detail: `${res.account.space || '未命名空间'} · ${res.account.plan_type || '未知套餐'}`,
+          }
+        }
+      } catch (err) {
+        row = {
+          line: item.line,
+          status: 'error',
+          title: `第 ${item.line} 行导入失败`,
+          detail: err instanceof Error ? err.message : '请求失败',
+        }
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '请求失败')
-    } finally {
-      setLoading(false)
+      setResults(current => [...current, row].sort((a, b) => a.line - b.line))
+      setProgress({ done: index + 1, total: candidates.length })
     }
+
+    if (added > 0) onSuccess()
+    setLoading(false)
+    setCompleted(true)
   }
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
-      <div className="w-full max-w-lg bg-[#1a1a1a] border border-white/10 rounded-xl shadow-2xl p-6" onClick={e => e.stopPropagation()}>
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4 max-sm:px-0 max-sm:items-end"
+      onClick={() => { if (!loading) onClose() }}
+    >
+      <div className="w-full max-w-xl max-h-[92vh] overflow-auto bg-[#1a1a1a] border border-white/10 rounded-xl shadow-2xl p-6 max-sm:max-h-[96vh] max-sm:rounded-b-none max-sm:p-4" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-[16px] font-semibold">添加 Notion 账号</h2>
-          <button onClick={onClose} className="text-text-muted hover:text-white bg-transparent border-none cursor-pointer text-lg px-1">×</button>
+          <div>
+            <h2 className="text-[16px] font-semibold">批量添加 Notion 账号</h2>
+            <div className="text-[11px] text-text-muted mt-0.5">一行一个 token_v2，可同时导入多个账号</div>
+          </div>
+          <button disabled={loading} onClick={onClose} className="text-text-muted hover:text-white bg-transparent border-none cursor-pointer text-lg px-1 disabled:opacity-30">×</button>
         </div>
 
         <div className="text-[12px] text-text-secondary mb-4 space-y-1.5">
-          <p>粘贴你的 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">token_v2</code> cookie，系统会自动获取账号信息。</p>
+          <p>每行粘贴一个 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">token_v2</code>，系统会逐个验证并添加，单个 token 也照常支持。</p>
           <p className="text-text-muted">获取方式：打开 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">notion.so</code> → F12 → Application → Cookies → 复制 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">token_v2</code> 的值</p>
         </div>
 
@@ -121,38 +195,85 @@ function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSucces
           <textarea
             ref={inputRef}
             value={token}
-            onChange={e => setToken(e.target.value)}
-            placeholder="粘贴 token_v2 值..."
-            rows={3}
-            className="w-full py-2.5 px-3 bg-transparent border border-white/10 rounded-lg text-[13px] text-text-primary outline-none focus:border-white/30 focus:ring-1 focus:ring-white/10 transition-all placeholder:text-white/25 resize-none font-mono"
+            onChange={e => {
+              setToken(e.target.value)
+              if (completed) {
+                setCompleted(false)
+                setResults([])
+                setProgress({ done: 0, total: 0 })
+              }
+            }}
+            placeholder={'token_v2_账号1\ntoken_v2_账号2\ntoken_v2_账号3'}
+            rows={7}
+            disabled={loading}
+            className="w-full py-2.5 px-3 bg-transparent border border-white/10 rounded-lg text-[13px] text-text-primary outline-none focus:border-white/30 focus:ring-1 focus:ring-white/10 transition-all placeholder:text-white/25 resize-y font-mono disabled:opacity-60"
           />
+          <div className="flex items-center justify-between gap-3 mt-1.5 text-[11px] text-text-muted">
+            <span>{parsedLines.length} 行有效内容 · {uniqueTokenCount} 个待导入账号</span>
+            {loading && <span className="text-notion-blue">正在处理 {progress.done} / {progress.total}</span>}
+          </div>
           {error && (
             <div className="text-err text-[12px] mt-2 px-1">{error}</div>
           )}
-          {result && (
-            <div className="mt-3 p-3 bg-[#0a3d0a]/50 border border-[#1b5e20]/50 rounded-lg text-[12px]">
-              <div className="text-[#4ade80] font-medium mb-1.5">添加成功</div>
-              <div className="space-y-0.5 text-text-secondary">
-                <div>用户: <span className="text-white">{result.name}</span> ({result.email})</div>
-                <div>空间: <span className="text-white">{result.space}</span> · {result.plan_type}</div>
+
+          {results.length > 0 && (
+            <div className="mt-3 border border-white/10 rounded-lg overflow-hidden">
+              <div className="flex items-center justify-between gap-3 px-3 py-2 bg-white/[.035] text-[11px]">
+                <span className="text-text-secondary">导入结果</span>
+                <span className="tabular-nums">
+                  <span className="text-ok">成功 {successCount}</span>
+                  <span className="text-text-muted"> · </span>
+                  <span className={failureCount > 0 ? 'text-err' : 'text-text-muted'}>失败 {failureCount}</span>
+                  {skippedCount > 0 && <span className="text-text-muted"> · 跳过 {skippedCount}</span>}
+                </span>
+              </div>
+              <div className="max-h-48 overflow-auto divide-y divide-white/[.05]">
+                {results.map(item => (
+                  <div key={`${item.line}-${item.status}`} className="px-3 py-2 text-[11px]">
+                    <div className="flex items-center gap-2">
+                      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${item.status === 'success' ? 'bg-ok' : item.status === 'error' ? 'bg-err' : 'bg-text-muted'}`} />
+                      <span className={item.status === 'error' ? 'text-err' : 'text-text-primary'}>{item.title}</span>
+                      <span className="ml-auto text-text-muted tabular-nums">第 {item.line} 行</span>
+                    </div>
+                    <div className="mt-0.5 ml-3.5 text-text-muted break-all">{item.detail}</div>
+                  </div>
+                ))}
               </div>
             </div>
           )}
+
           <div className="flex gap-2.5 mt-4">
             <button
               type="button"
               onClick={onClose}
+              disabled={loading}
               className="flex-1 py-2.5 bg-transparent hover:bg-white/5 text-text-secondary rounded-lg text-[13px] font-medium cursor-pointer transition-colors border border-white/10"
             >
-              取消
+              {completed ? '关闭' : '取消'}
             </button>
-            <button
-              type="submit"
-              disabled={loading || !token.trim() || !!result}
-              className="flex-1 py-2.5 bg-white hover:bg-white/90 text-black rounded-lg text-[13px] font-semibold cursor-pointer transition-colors border-none disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {loading ? '正在验证...' : '添加账号'}
-            </button>
+            {completed ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setToken('')
+                  setResults([])
+                  setCompleted(false)
+                  setProgress({ done: 0, total: 0 })
+                  window.setTimeout(() => inputRef.current?.focus(), 0)
+                }}
+                className="flex-1 py-2.5 bg-white hover:bg-white/90 text-black rounded-lg text-[13px] font-semibold cursor-pointer transition-colors border-none"
+              >
+                继续添加
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={loading || uniqueTokenCount === 0}
+                className="flex-1 py-2.5 bg-white hover:bg-white/90 text-black rounded-lg text-[13px] font-semibold cursor-pointer transition-colors border-none disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {loading ? `正在导入 ${progress.done}/${progress.total}` : `导入 ${uniqueTokenCount || ''} 个账号`}
+              </button>
+            )}
           </div>
         </form>
       </div>
