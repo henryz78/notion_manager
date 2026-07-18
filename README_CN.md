@@ -95,8 +95,10 @@ export OPENAI_API_KEY=<your-api-key>
 - 内置 React Dashboard，入口为 `/dashboard/`
 - 支持密码登录、会话维持与登出
 - 账号列表服务端**搜索 / 排序 / 分页**（`q`、`page`、`page_size`）
-- 单个账号操作：打开代理、复制 token、**删除（含磁盘 JSON 与池内对象）**
+- 单个账号操作：打开代理、复制 token、手动禁用/启用、**删除（含磁盘 JSON 与池内对象）**
+- 支持跨页多选，批量复制邮箱、检测个人指令、禁用、启用或删除所选账号
 - 可批量检测每个账号是否已绑定官网默认 Notion Agent 个人指令；只保存“已设置 / 未设置 / 检测失败”和检测时间，不保存页面 ID 或指令正文
+- 可一键重新检测全部账号并删除当前未设置官网个人指令的账号；检测失败的账号会保留
 - **Token 用量统计页**：累计、今日、最近 24 小时、近 30 天日序列、Top‑N 模型 / Top‑N 账号
 - 可在页面内切换 `enable_web_search`、`enable_workspace_search`、`ask_mode_default`、`debug_logging`
 - 可在线编辑 `notion_proxy`，无需重启即可生效

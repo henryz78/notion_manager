@@ -34,6 +34,9 @@ type Account struct {
 	PersonalInstructionsConfigured *bool      `json:"personal_instructions_configured,omitempty"`
 	PersonalInstructionsCheckedAt  *time.Time `json:"personal_instructions_checked_at,omitempty"`
 	PersonalInstructionsCheckError string     `json:"personal_instructions_check_error,omitempty"`
+	// ManuallyDisabled is an operator-controlled routing switch. Disabled
+	// accounts stay visible but are not selected until re-enabled.
+	ManuallyDisabled bool `json:"disabled,omitempty"`
 	// Runtime-only fields (not serialized)
 	QuotaExhaustedAt     *time.Time `json:"-"`
 	QuotaInfo            *QuotaInfo `json:"-"`

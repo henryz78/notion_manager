@@ -305,6 +305,51 @@ export async function checkPersonalInstructions(): Promise<PersonalInstructionsC
   return data
 }
 
+export type BulkAccountAction = 'delete' | 'disable' | 'enable' | 'check_personal_instructions'
+
+export interface BulkAccountActionResult {
+  status: string
+  action: BulkAccountAction
+  requested: number
+  matched: number
+  succeeded: number
+  failed: Record<string, string>
+  check?: PersonalInstructionsCheckResult
+}
+
+export async function bulkAccountAction(action: BulkAccountAction, emails: string[]): Promise<BulkAccountActionResult> {
+  const resp = await fetch('/admin/accounts/bulk', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ action, emails }),
+  })
+  const data = await readJson<BulkAccountActionResult>(resp, '批量账号操作接口返回了无效响应')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return data
+}
+
+export interface DeleteMissingPersonalInstructionsResult {
+  status: string
+  checked: number
+  matched: number
+  deleted: number
+  emails: string[]
+  failed: Record<string, string>
+  check: PersonalInstructionsCheckResult
+}
+
+export async function deleteMissingPersonalInstructions(): Promise<DeleteMissingPersonalInstructionsResult> {
+  const resp = await fetch('/admin/accounts/delete-missing-personal-instructions', {
+    method: 'POST',
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+  })
+  const data = await readJson<DeleteMissingPersonalInstructionsResult>(resp, '删除未设置个人指令账号时返回了无效响应')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return data
+}
+
 export interface DeleteExhaustedTrialsResult {
   status: string
   matched: number

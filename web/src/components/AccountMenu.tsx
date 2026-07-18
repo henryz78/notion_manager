@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { AccountInfo } from '../types'
-import { deleteAccount, openProxy } from '../api'
-import { IconCopy, IconExternalLink, IconMore, IconTrash } from './Icons'
+import { bulkAccountAction, deleteAccount, openProxy } from '../api'
+import { IconCopy, IconExternalLink, IconMore, IconPlay, IconTrash, IconX } from './Icons'
 
 interface Props {
   account: AccountInfo
@@ -15,6 +15,7 @@ export function AccountMenu({ account, onChanged }: Props) {
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [toggling, setToggling] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
 
@@ -77,6 +78,20 @@ export function AccountMenu({ account, onChanged }: Props) {
     }
   }
 
+  const onToggleDisabled = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setToggling(true)
+    try {
+      await bulkAccountAction(account.disabled ? 'enable' : 'disable', [account.email])
+      onChanged()
+    } catch (err) {
+      console.error('toggle account disabled state failed', err)
+    } finally {
+      setToggling(false)
+      setOpen(false)
+    }
+  }
+
   return (
     <div ref={wrapRef} className="relative" onClick={(e) => e.stopPropagation()}>
       <button
@@ -100,7 +115,13 @@ export function AccountMenu({ account, onChanged }: Props) {
             icon={<IconCopy size={13} />}
             label={copied ? '已复制' : '复制 token_v2'}
           />
-          <MenuItem onClick={onOpenProxy} icon={<IconExternalLink size={13} />} label="打开代理" />
+          <MenuItem onClick={onOpenProxy} disabled={account.disabled} icon={<IconExternalLink size={13} />} label="打开代理" />
+          <MenuItem
+            onClick={onToggleDisabled}
+            disabled={toggling}
+            icon={account.disabled ? <IconPlay size={13} /> : <IconX size={13} />}
+            label={toggling ? '处理中...' : account.disabled ? '启用账号' : '禁用账号'}
+          />
           <div className="border-t border-border my-1" />
           <MenuItem
             onClick={onDelete}

@@ -166,6 +166,7 @@ Response shape:
     "limit": 200,
     "remaining": 97,
     "checked_at": "2026-03-17T...",
+    "disabled": false,
     "personal_instructions_configured": true,
     "personal_instructions_checked_at": "2026-07-18T...",
     "models": [{ "id": "...", "name": "..." }]
@@ -178,6 +179,14 @@ the default Notion Agent personal-instructions binding. The UI displays
 configured / missing / failed / unchecked. Persist only the boolean result,
 timestamp, and optional error; never persist or render the page ID or
 instruction text.
+
+Account cards expose persistent cross-page selection. Selected accounts use
+`POST /admin/accounts/bulk` with `delete`, `disable`, `enable`, or
+`check_personal_instructions`. Manual disable persists as `disabled: true` and
+must be honored by every account picker. The separate
+`POST /admin/accounts/delete-missing-personal-instructions` action re-checks
+the complete pool before deleting confirmed-missing accounts; probe errors
+must remain untouched.
 
 ### Proxy Navigation
 

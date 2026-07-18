@@ -451,8 +451,18 @@ type PersonalInstructionsCheckSummary struct {
 type personalInstructionsPageIDFetcher func(*Account) (string, error)
 
 func checkAllPersonalInstructions(pool *AccountPool, concurrency int, fetcher personalInstructionsPageIDFetcher) PersonalInstructionsCheckSummary {
+	if pool == nil {
+		return PersonalInstructionsCheckSummary{Status: "ok"}
+	}
+	pool.mu.RLock()
+	accounts := append([]*Account(nil), pool.accounts...)
+	pool.mu.RUnlock()
+	return checkPersonalInstructionsForAccounts(accounts, concurrency, fetcher)
+}
+
+func checkPersonalInstructionsForAccounts(accounts []*Account, concurrency int, fetcher personalInstructionsPageIDFetcher) PersonalInstructionsCheckSummary {
 	summary := PersonalInstructionsCheckSummary{Status: "ok"}
-	if pool == nil || fetcher == nil {
+	if fetcher == nil {
 		return summary
 	}
 	if concurrency < 1 {
@@ -462,9 +472,6 @@ func checkAllPersonalInstructions(pool *AccountPool, concurrency int, fetcher pe
 		concurrency = 20
 	}
 
-	pool.mu.RLock()
-	accounts := append([]*Account(nil), pool.accounts...)
-	pool.mu.RUnlock()
 	summary.Total = len(accounts)
 	if len(accounts) == 0 {
 		return summary
@@ -546,6 +553,217 @@ func HandleCheckPersonalInstructions(pool *AccountPool, accountsDir string, auth
 		log.Printf("[personal-instructions-check] total=%d configured=%d missing=%d failed=%d",
 			summary.Total, summary.Configured, summary.Missing, summary.Failed)
 		_ = json.NewEncoder(w).Encode(summary)
+	}
+}
+
+const maxBulkAccountEmails = 5000
+
+type BulkAccountActionRequest struct {
+	Action string   `json:"action"`
+	Emails []string `json:"emails"`
+}
+
+type BulkAccountActionResult struct {
+	Status    string                            `json:"status"`
+	Action    string                            `json:"action"`
+	Requested int                               `json:"requested"`
+	Matched   int                               `json:"matched"`
+	Succeeded int                               `json:"succeeded"`
+	Failed    map[string]string                 `json:"failed"`
+	Check     *PersonalInstructionsCheckSummary `json:"check,omitempty"`
+}
+
+func normalizeBulkEmails(emails []string) []string {
+	normalized := make([]string, 0, len(emails))
+	seen := make(map[string]struct{}, len(emails))
+	for _, email := range emails {
+		email = strings.TrimSpace(email)
+		key := strings.ToLower(email)
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, email)
+	}
+	return normalized
+}
+
+func accountsMatchingEmails(pool *AccountPool, requested []string) ([]*Account, []string) {
+	if pool == nil || len(requested) == 0 {
+		return nil, requested
+	}
+	pool.mu.RLock()
+	byEmail := make(map[string]*Account, len(pool.accounts))
+	for _, acc := range pool.accounts {
+		byEmail[strings.ToLower(strings.TrimSpace(acc.UserEmail))] = acc
+	}
+	pool.mu.RUnlock()
+
+	matched := make([]*Account, 0, len(requested))
+	missing := make([]string, 0)
+	for _, email := range requested {
+		if acc := byEmail[strings.ToLower(email)]; acc != nil {
+			matched = append(matched, acc)
+		} else {
+			missing = append(missing, email)
+		}
+	}
+	return matched, missing
+}
+
+// HandleBulkAccountAction applies an operator action to explicitly selected
+// accounts. Manual disable is persisted and only changes routing eligibility;
+// it does not overwrite quota, auth, or personal-instructions state.
+func HandleBulkAccountAction(pool *AccountPool, accountsDir string, auth *DashboardAuth) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		if auth.HasAdminPassword() && !auth.ValidateSession(r) {
+			http.Error(w, `{"error":"unauthorized, dashboard login required"}`, http.StatusUnauthorized)
+			return
+		}
+
+		var body BulkAccountActionRequest
+		r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+		body.Action = strings.ToLower(strings.TrimSpace(body.Action))
+		emails := normalizeBulkEmails(body.Emails)
+		if len(emails) == 0 {
+			http.Error(w, `{"error":"at least one email is required"}`, http.StatusBadRequest)
+			return
+		}
+		if len(emails) > maxBulkAccountEmails {
+			http.Error(w, `{"error":"too many accounts selected"}`, http.StatusBadRequest)
+			return
+		}
+		switch body.Action {
+		case "delete", "disable", "enable", "check_personal_instructions":
+		default:
+			http.Error(w, `{"error":"unsupported bulk action"}`, http.StatusBadRequest)
+			return
+		}
+
+		accounts, missing := accountsMatchingEmails(pool, emails)
+		result := BulkAccountActionResult{
+			Status:    "ok",
+			Action:    body.Action,
+			Requested: len(emails),
+			Matched:   len(accounts),
+			Failed:    make(map[string]string),
+		}
+		for _, email := range missing {
+			result.Failed[email] = "account not found"
+		}
+
+		switch body.Action {
+		case "delete":
+			for _, acc := range accounts {
+				if err := deleteAccountByEmail(pool, accountsDir, acc.UserEmail); err != nil {
+					result.Failed[acc.UserEmail] = err.Error()
+					continue
+				}
+				result.Succeeded++
+			}
+		case "disable", "enable":
+			disabled := body.Action == "disable"
+			for _, acc := range accounts {
+				previous := acc.setManuallyDisabled(disabled)
+				if err := saveAccountFile(accountsDir, acc); err != nil {
+					acc.setManuallyDisabled(previous)
+					result.Failed[acc.UserEmail] = err.Error()
+					continue
+				}
+				result.Succeeded++
+			}
+		case "check_personal_instructions":
+			check := checkPersonalInstructionsForAccounts(accounts, 10, fetchNotionPersonalInstructionsPageID)
+			result.Check = &check
+			result.Succeeded = check.Total - check.Failed
+			for _, item := range check.Results {
+				if item.Error != "" {
+					result.Failed[item.Email] = item.Error
+				}
+			}
+			if accountsDir != "" {
+				pool.SaveAccounts(accountsDir)
+			}
+		}
+
+		log.Printf("[bulk-account-action] action=%s requested=%d matched=%d succeeded=%d failed=%d",
+			result.Action, result.Requested, result.Matched, result.Succeeded, len(result.Failed))
+		_ = json.NewEncoder(w).Encode(result)
+	}
+}
+
+type DeleteMissingPersonalInstructionsResult struct {
+	Status  string                           `json:"status"`
+	Checked int                              `json:"checked"`
+	Matched int                              `json:"matched"`
+	Deleted int                              `json:"deleted"`
+	Emails  []string                         `json:"emails"`
+	Failed  map[string]string                `json:"failed"`
+	Check   PersonalInstructionsCheckSummary `json:"check"`
+}
+
+func deleteMissingPersonalInstructions(pool *AccountPool, accountsDir string, fetcher personalInstructionsPageIDFetcher) DeleteMissingPersonalInstructionsResult {
+	check := checkAllPersonalInstructions(pool, 10, fetcher)
+	if pool != nil && accountsDir != "" {
+		pool.SaveAccounts(accountsDir)
+	}
+
+	candidates := make([]string, 0, check.Missing)
+	for _, item := range check.Results {
+		if item.Error == "" && item.Configured != nil && !*item.Configured {
+			candidates = append(candidates, item.Email)
+		}
+	}
+	result := DeleteMissingPersonalInstructionsResult{
+		Status:  "ok",
+		Checked: check.Total,
+		Matched: len(candidates),
+		Emails:  make([]string, 0, len(candidates)),
+		Failed:  make(map[string]string),
+		Check:   check,
+	}
+	for _, email := range candidates {
+		if err := deleteAccountByEmail(pool, accountsDir, email); err != nil {
+			result.Failed[email] = err.Error()
+			continue
+		}
+		result.Emails = append(result.Emails, email)
+		result.Deleted++
+	}
+	return result
+}
+
+// HandleDeleteMissingPersonalInstructions re-checks the full pool and then
+// permanently deletes only accounts that currently have no default-Agent
+// personal-instructions page. Probe failures are retained.
+func HandleDeleteMissingPersonalInstructions(pool *AccountPool, accountsDir string, auth *DashboardAuth) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		if auth.HasAdminPassword() && !auth.ValidateSession(r) {
+			http.Error(w, `{"error":"unauthorized, dashboard login required"}`, http.StatusUnauthorized)
+			return
+		}
+
+		result := deleteMissingPersonalInstructions(pool, accountsDir, fetchNotionPersonalInstructionsPageID)
+		log.Printf("[delete-missing-personal-instructions] checked=%d missing=%d deleted=%d failed=%d",
+			result.Checked, result.Matched, result.Deleted, len(result.Failed))
+		_ = json.NewEncoder(w).Encode(result)
 	}
 }
 

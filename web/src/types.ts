@@ -25,6 +25,7 @@ export interface AccountInfo {
   last_failure_at?: string
   auth_invalid?: boolean
   auth_failures?: number
+  disabled?: boolean
   eligible?: boolean
   usage?: number
   limit?: number
@@ -114,8 +115,13 @@ export interface AccountSummary {
   exhausted_only: number
   no_workspace: number
   auth_invalid: number
+  disabled: number
   premium_accounts: number
   exhausted_trials: number
+  personal_instructions_configured: number
+  personal_instructions_missing: number
+  personal_instructions_failed: number
+  personal_instructions_unchecked: number
   research_limited: number // deprecated compatibility field; current backend returns 0
   total_research_usage: number
   total_remaining: number

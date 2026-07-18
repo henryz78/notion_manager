@@ -135,19 +135,21 @@ func TestSummarizeAccountsAggregates(t *testing.T) {
 			"remaining": 100, "space_usage": 10, "space_limit": 200, "user_usage": 12, "user_limit": 200,
 			"space_remaining": 190, "user_remaining": 188,
 			"premium_balance": 500, "premium_limit": 500, "has_premium": true,
+			"personal_instructions_configured": true,
 		}),
 		account("b", "b@x", map[string]interface{}{
 			"remaining": 0, "exhausted": true,
 			"space_usage": 200, "space_limit": 200, "user_usage": 200, "user_limit": 200,
+			"personal_instructions_configured": false,
 		}),
 		account("c", "c@x", map[string]interface{}{
-			"no_workspace": true, "remaining": 50,
+			"no_workspace": true, "remaining": 50, "personal_instructions_check_error": "probe failed",
 		}),
 		account("d", "d@x", map[string]interface{}{
 			"permanent": true,
 		}),
 		account("e", "e@x", map[string]interface{}{
-			"remaining": 80, "research_usage": 4, // research-limited (no premium)
+			"remaining": 80, "research_usage": 4, "disabled": true, // research-limited (no premium)
 		}),
 		account("f", "f@x", map[string]interface{}{
 			"auth_invalid": true, "remaining": 70, "research_usage": 5,
@@ -161,6 +163,13 @@ func TestSummarizeAccountsAggregates(t *testing.T) {
 	}
 	if s.AuthInvalid != 1 {
 		t.Errorf("AuthInvalid: want 1 got %d", s.AuthInvalid)
+	}
+	if s.Disabled != 1 {
+		t.Errorf("Disabled: want 1 got %d", s.Disabled)
+	}
+	if s.PersonalConfigured != 1 || s.PersonalMissing != 1 || s.PersonalFailed != 1 || s.PersonalUnchecked != 3 {
+		t.Errorf("personal instruction counts: configured=%d missing=%d failed=%d unchecked=%d",
+			s.PersonalConfigured, s.PersonalMissing, s.PersonalFailed, s.PersonalUnchecked)
 	}
 	// b is exhausted-only; d is permanent-only. c has no_workspace so it's
 	// excluded from the bucket per UX spec. f is auth_invalid so it has its

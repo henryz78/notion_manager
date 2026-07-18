@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import type { DashboardData, AccountInfo, AccountSummary, RefreshStatus, TokenStats } from './types'
-import { fetchDashboardData, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats, deleteExhaustedTrials, checkPersonalInstructions } from './api'
-import type { SearchSettings } from './api'
+import { fetchDashboardData, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats, deleteExhaustedTrials, checkPersonalInstructions, bulkAccountAction, deleteMissingPersonalInstructions } from './api'
+import type { SearchSettings, BulkAccountAction } from './api'
 import { fmt, formatTokens, getQuotaStatusByUsage, getQuotaPct, avatarColor, avatarLetter, formatCheckedAt, formatTimestampMs, providerDisplay } from './utils'
 import { AccountMenu } from './components/AccountMenu'
 import { RegisterModal } from './components/RegisterModal'
@@ -599,7 +599,17 @@ function Badge({ children, variant }: { children: React.ReactNode; variant: 'pla
   )
 }
 
-function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: () => void }) {
+function AccountCard({
+  account,
+  onChanged,
+  selected,
+  onToggleSelected,
+}: {
+  account: AccountInfo
+  onChanged: () => void
+  selected: boolean
+  onToggleSelected: () => void
+}) {
   const [showModels, setShowModels] = useState(false)
   const spaceQuota = getSpaceQuota(account)
   const userQuota = getUserQuota(account)
@@ -608,8 +618,9 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
   const fullNotionAI = planIncludesFullNotionAI(account.plan)
   const noWorkspace = !!account.no_workspace
   const authInvalid = !!account.auth_invalid
+  const manuallyDisabled = !!account.disabled
   const temporarilyUnavailable = !authInvalid && !!account.temporarily_unavailable
-  const status = account.permanent || account.exhausted || noWorkspace || authInvalid || temporarilyUnavailable
+  const status = manuallyDisabled || account.permanent || account.exhausted || noWorkspace || authInvalid || temporarilyUnavailable
     ? 'exhausted'
     : mergeQuotaStatus([
       getQuotaStatusByUsage(spaceQuota.usage, spaceQuota.limit),
@@ -623,10 +634,14 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
   // because Notion's /ai SPA hangs indefinitely on these accounts (the
   // root-cause this fix is for).
   const cardBg = account.permanent ? 'bg-bg-exhausted border-white/[0.03] opacity-55'
-    : account.exhausted || noWorkspace || authInvalid || temporarilyUnavailable ? 'bg-bg-exhausted border-white/[0.03]'
+    : manuallyDisabled || account.exhausted || noWorkspace || authInvalid || temporarilyUnavailable ? 'bg-bg-exhausted border-white/[0.03]'
     : 'bg-bg-card hover:bg-bg-card-hover border-white/[0.03] hover:border-white/[0.07]'
 
   const handleClick = () => {
+    if (manuallyDisabled) {
+      alert('该账号已被手动禁用。重新启用后才会参与网关请求和代理选号。')
+      return
+    }
     if (authInvalid) {
       alert('该账号 Cookie/token 已失效，请重新导入账号。')
       return
@@ -646,12 +661,24 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
 
   return (
     <div
-      className={`rounded-lg p-4 border max-sm:p-3 ${authInvalid || noWorkspace || temporarilyUnavailable ? 'cursor-not-allowed' : 'cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30'} transition-all duration-200 ${cardBg}`}
+      className={`rounded-lg p-4 border max-sm:p-3 ${manuallyDisabled || authInvalid || noWorkspace || temporarilyUnavailable ? 'cursor-not-allowed' : 'cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30'} transition-all duration-200 ${selected ? 'ring-1 ring-notion-blue border-notion-blue/60' : ''} ${cardBg}`}
       onClick={handleClick}
-      title={authInvalid ? '账号 Cookie/token 已失效，请重新导入账号' : noWorkspace ? '账号无可访问工作区，已被排除出选号池' : temporarilyUnavailable ? `临时跳过：${account.last_failure_reason || 'temporary_failure'}` : undefined}
+      title={manuallyDisabled ? '账号已被手动禁用，不参与网关请求和代理选号' : authInvalid ? '账号 Cookie/token 已失效，请重新导入账号' : noWorkspace ? '账号无可访问工作区，已被排除出选号池' : temporarilyUnavailable ? `临时跳过：${account.last_failure_reason || 'temporary_failure'}` : undefined}
     >
       {/* Header */}
       <div className="flex items-center gap-2.5 mb-2.5">
+        <input
+          type="checkbox"
+          checked={selected}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => {
+            e.stopPropagation()
+            onToggleSelected()
+          }}
+          className="w-4 h-4 shrink-0 accent-notion-blue cursor-pointer"
+          aria-label={`选择账号 ${account.email}`}
+          title="选择账号进行批量操作"
+        />
         <div
           className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold text-white shrink-0"
           style={{ background: avatarColor(account.name) }}
@@ -705,6 +732,7 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
         )}
         {account.exhausted && !account.permanent && <Badge variant="warning">AI 当前不可用</Badge>}
         {account.permanent && <Badge variant="warning">AI 试用已用完</Badge>}
+        {manuallyDisabled && <Badge variant="warning">已手动禁用</Badge>}
         {authInvalid && <Badge variant="warning">Cookie 失效</Badge>}
         {noWorkspace && <Badge variant="warning">无工作区</Badge>}
         {temporarilyUnavailable && (
@@ -752,7 +780,9 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
           <IconClock />
           <span className="truncate">检查 {formatCheckedAt(account.checked_at)} · 最近 AI {formatTimestampMs(account.last_usage_at)}</span>
         </span>
-        {noWorkspace ? (
+        {manuallyDisabled ? (
+          <span className="text-[11px] text-err font-medium">已禁用</span>
+        ) : noWorkspace ? (
           <span className="text-[11px] text-err font-medium">不可用 ⚠</span>
         ) : (
           <span className="text-[11px] text-text-secondary hover:text-white font-medium transition-colors">打开代理 →</span>
@@ -771,7 +801,10 @@ export default function App() {
   const [refreshing, setRefreshing] = useState(false)
   const [quotaRefreshing, setQuotaRefreshing] = useState(false)
   const [checkingPersonalInstructions, setCheckingPersonalInstructions] = useState(false)
+  const [deletingMissingPersonalInstructions, setDeletingMissingPersonalInstructions] = useState(false)
   const [deletingExhaustedTrials, setDeletingExhaustedTrials] = useState(false)
+  const [bulkActionRunning, setBulkActionRunning] = useState<BulkAccountAction | null>(null)
+  const [selectedEmails, setSelectedEmails] = useState<Set<string>>(() => new Set())
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus | null>(null)
   const [query, setQuery] = useState('')
   const [refreshTime, setRefreshTime] = useState('')
@@ -912,6 +945,77 @@ export default function App() {
     }
   }
 
+  const handleDeleteMissingPersonalInstructions = async () => {
+    if (deletingMissingPersonalInstructions || (data?.total ?? 0) === 0) return
+    const knownMissing = data?.summary?.personal_instructions_missing ?? 0
+    const confirmed = window.confirm(
+      `系统会先重新检测全部 ${data?.total ?? 0} 个账号，然后永久删除当前确实没有设置官网默认 Agent 个人指令的账号。\n\n上次检测显示未设置：${knownMissing} 个。\n检测失败的账号不会删除。\n\n确定继续吗？`,
+    )
+    if (!confirmed) return
+    setDeletingMissingPersonalInstructions(true)
+    try {
+      const result = await deleteMissingPersonalInstructions()
+      const failedCount = Object.keys(result.failed || {}).length
+      setSelectedEmails(new Set())
+      await loadData()
+      window.alert(
+        `清理完成：重新检测 ${result.checked} 个账号，发现未设置 ${result.matched} 个，已删除 ${result.deleted} 个${failedCount > 0 ? `，删除失败 ${failedCount} 个` : ''}。`,
+      )
+    } catch (e: any) {
+      window.alert(`删除未设置个人指令账号失败：${e?.message || '请求失败'}`)
+    } finally {
+      setDeletingMissingPersonalInstructions(false)
+    }
+  }
+
+  const handleBulkSelected = async (action: BulkAccountAction) => {
+    const emails = Array.from(selectedEmails)
+    if (emails.length === 0 || bulkActionRunning) return
+    const labels: Record<BulkAccountAction, string> = {
+      delete: '永久删除',
+      disable: '禁用',
+      enable: '启用',
+      check_personal_instructions: '检测官网个人指令',
+    }
+    if (action === 'delete') {
+      const confirmed = window.confirm(
+        `将永久删除选中的 ${emails.length} 个账号及其登录文件。\n\n此操作不可撤销，确定继续吗？`,
+      )
+      if (!confirmed) return
+    }
+    setBulkActionRunning(action)
+    try {
+      const result = await bulkAccountAction(action, emails)
+      const failedCount = Object.keys(result.failed || {}).length
+      if (action === 'delete') setSelectedEmails(new Set())
+      await loadData()
+      if (action === 'check_personal_instructions' && result.check) {
+        window.alert(
+          `所选账号检测完成：已设置 ${result.check.configured}，未设置 ${result.check.missing}，检测失败 ${result.check.failed}${failedCount > result.check.failed ? `，另有 ${failedCount - result.check.failed} 个账号不存在` : ''}。`,
+        )
+      } else {
+        window.alert(
+          `${labels[action]}完成：成功 ${result.succeeded} 个${failedCount > 0 ? `，失败 ${failedCount} 个` : ''}。`,
+        )
+      }
+    } catch (e: any) {
+      window.alert(`${labels[action]}失败：${e?.message || '请求失败'}`)
+    } finally {
+      setBulkActionRunning(null)
+    }
+  }
+
+  const copySelectedEmails = async () => {
+    const emails = Array.from(selectedEmails)
+    if (emails.length === 0) return
+    try {
+      await navigator.clipboard.writeText(emails.join('\n'))
+      window.alert(`已复制 ${emails.length} 个账号邮箱。`)
+    } catch {
+      window.alert('复制失败，请检查浏览器剪贴板权限。')
+    }
+  }
+
   const handleDeleteExhaustedTrials = async () => {
     const count = data?.summary?.exhausted_trials ?? 0
     if (count <= 0 || deletingExhaustedTrials) return
@@ -998,6 +1102,27 @@ export default function App() {
   const paged = accounts
   const filteredTotal = data?.filtered_total ?? data?.total ?? accounts.length
   const totalPages = Math.max(1, Math.ceil(filteredTotal / PAGE_SIZE))
+  const pageEmails = paged.map(account => account.email)
+  const selectedOnPage = pageEmails.filter(email => selectedEmails.has(email)).length
+  const allPageSelected = pageEmails.length > 0 && selectedOnPage === pageEmails.length
+
+  const toggleSelectedEmail = (email: string) => {
+    setSelectedEmails(current => {
+      const next = new Set(current)
+      if (next.has(email)) next.delete(email)
+      else next.add(email)
+      return next
+    })
+  }
+
+  const toggleCurrentPageSelection = () => {
+    setSelectedEmails(current => {
+      const next = new Set(current)
+      if (allPageSelected) pageEmails.forEach(email => next.delete(email))
+      else pageEmails.forEach(email => next.add(email))
+      return next
+    })
+  }
 
   // Reset page when the (debounced) query changes so the user always
   // lands on the first page of new search results.
@@ -1017,7 +1142,8 @@ export default function App() {
     const exhaustedOnly = s?.exhausted_only ?? 0
     const noWorkspace = s?.no_workspace ?? 0
     const authInvalid = s?.auth_invalid ?? 0
-    const otherUnavailable = Math.max(0, exhausted - exhaustedOnly - noWorkspace - authInvalid)
+    const disabled = s?.disabled ?? 0
+    const otherUnavailable = Math.max(0, exhausted - exhaustedOnly - noWorkspace - authInvalid - disabled)
     const availableRate = data.total > 0 ? Math.round((data.available / data.total) * 100) : 0
     const sameBasicQuota = isSameQuota(
       { usage: s?.total_space_usage ?? 0, limit: s?.total_space_limit ?? 0 },
@@ -1028,6 +1154,7 @@ export default function App() {
       exhaustedOnly,
       noWorkspace,
       authInvalid,
+      disabled,
       otherUnavailable,
       availableRate,
       totalResearchUsage: s?.total_research_usage ?? 0,
@@ -1078,6 +1205,7 @@ export default function App() {
       summary.exhaustedOnly > 0 ? `${summary.exhaustedOnly} 耗尽` : null,
       summary.noWorkspace > 0 ? `${summary.noWorkspace} 无工作区` : null,
       summary.authInvalid > 0 ? `${summary.authInvalid} Cookie 失效` : null,
+      summary.disabled > 0 ? `${summary.disabled} 手动禁用` : null,
       summary.otherUnavailable > 0 ? `${summary.otherUnavailable} 临时跳过` : null,
     ].filter(Boolean).join(' / ')
     : ''
@@ -1177,11 +1305,21 @@ export default function App() {
           </button>
           <button
             onClick={handleCheckPersonalInstructions}
-            disabled={checkingPersonalInstructions}
+            disabled={checkingPersonalInstructions || deletingMissingPersonalInstructions}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border disabled:opacity-50 disabled:cursor-not-allowed"
             title="只检测默认 Notion Agent 是否绑定了官网个人指令页面，不读取或保存指令正文"
           >
             <IconActivity /> {checkingPersonalInstructions ? '正在检测个人指令...' : '检测官网个人指令'}
+          </button>
+          <button
+            onClick={handleDeleteMissingPersonalInstructions}
+            disabled={deletingMissingPersonalInstructions || checkingPersonalInstructions || (data?.total ?? 0) === 0}
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-err/10 hover:bg-err/20 text-err rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-err/25 disabled:opacity-40 disabled:cursor-not-allowed"
+            title="会先重新检测全部账号，只永久删除当前确实没有设置官网默认 Agent 个人指令的账号"
+          >
+            <IconTrash /> {deletingMissingPersonalInstructions
+              ? '正在检测并清理...'
+              : `删除未设置个人指令（${data?.summary?.personal_instructions_missing ?? 0}）`}
           </button>
           <button
             onClick={handleDeleteExhaustedTrials}
@@ -1419,6 +1557,65 @@ export default function App() {
         })()}
 
         {activePage === 'accounts' && <>
+        {/* Bulk selection toolbar */}
+        <div className="mb-4 rounded-lg border border-border bg-bg-card px-3 py-2.5 flex items-center gap-2.5 flex-wrap max-sm:items-stretch">
+          <button
+            onClick={toggleCurrentPageSelection}
+            disabled={pageEmails.length === 0 || !!bulkActionRunning}
+            className="px-3 py-1.5 bg-bg-secondary hover:bg-bg-card-hover text-text-primary rounded-md text-[12px] font-medium cursor-pointer border border-border disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {allPageSelected ? '取消本页' : '本页全选'}
+          </button>
+          <span className="text-[12px] text-text-secondary mr-auto self-center">
+            已选 <strong className="text-text-primary tabular-nums">{selectedEmails.size}</strong> 个
+            {selectedOnPage > 0 && selectedEmails.size !== selectedOnPage ? `（本页 ${selectedOnPage} 个）` : ''}
+          </span>
+          <div className="flex items-center gap-2 flex-wrap max-sm:grid max-sm:grid-cols-2 max-sm:w-full">
+            <button
+              onClick={copySelectedEmails}
+              disabled={selectedEmails.size === 0 || !!bulkActionRunning}
+              className="px-3 py-1.5 bg-bg-secondary hover:bg-bg-card-hover text-text-secondary hover:text-text-primary rounded-md text-[12px] cursor-pointer border border-border disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              复制邮箱
+            </button>
+            <button
+              onClick={() => handleBulkSelected('check_personal_instructions')}
+              disabled={selectedEmails.size === 0 || !!bulkActionRunning || checkingPersonalInstructions || deletingMissingPersonalInstructions}
+              className="px-3 py-1.5 bg-bg-secondary hover:bg-bg-card-hover text-text-secondary hover:text-text-primary rounded-md text-[12px] cursor-pointer border border-border disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {bulkActionRunning === 'check_personal_instructions' ? '正在检测...' : '检测所选'}
+            </button>
+            <button
+              onClick={() => handleBulkSelected('disable')}
+              disabled={selectedEmails.size === 0 || !!bulkActionRunning}
+              className="px-3 py-1.5 bg-warn/10 hover:bg-warn/20 text-warn rounded-md text-[12px] cursor-pointer border border-warn/25 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {bulkActionRunning === 'disable' ? '正在禁用...' : '禁用所选'}
+            </button>
+            <button
+              onClick={() => handleBulkSelected('enable')}
+              disabled={selectedEmails.size === 0 || !!bulkActionRunning}
+              className="px-3 py-1.5 bg-ok/10 hover:bg-ok/20 text-ok rounded-md text-[12px] cursor-pointer border border-ok/25 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {bulkActionRunning === 'enable' ? '正在启用...' : '启用所选'}
+            </button>
+            <button
+              onClick={() => handleBulkSelected('delete')}
+              disabled={selectedEmails.size === 0 || !!bulkActionRunning}
+              className="px-3 py-1.5 bg-err/10 hover:bg-err/20 text-err rounded-md text-[12px] cursor-pointer border border-err/25 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {bulkActionRunning === 'delete' ? '正在删除...' : '删除所选'}
+            </button>
+            <button
+              onClick={() => setSelectedEmails(new Set())}
+              disabled={selectedEmails.size === 0 || !!bulkActionRunning}
+              className="px-3 py-1.5 bg-transparent hover:bg-white/[.05] text-text-muted hover:text-text-primary rounded-md text-[12px] cursor-pointer border border-transparent disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              清空选择
+            </button>
+          </div>
+        </div>
+
         {/* Section Title */}
         <div className="text-[12px] font-semibold text-text-secondary uppercase tracking-wider mb-3.5 flex items-center gap-1.5">
           <span>账号池</span>
@@ -1433,7 +1630,13 @@ export default function App() {
         ) : (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(340px,1fr))] gap-2.5 mb-4 max-sm:grid-cols-1">
             {paged.map(acc => (
-              <AccountCard key={acc.email} account={acc} onChanged={loadData} />
+              <AccountCard
+                key={acc.email}
+                account={acc}
+                onChanged={loadData}
+                selected={selectedEmails.has(acc.email)}
+                onToggleSelected={() => toggleSelectedEmail(acc.email)}
+              />
             ))}
           </div>
         )}

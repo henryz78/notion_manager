@@ -121,6 +121,7 @@ type accountHealthSnapshot struct {
 	LastFailureAt             *time.Time
 	AuthFailureCount          int
 	AuthInvalid               bool
+	ManuallyDisabled          bool
 }
 
 type accountPersonalInstructionsSnapshot struct {
@@ -179,6 +180,25 @@ func writePersonalInstructionsState(target map[string]interface{}, state account
 	}
 }
 
+func (acc *Account) setManuallyDisabled(disabled bool) bool {
+	if acc == nil {
+		return false
+	}
+	acc.mu.Lock()
+	previous := acc.ManuallyDisabled
+	acc.ManuallyDisabled = disabled
+	acc.mu.Unlock()
+	return previous
+}
+
+func writeManualDisabledState(target map[string]interface{}, disabled bool) {
+	if disabled {
+		target["disabled"] = true
+	} else {
+		delete(target, "disabled")
+	}
+}
+
 func (acc *Account) healthSnapshot() accountHealthSnapshot {
 	if acc == nil {
 		return accountHealthSnapshot{}
@@ -191,6 +211,7 @@ func (acc *Account) healthSnapshot() accountHealthSnapshot {
 		LastFailureAt:             cloneTimePtr(acc.LastFailureAt),
 		AuthFailureCount:          acc.AuthFailureCount,
 		AuthInvalid:               acc.AuthInvalid,
+		ManuallyDisabled:          acc.ManuallyDisabled,
 	}
 }
 
@@ -613,6 +634,10 @@ func (p *AccountPool) isAuthInvalid(acc *Account) bool {
 	return acc.healthSnapshot().AuthInvalid
 }
 
+func (p *AccountPool) isManuallyDisabled(acc *Account) bool {
+	return acc.healthSnapshot().ManuallyDisabled
+}
+
 func (p *AccountPool) isQuotaExhausted(acc *Account) bool {
 	quota := acc.quotaSnapshot()
 	if quota.PermanentlyExhausted {
@@ -636,10 +661,10 @@ func (p *AccountPool) hasNoWorkspace(acc *Account) bool {
 	return acc != nil && acc.WorkspaceCheckedAt != nil && acc.SpaceCount == 0
 }
 
-// isUnusable folds quota-exhausted and no-workspace accounts into a
-// single "do not select" predicate used by every picker.
+// isUnusable folds manual disable, quota, workspace, cooldown, and auth
+// state into a single "do not select" predicate used by every picker.
 func (p *AccountPool) isUnusable(acc *Account) bool {
-	return p.isQuotaExhausted(acc) || p.hasNoWorkspace(acc) || p.isTemporarilyUnavailable(acc) || p.isAuthInvalid(acc)
+	return p.isManuallyDisabled(acc) || p.isQuotaExhausted(acc) || p.hasNoWorkspace(acc) || p.isTemporarilyUnavailable(acc) || p.isAuthInvalid(acc)
 }
 
 // applyWorkspaceCount records the latest probe result. Caller must NOT
@@ -1186,6 +1211,7 @@ func (p *AccountPool) SaveAccounts(dir string) {
 		models := acc.modelsSnapshot()
 		quota := acc.quotaSnapshot()
 		personalInstructions := acc.personalInstructionsSnapshot()
+		health := acc.healthSnapshot()
 		// Find the matching file by user_email
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -1246,6 +1272,7 @@ func (p *AccountPool) SaveAccounts(dir string) {
 				existing["workspace_checked_at"] = acc.WorkspaceCheckedAt.Format(time.RFC3339)
 			}
 			writePersonalInstructionsState(existing, personalInstructions)
+			writeManualDisabledState(existing, health.ManuallyDisabled)
 
 			// Write back
 			out, err := json.MarshalIndent(existing, "", "  ")
@@ -1334,6 +1361,7 @@ func saveAccountFile(dir string, acc *Account) error {
 		existing["quota_checked_at"] = acc.QuotaCheckedAt.Format(time.RFC3339)
 	}
 	writePersonalInstructionsState(existing, acc.personalInstructionsSnapshot())
+	writeManualDisabledState(existing, acc.healthSnapshot().ManuallyDisabled)
 	if acc.WorkspaceCheckedAt != nil {
 		existing["space_count"] = acc.SpaceCount
 		existing["workspace_checked_at"] = acc.WorkspaceCheckedAt.Format(time.RFC3339)
@@ -1456,6 +1484,7 @@ func (p *AccountPool) GetAccountDetails() []map[string]interface{} {
 			"exhausted":    p.isQuotaExhausted(acc),
 			"permanent":    quota.PermanentlyExhausted,
 			"no_workspace": p.hasNoWorkspace(acc),
+			"disabled":     health.ManuallyDisabled,
 			// token_v2 is exposed only behind dashboard auth (the caller of
 			// HandleAdminAccounts already gates on session). The dashboard
 			// shows a "copy token" action and uses it for nothing else.
@@ -1545,6 +1574,7 @@ func (p *AccountPool) GetQuotaSummary() []map[string]interface{} {
 			"exhausted":    p.isQuotaExhausted(acc),
 			"permanent":    quota.PermanentlyExhausted,
 			"no_workspace": p.hasNoWorkspace(acc),
+			"disabled":     health.ManuallyDisabled,
 		}
 		if health.TemporaryUnavailableUntil != nil {
 			entry["temporarily_unavailable"] = health.TemporaryUnavailableUntil.After(time.Now())

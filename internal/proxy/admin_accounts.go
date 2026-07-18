@@ -15,8 +15,13 @@ type AccountSummary struct {
 	ExhaustedOnly       int   `json:"exhausted_only"`
 	NoWorkspace         int   `json:"no_workspace"`
 	AuthInvalid         int   `json:"auth_invalid"`
+	Disabled            int   `json:"disabled"`
 	PremiumAccounts     int   `json:"premium_accounts"`
 	ExhaustedTrials     int   `json:"exhausted_trials"`
+	PersonalConfigured  int   `json:"personal_instructions_configured"`
+	PersonalMissing     int   `json:"personal_instructions_missing"`
+	PersonalFailed      int   `json:"personal_instructions_failed"`
+	PersonalUnchecked   int   `json:"personal_instructions_unchecked"`
 	ResearchLimited     int   `json:"research_limited"` // deprecated: kept as 0 for API compatibility
 	TotalResearchUsage  int   `json:"total_research_usage"`
 	TotalRemaining      int   `json:"total_remaining"`
@@ -40,14 +45,28 @@ func summarizeAccounts(accounts []map[string]interface{}) AccountSummary {
 		perm := mapBool(a, "permanent")
 		nws := mapBool(a, "no_workspace")
 		authInvalid := mapBool(a, "auth_invalid")
+		disabled := mapBool(a, "disabled")
 		if nws {
 			s.NoWorkspace++
 		}
 		if authInvalid {
 			s.AuthInvalid++
 		}
-		if (exh || perm) && !nws && !authInvalid {
+		if disabled {
+			s.Disabled++
+		}
+		if (exh || perm) && !nws && !authInvalid && !disabled {
 			s.ExhaustedOnly++
+		}
+		switch {
+		case mapString(a, "personal_instructions_check_error") != "":
+			s.PersonalFailed++
+		case a["personal_instructions_configured"] == nil:
+			s.PersonalUnchecked++
+		case mapBool(a, "personal_instructions_configured"):
+			s.PersonalConfigured++
+		default:
+			s.PersonalMissing++
 		}
 		if hasPremiumMap(a) {
 			s.PremiumAccounts++
@@ -108,16 +127,21 @@ func matchAccountQuery(a map[string]interface{}, qLower string) bool {
 
 // sortAccountDetails sorts in-place using the same criteria the dashboard
 // previously applied client-side:
-//  1. Permanently exhausted accounts to the bottom.
-//  2. Auth-invalid accounts to the bottom.
-//  3. Accounts with no accessible workspace to the bottom.
-//  4. Quota-exhausted accounts to the bottom.
-//  5. Full Notion AI plans, then a live premium signal, then trial plans.
-//  6. Stable fallback by name (lower-cased). Private quota counters are not
+//  1. Manually disabled accounts to the bottom.
+//  2. Permanently exhausted accounts to the bottom.
+//  3. Auth-invalid accounts to the bottom.
+//  4. Accounts with no accessible workspace to the bottom.
+//  5. Quota-exhausted accounts to the bottom.
+//  6. Full Notion AI plans, then a live premium signal, then trial plans.
+//  7. Stable fallback by name (lower-cased). Private quota counters are not
 //     used for ordering because their public semantics are undocumented.
 func sortAccountDetails(accounts []map[string]interface{}) {
 	sort.SliceStable(accounts, func(i, j int) bool {
-		ai, aj := mapBool(accounts[i], "permanent"), mapBool(accounts[j], "permanent")
+		ai, aj := mapBool(accounts[i], "disabled"), mapBool(accounts[j], "disabled")
+		if ai != aj {
+			return !ai
+		}
+		ai, aj = mapBool(accounts[i], "permanent"), mapBool(accounts[j], "permanent")
 		if ai != aj {
 			return !ai
 		}
