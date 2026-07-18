@@ -278,6 +278,33 @@ export async function addAccount(tokenV2: string): Promise<AddAccountResult> {
   return data
 }
 
+export interface PersonalInstructionsCheckItem {
+  email: string
+  configured?: boolean
+  checked_at: string
+  error?: string
+}
+
+export interface PersonalInstructionsCheckResult {
+  status: string
+  total: number
+  configured: number
+  missing: number
+  failed: number
+  results: PersonalInstructionsCheckItem[]
+}
+
+export async function checkPersonalInstructions(): Promise<PersonalInstructionsCheckResult> {
+  const resp = await fetch('/admin/accounts/check-personal-instructions', {
+    method: 'POST',
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+  })
+  const data = await readJson<PersonalInstructionsCheckResult>(resp, '个人指令检测接口返回了无效响应')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return data
+}
+
 export interface DeleteExhaustedTrialsResult {
   status: string
   matched: number

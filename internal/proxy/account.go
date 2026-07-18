@@ -123,6 +123,62 @@ type accountHealthSnapshot struct {
 	AuthInvalid               bool
 }
 
+type accountPersonalInstructionsSnapshot struct {
+	Configured *bool
+	CheckedAt  *time.Time
+	Error      string
+}
+
+func cloneBoolPtr(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func (acc *Account) personalInstructionsSnapshot() accountPersonalInstructionsSnapshot {
+	if acc == nil {
+		return accountPersonalInstructionsSnapshot{}
+	}
+	acc.mu.RLock()
+	defer acc.mu.RUnlock()
+	return accountPersonalInstructionsSnapshot{
+		Configured: cloneBoolPtr(acc.PersonalInstructionsConfigured),
+		CheckedAt:  cloneTimePtr(acc.PersonalInstructionsCheckedAt),
+		Error:      acc.PersonalInstructionsCheckError,
+	}
+}
+
+func (acc *Account) setPersonalInstructionsCheck(configured *bool, checkedAt time.Time, checkError string) {
+	if acc == nil {
+		return
+	}
+	acc.mu.Lock()
+	acc.PersonalInstructionsConfigured = cloneBoolPtr(configured)
+	acc.PersonalInstructionsCheckedAt = cloneTimePtr(&checkedAt)
+	acc.PersonalInstructionsCheckError = strings.TrimSpace(checkError)
+	acc.mu.Unlock()
+}
+
+func writePersonalInstructionsState(target map[string]interface{}, state accountPersonalInstructionsSnapshot) {
+	if state.Configured != nil {
+		target["personal_instructions_configured"] = *state.Configured
+	} else {
+		delete(target, "personal_instructions_configured")
+	}
+	if state.CheckedAt != nil {
+		target["personal_instructions_checked_at"] = state.CheckedAt.Format(time.RFC3339)
+	} else {
+		delete(target, "personal_instructions_checked_at")
+	}
+	if state.Error != "" {
+		target["personal_instructions_check_error"] = state.Error
+	} else {
+		delete(target, "personal_instructions_check_error")
+	}
+}
+
 func (acc *Account) healthSnapshot() accountHealthSnapshot {
 	if acc == nil {
 		return accountHealthSnapshot{}
@@ -1129,6 +1185,7 @@ func (p *AccountPool) SaveAccounts(dir string) {
 	for _, acc := range accs {
 		models := acc.modelsSnapshot()
 		quota := acc.quotaSnapshot()
+		personalInstructions := acc.personalInstructionsSnapshot()
 		// Find the matching file by user_email
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -1188,6 +1245,7 @@ func (p *AccountPool) SaveAccounts(dir string) {
 				existing["space_count"] = acc.SpaceCount
 				existing["workspace_checked_at"] = acc.WorkspaceCheckedAt.Format(time.RFC3339)
 			}
+			writePersonalInstructionsState(existing, personalInstructions)
 
 			// Write back
 			out, err := json.MarshalIndent(existing, "", "  ")
@@ -1275,6 +1333,7 @@ func saveAccountFile(dir string, acc *Account) error {
 	if acc.QuotaCheckedAt != nil {
 		existing["quota_checked_at"] = acc.QuotaCheckedAt.Format(time.RFC3339)
 	}
+	writePersonalInstructionsState(existing, acc.personalInstructionsSnapshot())
 	if acc.WorkspaceCheckedAt != nil {
 		existing["space_count"] = acc.SpaceCount
 		existing["workspace_checked_at"] = acc.WorkspaceCheckedAt.Format(time.RFC3339)
@@ -1388,6 +1447,7 @@ func (p *AccountPool) GetAccountDetails() []map[string]interface{} {
 		quota := acc.quotaSnapshot()
 		health := acc.healthSnapshot()
 		models := acc.modelsSnapshot()
+		personalInstructions := acc.personalInstructionsSnapshot()
 		entry := map[string]interface{}{
 			"email":        acc.UserEmail,
 			"name":         acc.UserName,
@@ -1423,6 +1483,15 @@ func (p *AccountPool) GetAccountDetails() []map[string]interface{} {
 		}
 		if acc.RegisteredVia != "" {
 			entry["registered_via"] = acc.RegisteredVia
+		}
+		if personalInstructions.Configured != nil {
+			entry["personal_instructions_configured"] = *personalInstructions.Configured
+		}
+		if personalInstructions.CheckedAt != nil {
+			entry["personal_instructions_checked_at"] = personalInstructions.CheckedAt.Format(time.RFC3339)
+		}
+		if personalInstructions.Error != "" {
+			entry["personal_instructions_check_error"] = personalInstructions.Error
 		}
 		if quota.Info != nil {
 			entry["eligible"] = quota.Info.IsEligible

@@ -166,10 +166,18 @@ Response shape:
     "limit": 200,
     "remaining": 97,
     "checked_at": "2026-03-17T...",
+    "personal_instructions_configured": true,
+    "personal_instructions_checked_at": "2026-07-18T...",
     "models": [{ "id": "...", "name": "..." }]
   }]
 }
 ```
+
+`POST /admin/accounts/check-personal-instructions` probes every account for
+the default Notion Agent personal-instructions binding. The UI displays
+configured / missing / failed / unchecked. Persist only the boolean result,
+timestamp, and optional error; never persist or render the page ID or
+instruction text.
 
 ### Proxy Navigation
 

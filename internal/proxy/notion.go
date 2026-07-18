@@ -1785,12 +1785,18 @@ func (r notionSpaceViewRecord) value() notionSpaceViewValue {
 }
 
 func (r notionPersonalInstructionsLoadUserContent) contextPageID(spaceViewID, spaceID string) string {
-	if record, ok := r.RecordMap.SpaceView[spaceViewID]; ok {
-		return strings.TrimSpace(record.value().Settings.AgentPersonalizationSettings.ContextPageID)
+	if spaceViewID = strings.TrimSpace(spaceViewID); spaceViewID != "" {
+		if record, ok := r.RecordMap.SpaceView[spaceViewID]; ok {
+			return strings.TrimSpace(record.value().Settings.AgentPersonalizationSettings.ContextPageID)
+		}
 	}
 
 	// Old account files can lack space_view_id. Match by workspace instead,
 	// but never fall back to another workspace's settings.
+	spaceID = strings.TrimSpace(spaceID)
+	if spaceID == "" {
+		return ""
+	}
 	for _, record := range r.RecordMap.SpaceView {
 		value := record.value()
 		if value.SpaceID == spaceID {

@@ -39,7 +39,9 @@ Dashboard 顶部拆成两个页面：
 - 邮箱、计划类型、workspace
 - 私有接口诊断计数（basic / premium / space / user / research），明确标注为非公开字段
 - 已发现模型、最近一次检查时间
+- 官网默认 Notion Agent 个人指令状态：已设置、未设置、检测失败或未检测
 - 单行操作：**打开代理**、**复制 token**、**删除账号**
+- 批量个人指令检测使用 `POST /admin/accounts/check-personal-instructions`。检测只读取“当前工作区是否绑定个人指令页面”这个状态，不加载、不保存页面 ID 和指令正文
 - 批量操作：清理所有已明确因 complimentary AI responses 用完而禁用的 Free / Plus 账号。执行前会二次确认，不会删除 Business / Enterprise、临时故障、Cookie 失效或无工作区账号
 
 列表来源于 `GET /admin/accounts?q=&page=&page_size=`。Server 端先按 Dashboard 旧的客户端排序规则排序，再按关键字过滤、再分页，所以 1k+ 大池也不卡。响应里始终带一份池级 `summary`（付费账号数、总剩余等），保证 headline 卡片不被分页影响。

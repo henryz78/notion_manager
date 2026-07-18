@@ -46,6 +46,9 @@ export interface AccountInfo {
   premium_limit?: number
   token_v2?: string
   registered_via?: string
+  personal_instructions_configured?: boolean
+  personal_instructions_checked_at?: string
+  personal_instructions_check_error?: string
 }
 
 export interface ProviderInfo {

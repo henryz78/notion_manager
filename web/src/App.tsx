@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import type { DashboardData, AccountInfo, AccountSummary, RefreshStatus, TokenStats } from './types'
-import { fetchDashboardData, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats, deleteExhaustedTrials } from './api'
+import { fetchDashboardData, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats, deleteExhaustedTrials, checkPersonalInstructions } from './api'
 import type { SearchSettings } from './api'
 import { fmt, formatTokens, getQuotaStatusByUsage, getQuotaPct, avatarColor, avatarLetter, formatCheckedAt, formatTimestampMs, providerDisplay } from './utils'
 import { AccountMenu } from './components/AccountMenu'
@@ -583,13 +583,14 @@ function QuotaBar({ label, labelClass, usage, limit, status }: { label: string; 
   )
 }
 
-function Badge({ children, variant }: { children: React.ReactNode; variant: 'plan' | 'premium' | 'research' | 'warning' | 'model' }) {
+function Badge({ children, variant }: { children: React.ReactNode; variant: 'plan' | 'premium' | 'research' | 'warning' | 'model' | 'ok' }) {
   const cls: Record<string, string> = {
     plan: 'text-text-secondary',
     premium: 'text-[#7eb8ff]',
     research: 'text-research',
     warning: 'text-red-400 bg-red-500/10 px-1.5 rounded',
     model: 'text-text-secondary hover:text-white transition-colors cursor-pointer',
+    ok: 'text-ok bg-ok/10 px-1.5 rounded',
   }
   return (
     <span className={`inline-flex items-center gap-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap ${cls[variant] || ''}`}>
@@ -679,6 +680,23 @@ function AccountCard({ account, onChanged }: { account: AccountInfo; onChanged: 
         {account.registered_via && (
           <Badge variant="plan">via {providerDisplay(account.registered_via)}</Badge>
         )}
+        <span title={
+          account.personal_instructions_check_error
+            ? account.personal_instructions_check_error
+            : account.personal_instructions_checked_at
+              ? `检测于 ${new Date(account.personal_instructions_checked_at).toLocaleString('zh-CN', { hour12: false })}`
+              : '尚未批量检测'
+        }>
+          {account.personal_instructions_check_error ? (
+            <Badge variant="warning">个人指令检测失败</Badge>
+          ) : account.personal_instructions_configured === true ? (
+            <Badge variant="ok">官网个人指令已设置</Badge>
+          ) : account.personal_instructions_configured === false ? (
+            <Badge variant="plan">官网个人指令未设置</Badge>
+          ) : (
+            <Badge variant="plan">个人指令未检测</Badge>
+          )}
+        </span>
         {premium && <Badge variant="premium">Premium 接口信号</Badge>}
         {(account.research_usage != null && account.research_usage > 0) && (
           <Badge variant="research">
@@ -752,6 +770,7 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [quotaRefreshing, setQuotaRefreshing] = useState(false)
+  const [checkingPersonalInstructions, setCheckingPersonalInstructions] = useState(false)
   const [deletingExhaustedTrials, setDeletingExhaustedTrials] = useState(false)
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus | null>(null)
   const [query, setQuery] = useState('')
@@ -875,6 +894,22 @@ export default function App() {
       setRefreshStatus(prev => prev ? { ...prev, refreshing: true, done: 0 } : { refreshing: true, done: 0, total: 0 })
     } catch { /* ignore */ }
     setQuotaRefreshing(false)
+  }
+
+  const handleCheckPersonalInstructions = async () => {
+    if (checkingPersonalInstructions) return
+    setCheckingPersonalInstructions(true)
+    try {
+      const result = await checkPersonalInstructions()
+      await loadData()
+      window.alert(
+        `个人指令检测完成：共 ${result.total} 个账号\n\n已设置：${result.configured}\n未设置：${result.missing}\n检测失败：${result.failed}`,
+      )
+    } catch (e: any) {
+      window.alert(`个人指令检测失败：${e?.message || '请求失败'}`)
+    } finally {
+      setCheckingPersonalInstructions(false)
+    }
   }
 
   const handleDeleteExhaustedTrials = async () => {
@@ -1139,6 +1174,14 @@ export default function App() {
             className={`inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border disabled:opacity-50 disabled:cursor-not-allowed ${refreshing ? 'animate-pulse' : ''}`}
           >
             <IconRefresh /> 刷新数据
+          </button>
+          <button
+            onClick={handleCheckPersonalInstructions}
+            disabled={checkingPersonalInstructions}
+            className="inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border disabled:opacity-50 disabled:cursor-not-allowed"
+            title="只检测默认 Notion Agent 是否绑定了官网个人指令页面，不读取或保存指令正文"
+          >
+            <IconActivity /> {checkingPersonalInstructions ? '正在检测个人指令...' : '检测官网个人指令'}
           </button>
           <button
             onClick={handleDeleteExhaustedTrials}

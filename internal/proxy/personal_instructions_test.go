@@ -244,6 +244,14 @@ func TestExtractNotionPersonalInstructionsPageID(t *testing.T) {
 	if pageID != "" {
 		t.Fatalf("must not reuse another account's page ID, got %q", pageID)
 	}
+
+	pageID, err = extractNotionPersonalInstructionsPageID(nested, "", "")
+	if err != nil {
+		t.Fatalf("extract empty account context: %v", err)
+	}
+	if pageID != "" {
+		t.Fatalf("must not select a page without account workspace context, got %q", pageID)
+	}
 }
 
 func TestBuildFullTranscriptPersonalInstructionsMode(t *testing.T) {

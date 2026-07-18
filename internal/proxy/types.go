@@ -28,6 +28,12 @@ type Account struct {
 	// "microsoft"). Empty for accounts onboarded before the provider
 	// registry existed; the dashboard treats those as legacy Microsoft.
 	RegisteredVia string `json:"registered_via,omitempty"`
+	// Personal-instructions probe state. The project stores only whether the
+	// selected default-Agent instructions page exists; the page ID and page
+	// contents are never persisted here.
+	PersonalInstructionsConfigured *bool      `json:"personal_instructions_configured,omitempty"`
+	PersonalInstructionsCheckedAt  *time.Time `json:"personal_instructions_checked_at,omitempty"`
+	PersonalInstructionsCheckError string     `json:"personal_instructions_check_error,omitempty"`
 	// Runtime-only fields (not serialized)
 	QuotaExhaustedAt     *time.Time `json:"-"`
 	QuotaInfo            *QuotaInfo `json:"-"`

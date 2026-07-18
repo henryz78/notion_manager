@@ -40,7 +40,9 @@ version is also available in the `X-Notion-Manager-Version` response header on
 - Email, plan type, workspace
 - Private-API diagnostic counters (basic / premium / space / user / research), clearly labeled as non-public schema
 - Discovered models, last-checked timestamp
+- Default Notion Agent personal-instructions status: configured, missing, failed, or not checked
 - Per-row actions: **Open proxy**, **Copy token**, **Delete account**
+- Bulk personal-instructions check through `POST /admin/accounts/check-personal-instructions`. The probe reads only the workspace setting that indicates whether a page is bound; it never loads or stores the page ID or instruction text
 - Bulk cleanup for Free / Plus accounts explicitly disabled after exhausting complimentary AI responses. It requires confirmation and excludes Business / Enterprise, temporary failures, invalid cookies, and no-workspace accounts
 
 The list is fetched from `GET /admin/accounts?q=&page=&page_size=`. The Go server applies the same sort the dashboard previously did client-side, then filters and paginates, so big pools (1k+ accounts) stay responsive. The response includes a pool-wide `summary` block (premium count, total remaining, etc.) for the headline cards regardless of pagination.

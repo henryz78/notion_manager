@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -428,6 +429,123 @@ func HandleAddAccount(pool *AccountPool, accountsDir string, auth *DashboardAuth
 				"plan_type": acc.PlanType,
 			},
 		})
+	}
+}
+
+type PersonalInstructionsCheckItem struct {
+	Email      string `json:"email"`
+	Configured *bool  `json:"configured,omitempty"`
+	CheckedAt  string `json:"checked_at"`
+	Error      string `json:"error,omitempty"`
+}
+
+type PersonalInstructionsCheckSummary struct {
+	Status     string                          `json:"status"`
+	Total      int                             `json:"total"`
+	Configured int                             `json:"configured"`
+	Missing    int                             `json:"missing"`
+	Failed     int                             `json:"failed"`
+	Results    []PersonalInstructionsCheckItem `json:"results"`
+}
+
+type personalInstructionsPageIDFetcher func(*Account) (string, error)
+
+func checkAllPersonalInstructions(pool *AccountPool, concurrency int, fetcher personalInstructionsPageIDFetcher) PersonalInstructionsCheckSummary {
+	summary := PersonalInstructionsCheckSummary{Status: "ok"}
+	if pool == nil || fetcher == nil {
+		return summary
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > 20 {
+		concurrency = 20
+	}
+
+	pool.mu.RLock()
+	accounts := append([]*Account(nil), pool.accounts...)
+	pool.mu.RUnlock()
+	summary.Total = len(accounts)
+	if len(accounts) == 0 {
+		return summary
+	}
+
+	jobs := make(chan *Account)
+	results := make(chan PersonalInstructionsCheckItem, len(accounts))
+	var workers sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for acc := range jobs {
+				checkedAt := time.Now().UTC()
+				item := PersonalInstructionsCheckItem{
+					Email:     acc.UserEmail,
+					CheckedAt: checkedAt.Format(time.RFC3339),
+				}
+				pageID, err := fetcher(acc)
+				if err != nil {
+					item.Error = truncateForLog(err.Error(), 300)
+					acc.setPersonalInstructionsCheck(nil, checkedAt, item.Error)
+					results <- item
+					continue
+				}
+				configured := strings.TrimSpace(pageID) != ""
+				item.Configured = &configured
+				acc.setPersonalInstructionsCheck(&configured, checkedAt, "")
+				results <- item
+			}
+		}()
+	}
+
+	go func() {
+		for _, acc := range accounts {
+			jobs <- acc
+		}
+		close(jobs)
+		workers.Wait()
+		close(results)
+	}()
+
+	for item := range results {
+		switch {
+		case item.Error != "":
+			summary.Failed++
+		case item.Configured != nil && *item.Configured:
+			summary.Configured++
+		default:
+			summary.Missing++
+		}
+		summary.Results = append(summary.Results, item)
+	}
+	sort.Slice(summary.Results, func(i, j int) bool {
+		return strings.ToLower(summary.Results[i].Email) < strings.ToLower(summary.Results[j].Email)
+	})
+	return summary
+}
+
+// HandleCheckPersonalInstructions checks only whether each account has a
+// default-Agent personal-instructions page configured. It never loads, returns,
+// logs, or persists the page ID or the page contents.
+func HandleCheckPersonalInstructions(pool *AccountPool, accountsDir string, auth *DashboardAuth) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		if auth.HasAdminPassword() && !auth.ValidateSession(r) {
+			http.Error(w, `{"error":"unauthorized, dashboard login required"}`, http.StatusUnauthorized)
+			return
+		}
+
+		summary := checkAllPersonalInstructions(pool, 10, fetchNotionPersonalInstructionsPageID)
+		if accountsDir != "" {
+			pool.SaveAccounts(accountsDir)
+		}
+		log.Printf("[personal-instructions-check] total=%d configured=%d missing=%d failed=%d",
+			summary.Total, summary.Configured, summary.Missing, summary.Failed)
+		_ = json.NewEncoder(w).Encode(summary)
 	}
 }
 
