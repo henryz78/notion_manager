@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { RegisterJob, RegisterStep } from '../types'
 import { deleteRegisterJob, getJob, listJobs, retryRegisterJob } from '../api'
 import { providerDisplay } from '../utils'
+import { useT } from '../i18n'
 import {
   IconCheck,
   IconChevronRight,
@@ -16,22 +17,17 @@ import {
 interface Props {
   open: boolean
   onClose: () => void
-  // onRetryStarted is invoked with the new job id when a retry kicks off so
-  // the caller (App.tsx) can open the live progress modal again.
   onRetryStarted?: (jobId: string) => void
 }
 
 export function HistoryDrawer({ open, onClose, onRetryStarted }: Props) {
+  const { t, locale } = useT()
   const [jobs, setJobs] = useState<RegisterJob[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [details, setDetails] = useState<Record<string, RegisterJob | undefined>>({})
-  // pendingAction tracks per-job retry/delete in-flight state so we can show
-  // a spinner and disable both buttons while the request is outstanding.
   const [pendingAction, setPendingAction] = useState<Record<string, 'retry' | 'delete' | undefined>>({})
-  // rowError surfaces backend rejections (e.g. 410 Gone for sidecar-less
-  // retries) inline with the row instead of swallowing them.
   const [rowError, setRowError] = useState<Record<string, string | undefined>>({})
 
   const reload = useCallback(async () => {
@@ -41,27 +37,23 @@ export function HistoryDrawer({ open, onClose, onRetryStarted }: Props) {
       const list = await listJobs(50)
       setJobs(list)
     } catch (e: any) {
-      setError(e?.message ?? '加载失败')
+      setError(e?.message ?? t('historyDrawer.loadFailed'))
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     if (!open) return
     reload()
   }, [open, reload])
 
-  // Auto-poll while any job is still running so retry/start jobs show live
-  // OK/Fail counters without forcing a manual refresh. Cheap: hits the
-  // already-cached in-memory list and only stays alive while the drawer is
-  // open AND there's actually a running job.
   useEffect(() => {
     if (!open) return
     const hasRunning = jobs.some((j) => j.state === 'running')
     if (!hasRunning) return
-    const t = setInterval(() => { reload() }, 2000)
-    return () => clearInterval(t)
+    const tTimer = setInterval(() => { reload() }, 2000)
+    return () => clearInterval(tTimer)
   }, [open, jobs, reload])
 
   useEffect(() => {
@@ -84,7 +76,7 @@ export function HistoryDrawer({ open, onClose, onRetryStarted }: Props) {
         const detail = await getJob(id)
         setDetails((prev) => ({ ...prev, [id]: detail }))
       } catch (e) {
-        // ignore; UI will show "load failed" inline
+        // ignore
       }
     }
   }
@@ -95,17 +87,16 @@ export function HistoryDrawer({ open, onClose, onRetryStarted }: Props) {
     try {
       const resp = await retryRegisterJob(id)
       onRetryStarted?.(resp.job_id)
-      // Refresh list so the new job shows up at the top.
       reload()
     } catch (e: any) {
-      setRowError((p) => ({ ...p, [id]: e?.message ?? '重试失败' }))
+      setRowError((p) => ({ ...p, [id]: e?.message ?? t('historyDrawer.retry') }))
     } finally {
       setPendingAction((p) => ({ ...p, [id]: undefined }))
     }
-  }, [reload, onRetryStarted])
+  }, [reload, onRetryStarted, t])
 
   const handleDelete = useCallback(async (id: string) => {
-    if (!window.confirm('确认删除该历史任务？删除后无法恢复，凭据备份也将一并清除。')) {
+    if (!window.confirm('Delete this registration task?')) {
       return
     }
     setRowError((p) => ({ ...p, [id]: undefined }))
@@ -120,11 +111,11 @@ export function HistoryDrawer({ open, onClose, onRetryStarted }: Props) {
       })
       if (expandedId === id) setExpandedId(null)
     } catch (e: any) {
-      setRowError((p) => ({ ...p, [id]: e?.message ?? '删除失败' }))
+      setRowError((p) => ({ ...p, [id]: e?.message ?? t('historyDrawer.delete') }))
     } finally {
       setPendingAction((p) => ({ ...p, [id]: undefined }))
     }
-  }, [expandedId])
+  }, [expandedId, t])
 
   if (!open) return null
 
@@ -138,7 +129,7 @@ export function HistoryDrawer({ open, onClose, onRetryStarted }: Props) {
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-border max-sm:px-3">
           <div className="flex items-center gap-2 text-text-primary">
             <IconHistory size={16} />
-            <span className="text-[14px] font-semibold tracking-tight">历史任务</span>
+            <span className="text-[14px] font-semibold tracking-tight">{t('historyDrawer.title')}</span>
             {!loading && (
               <span className="text-[11px] text-text-muted font-normal">({jobs.length})</span>
             )}
@@ -148,14 +139,14 @@ export function HistoryDrawer({ open, onClose, onRetryStarted }: Props) {
               onClick={reload}
               disabled={loading}
               className="text-text-secondary hover:text-text-primary bg-transparent border-none cursor-pointer p-1 flex items-center disabled:opacity-50"
-              title="刷新"
+              title={t('actions.refreshData')}
             >
               <IconRotate size={14} className={loading ? 'animate-spin' : ''} />
             </button>
             <button
               onClick={onClose}
               className="text-text-secondary hover:text-text-primary bg-transparent border-none cursor-pointer p-1 flex items-center"
-              title="关闭"
+              title={t('common.close')}
             >
               <IconClose size={16} />
             </button>
@@ -167,7 +158,7 @@ export function HistoryDrawer({ open, onClose, onRetryStarted }: Props) {
             <div className="m-4 px-3 py-2 bg-err/10 border border-err/30 rounded-md text-[12px] text-err">{error}</div>
           )}
           {!loading && !error && jobs.length === 0 && (
-            <div className="text-center py-16 text-text-secondary text-[13px]">尚无历史任务</div>
+            <div className="text-center py-16 text-text-secondary text-[13px]">{t('historyDrawer.empty')}</div>
           )}
           {jobs.length > 0 && (
             <div className="divide-y divide-white/[.05]">
@@ -182,6 +173,7 @@ export function HistoryDrawer({ open, onClose, onRetryStarted }: Props) {
                   onToggle={() => toggleExpand(job.id)}
                   onRetry={() => handleRetry(job.id)}
                   onDelete={() => handleDelete(job.id)}
+                  locale={locale}
                 />
               ))}
             </div>
@@ -201,6 +193,7 @@ function JobRow({
   onToggle,
   onRetry,
   onDelete,
+  locale,
 }: {
   job: RegisterJob
   expanded: boolean
@@ -210,10 +203,12 @@ function JobRow({
   onToggle: () => void
   onRetry: () => void
   onDelete: () => void
+  locale: string
 }) {
-  const created = new Date(job.created_at).toLocaleString('zh-CN', { hour12: false })
+  const { t } = useT()
+  const created = new Date(job.created_at).toLocaleString(locale, { hour12: false })
   const stateLabel =
-    job.state === 'running' ? '运行中' : job.state === 'cancelled' ? '已取消' : '已完成'
+    job.state === 'running' ? t('common.processing') : job.state === 'cancelled' ? t('common.closed') : t('registerModal.stepSuccess')
   const stateClass =
     job.state === 'running'
       ? 'text-notion-blue bg-notion-blue/10'
@@ -248,13 +243,13 @@ function JobRow({
                 </span>
               )}
               <span className="text-[11px] text-text-secondary tabular-nums">
-                OK <span className="text-ok">{job.ok}</span> / 失败 <span className="text-err">{job.fail}</span> / {job.total}
+                OK <span className="text-ok">{job.ok}</span> / {t('common.failed')} <span className="text-err">{job.fail}</span> / {job.total}
               </span>
-              <span className="text-[11px] text-text-muted">并发 {job.concurrency}</span>
+              <span className="text-[11px] text-text-muted">{t('registerModal.concurrencyLabel')} {job.concurrency}</span>
               {proxyShort && (
                 <span
                   className="text-[10px] px-1.5 py-0.5 rounded bg-white/[.04] text-text-muted font-mono"
-                  title={`代理：${job.proxy}`}
+                  title={`Proxy: ${job.proxy}`}
                 >
                   via {proxyShort}
                 </span>
@@ -267,13 +262,7 @@ function JobRow({
             type="button"
             onClick={(e) => { e.stopPropagation(); onRetry() }}
             disabled={!canRetry}
-            title={
-              isRunning
-                ? '运行中，无法重试'
-                : job.fail === 0
-                ? '没有失败步骤可重试'
-                : '重试失败步骤'
-            }
+            title={t('historyDrawer.retry')}
             className="text-text-secondary hover:text-text-primary bg-transparent border-none cursor-pointer p-1 flex items-center disabled:opacity-30 disabled:cursor-not-allowed"
           >
             {pendingAction === 'retry' ? (
@@ -286,7 +275,7 @@ function JobRow({
             type="button"
             onClick={(e) => { e.stopPropagation(); onDelete() }}
             disabled={!canDelete}
-            title={isRunning ? '运行中，无法删除' : '删除该历史任务'}
+            title={t('historyDrawer.delete')}
             className="text-text-secondary hover:text-err bg-transparent border-none cursor-pointer p-1 flex items-center disabled:opacity-30 disabled:cursor-not-allowed"
           >
             {pendingAction === 'delete' ? (
@@ -309,7 +298,7 @@ function JobRow({
           ))}
           {!detail && (
             <div className="px-3 py-2 text-[11px] text-text-muted flex items-center gap-1">
-              <IconSpinner size={11} className="animate-spin" /> 加载完整快照…
+              <IconSpinner size={11} className="animate-spin" /> {t('historyDrawer.loading')}
             </div>
           )}
         </div>
@@ -318,9 +307,6 @@ function JobRow({
   )
 }
 
-// maskProxy renders only host:port from a possibly-credentialled URL so we
-// don't leak passwords in the history list. The full URL is still available
-// via the title tooltip for operators who need it.
 function maskProxy(raw: string): string {
   try {
     const u = new URL(raw)
@@ -331,6 +317,7 @@ function maskProxy(raw: string): string {
 }
 
 function DetailStep({ step, index }: { step: RegisterStep; index: number }) {
+  const { t } = useT()
   const [open, setOpen] = useState(false)
   let icon: React.ReactNode
   let label: string
@@ -338,22 +325,22 @@ function DetailStep({ step, index }: { step: RegisterStep; index: number }) {
   switch (step.status) {
     case 'ok':
       icon = <IconCheck size={11} />
-      label = '成功'
+      label = t('common.success')
       cls = 'text-ok'
       break
     case 'fail':
       icon = <IconX size={11} />
-      label = '失败'
+      label = t('common.failed')
       cls = 'text-err'
       break
     case 'running':
       icon = <IconSpinner size={11} className="animate-spin" />
-      label = '进行中'
+      label = t('common.processing')
       cls = 'text-notion-blue'
       break
     default:
       icon = null
-      label = '等待'
+      label = t('common.loading')
       cls = 'text-text-muted'
   }
   return (
@@ -373,7 +360,7 @@ function DetailStep({ step, index }: { step: RegisterStep; index: number }) {
             className="text-[11px] text-text-secondary hover:text-text-primary inline-flex items-center gap-1 bg-transparent border-none p-0 cursor-pointer"
           >
             <IconChevronRight size={11} className={open ? 'rotate-90 transition-transform' : 'transition-transform'} />
-            {open ? '收起' : '查看详情'}
+            {open ? t('common.close') : t('common.loading')}
           </button>
           {open && (
             <pre className="mt-1 p-2 bg-bg-input border border-border rounded text-[11px] text-text-secondary whitespace-pre-wrap break-all max-h-48 overflow-auto font-mono">

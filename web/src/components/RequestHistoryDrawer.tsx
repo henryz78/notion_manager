@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { RequestHistoryEntry, RequestHistoryPage } from '../types'
 import { clearRequestHistory, fetchRequestHistory } from '../api'
+import { useT } from '../i18n'
 import {
   IconActivity,
   IconClose,
@@ -18,6 +19,7 @@ interface Props {
 const PAGE_SIZE = 50
 
 export function RequestHistoryDrawer({ open, onClose }: Props) {
+  const { t, locale } = useT()
   const [data, setData] = useState<RequestHistoryPage | null>(null)
   const [loading, setLoading] = useState(false)
   const [clearing, setClearing] = useState(false)
@@ -53,19 +55,17 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
       })
       setData(result)
     } catch (e: any) {
-      setError(e?.message || '加载调用记录失败')
+      setError(e?.message || t('grid.loadFailed', { error: '' }))
     } finally {
       if (!silent) setLoading(false)
     }
-  }, [page, debouncedQuery, status, api, promptMode])
+  }, [page, debouncedQuery, status, api, promptMode, t])
 
   useEffect(() => {
     if (!open) return
     reload()
   }, [open, reload])
 
-  // Keep the first page fresh while the drawer is open so a just-finished API
-  // request appears without requiring a manual refresh.
   useEffect(() => {
     if (!open || page !== 0) return
     const timer = window.setInterval(() => { reload(true) }, 5000)
@@ -74,11 +74,11 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
 
   useEffect(() => {
     if (!open) return
-    const onKey = (event: KeyboardEvent) => {
+    const eventHandler = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('keydown', eventHandler)
+    return () => window.removeEventListener('keydown', eventHandler)
   }, [open, onClose])
 
   const totalPages = useMemo(
@@ -91,7 +91,7 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
   }, [page, totalPages])
 
   const handleClear = async () => {
-    if (!window.confirm('确认清空全部调用记录？只会删除诊断记录，不会影响账号、配置或 Token 统计。')) return
+    if (!window.confirm('Clear all request history logs?')) return
     setClearing(true)
     setError(null)
     try {
@@ -105,7 +105,7 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
         entries: [],
       })
     } catch (e: any) {
-      setError(e?.message || '清空失败')
+      setError(e?.message || t('common.error'))
     } finally {
       setClearing(false)
     }
@@ -132,10 +132,10 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
         <div className="flex items-center justify-between gap-4 px-5 py-3.5 border-b border-border max-sm:px-3">
           <div className="flex items-center gap-2 text-text-primary min-w-0">
             <IconActivity size={16} />
-            <span className="text-[14px] font-semibold tracking-tight">调用记录</span>
+            <span className="text-[14px] font-semibold tracking-tight">{t('requestDrawer.title')}</span>
             {data && (
               <span className="text-[11px] text-text-muted font-normal">
-                ({data.filtered_total}{data.filtered_total !== data.total ? ` / 共 ${data.total}` : ''})
+                ({data.filtered_total}{data.filtered_total !== data.total ? ` / Total ${data.total}` : ''})
               </span>
             )}
           </div>
@@ -145,7 +145,7 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
               onClick={() => reload()}
               disabled={loading}
               className="text-text-secondary hover:text-text-primary bg-transparent border-none cursor-pointer p-1 flex items-center disabled:opacity-50"
-              title="刷新"
+              title={t('actions.refreshData')}
             >
               <IconRotate size={14} className={loading ? 'animate-spin' : ''} />
             </button>
@@ -154,7 +154,7 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
               onClick={handleClear}
               disabled={clearing || (data?.total ?? 0) === 0}
               className="text-text-secondary hover:text-err bg-transparent border-none cursor-pointer p-1 flex items-center disabled:opacity-30 disabled:cursor-not-allowed"
-              title="清空调用记录"
+              title={t('requestDrawer.clearAll')}
             >
               {clearing ? <IconSpinner size={14} className="animate-spin" /> : <IconTrash size={14} />}
             </button>
@@ -162,7 +162,7 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
               type="button"
               onClick={onClose}
               className="text-text-secondary hover:text-text-primary bg-transparent border-none cursor-pointer p-1 flex items-center"
-              title="关闭"
+              title={t('common.close')}
             >
               <IconClose size={16} />
             </button>
@@ -171,34 +171,33 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
 
         <div className="px-5 py-3 border-b border-border bg-[#171717] max-sm:px-3">
           <div className="text-[11px] text-text-secondary mb-3 leading-relaxed">
-            这里只保存模型、账号、提示词模式、Tools 数量、Token、耗时和错误原因。
-            <span className="text-ok ml-1">不会保存问题、回答、System Prompt、工具参数或官网个人指令正文。</span>
+            {t('requestDrawer.subtitle')}
           </div>
           <div className="grid grid-cols-[minmax(220px,1fr)_150px_170px_210px] gap-2 max-lg:grid-cols-2 max-sm:grid-cols-1">
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索模型、Notion 内部模型或账号…"
+              placeholder={t('header.searchPlaceholder')}
               className="w-full px-3 py-2 bg-bg-input border border-border rounded-md text-[12px] text-text-primary outline-none focus:border-white/20 placeholder:text-text-muted"
             />
             <FilterSelect value={status} onChange={setStatus}>
-              <option value="all">全部状态</option>
-              <option value="success">成功</option>
-              <option value="error">失败</option>
+              <option value="all">{t('requestDrawer.filterAllStatus')}</option>
+              <option value="success">{t('requestDrawer.filterSuccess')}</option>
+              <option value="error">{t('requestDrawer.filterError')}</option>
             </FilterSelect>
             <FilterSelect value={api} onChange={setAPI}>
-              <option value="all">全部接口</option>
+              <option value="all">API</option>
               <option value="anthropic">Anthropic</option>
               <option value="openai_chat">OpenAI Chat</option>
               <option value="openai_responses">OpenAI Responses</option>
             </FilterSelect>
             <FilterSelect value={promptMode} onChange={setPromptMode}>
-              <option value="all">全部提示词模式</option>
-              <option value="existing_prompt">客户端 System Prompt</option>
-              <option value="notion_personal_instructions">官网个人指令</option>
-              <option value="client_and_notion_personal">客户端 + 官网个人指令</option>
-              <option value="no_behavior_prompt">两者都关</option>
-              <option value="not_applicable">不适用</option>
+              <option value="all">{t('settings.promptTitle')}</option>
+              <option value="existing_prompt">{t('settings.clientSystemPrompt')}</option>
+              <option value="notion_personal_instructions">{t('settings.notionPersonalInstructions')}</option>
+              <option value="client_and_notion_personal">Client + Personal</option>
+              <option value="no_behavior_prompt">Off</option>
+              <option value="not_applicable">N/A</option>
             </FilterSelect>
           </div>
         </div>
@@ -212,21 +211,21 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
         <div className="flex-1 overflow-auto">
           {!loading && !error && entries.length === 0 && (
             <div className="text-center py-20 text-text-secondary text-[13px]">
-              {data?.total ? '没有匹配的调用记录' : '尚无调用记录，发起一次 API 请求后会显示在这里'}
+              {t('requestDrawer.empty')}
             </div>
           )}
           {entries.length > 0 && (
             <div className="min-w-[1040px]">
               <div className="sticky top-0 z-10 grid grid-cols-[150px_88px_110px_minmax(220px,1.35fr)_minmax(170px,1fr)_150px_70px_105px_80px] gap-3 px-5 py-2 bg-[#1d1d1d] border-b border-border text-[10px] uppercase tracking-wider text-text-muted">
-                <span>时间</span>
-                <span>状态</span>
-                <span>接口</span>
-                <span>客户端模型 → Notion 模型</span>
-                <span>使用账号</span>
-                <span>提示词模式</span>
+                <span>{t('requestDrawer.colTime')}</span>
+                <span>{t('requestDrawer.colStatus')}</span>
+                <span>API</span>
+                <span>{t('requestDrawer.colModel')}</span>
+                <span>{t('requestDrawer.colAccount')}</span>
+                <span>Prompt Mode</span>
                 <span>Tools</span>
                 <span>Token</span>
-                <span>耗时</span>
+                <span>{t('requestDrawer.colDuration')}</span>
               </div>
               <div className="divide-y divide-white/[.05]">
                 {entries.map((entry) => (
@@ -235,6 +234,7 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
                     entry={entry}
                     copied={copiedID === entry.id}
                     onCopyError={() => copyError(entry)}
+                    locale={locale}
                   />
                 ))}
               </div>
@@ -244,7 +244,7 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
 
         <div className="flex items-center justify-between gap-3 px-5 py-3 border-t border-border">
           <span className="text-[11px] text-text-muted">
-            最多保留最近 100 条 · 服务重启后仍保留
+            Max 100 entries retained
           </span>
           <div className="flex items-center gap-2">
             <button
@@ -253,7 +253,7 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
               disabled={page === 0}
               className="px-2.5 py-1.5 bg-bg-card hover:bg-bg-card-hover text-text-secondary rounded-md text-[11px] cursor-pointer border border-border disabled:opacity-30 disabled:cursor-not-allowed"
             >
-              上一页
+              {t('pagination.prev')}
             </button>
             <span className="text-[11px] text-text-secondary tabular-nums">
               {page + 1} / {totalPages}
@@ -264,7 +264,7 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
               disabled={page >= totalPages - 1}
               className="px-2.5 py-1.5 bg-bg-card hover:bg-bg-card-hover text-text-secondary rounded-md text-[11px] cursor-pointer border border-border disabled:opacity-30 disabled:cursor-not-allowed"
             >
-              下一页
+              {t('pagination.next')}
             </button>
           </div>
         </div>
@@ -297,15 +297,18 @@ function RequestRow({
   entry,
   copied,
   onCopyError,
+  locale,
 }: {
   entry: RequestHistoryEntry
   copied: boolean
   onCopyError: () => void
+  locale: string
 }) {
-  const created = new Date(entry.created_at).toLocaleString('zh-CN', { hour12: false })
+  const { t } = useT()
+  const created = new Date(entry.created_at).toLocaleString(locale, { hour12: false })
   const success = entry.status === 'success'
-  const requestedModel = entry.requested_model || '未识别'
-  const notionModel = entry.notion_model || '未发送'
+  const requestedModel = entry.requested_model || '—'
+  const notionModel = entry.notion_model || '—'
 
   return (
     <div className={`px-5 py-3 ${success ? 'hover:bg-white/[.015]' : 'bg-err/[.025] hover:bg-err/[.045]'}`}>
@@ -314,7 +317,7 @@ function RequestRow({
         <div>
           <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] ${success ? 'text-ok bg-ok/10' : 'text-err bg-err/10'}`}>
             <span className={`w-1.5 h-1.5 rounded-full ${success ? 'bg-ok' : 'bg-err'}`} />
-            {success ? '成功' : '失败'}
+            {success ? t('common.success') : t('common.failed')}
           </span>
           {!success && entry.http_status > 0 && (
             <div className="text-[10px] text-text-muted mt-1">HTTP {entry.http_status}</div>
@@ -324,23 +327,22 @@ function RequestRow({
         <div className="min-w-0">
           <div className="text-[11px] text-text-primary font-mono break-all leading-5">
             {requestedModel}
-            {entry.used_default_model && <span className="text-text-muted font-sans ml-1">（默认）</span>}
           </div>
           <div className="text-[10px] text-text-muted font-mono break-all leading-5">→ {notionModel}</div>
         </div>
         <div className="text-[11px] text-text-secondary font-mono break-all leading-5">
-          {entry.account_email || '未选择'}
+          {entry.account_email || '—'}
           {entry.attempts > 1 && (
-            <div className="text-[10px] text-warn font-sans">共尝试 {entry.attempts} 次</div>
+            <div className="text-[10px] text-warn font-sans">Attempts: {entry.attempts}</div>
           )}
         </div>
         <div className="text-[11px] text-text-secondary leading-5">{formatPromptMode(entry.prompt_mode)}</div>
         <div className={`text-[11px] tabular-nums leading-5 ${entry.tool_count > 0 ? 'text-notion-blue' : 'text-text-muted'}`}>
-          {entry.tool_count > 0 ? `${entry.tool_count} 个` : '无'}
+          {entry.tool_count > 0 ? `${entry.tool_count}` : '0'}
         </div>
         <div className="text-[10px] text-text-secondary tabular-nums leading-5">
-          <div>入 {formatCompactNumber(entry.input_tokens)}</div>
-          <div>出 {formatCompactNumber(entry.output_tokens)}</div>
+          <div>in {formatCompactNumber(entry.input_tokens)}</div>
+          <div>out {formatCompactNumber(entry.output_tokens)}</div>
         </div>
         <div className="text-[11px] text-text-secondary tabular-nums leading-5">{formatDuration(entry.duration_ms)}</div>
       </div>
@@ -358,7 +360,7 @@ function RequestRow({
               type="button"
               onClick={onCopyError}
               className={`shrink-0 p-1.5 rounded border cursor-pointer ${copied ? 'text-ok border-ok/30 bg-ok/10' : 'text-text-secondary border-border bg-bg-card hover:text-text-primary'}`}
-              title="复制错误原因"
+              title={t('common.copy')}
             >
               <IconCopy size={12} />
             </button>
@@ -385,15 +387,15 @@ function formatAPI(api: string): string {
 function formatPromptMode(mode: string): string {
   switch (mode) {
     case 'notion_personal_instructions':
-      return '官网个人指令'
+      return 'Personal'
     case 'client_and_notion_personal':
-      return '客户端 + 官网个人指令'
+      return 'Client + Personal'
     case 'no_behavior_prompt':
-      return '两者都关'
+      return 'Off'
     case 'not_applicable':
-      return '不适用'
+      return 'N/A'
     case 'existing_prompt':
-      return '客户端 System Prompt'
+      return 'Client System'
     default:
       return mode || '—'
   }
@@ -401,10 +403,10 @@ function formatPromptMode(mode: string): string {
 
 function formatDuration(durationMs: number): string {
   if (durationMs < 1000) return `${Math.max(0, durationMs)} ms`
-  if (durationMs < 60_000) return `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 1 : 0)} 秒`
+  if (durationMs < 60_000) return `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 1 : 0)}s`
   const minutes = Math.floor(durationMs / 60_000)
   const seconds = Math.round((durationMs % 60_000) / 1000)
-  return `${minutes}分 ${seconds}秒`
+  return `${minutes}m ${seconds}s`
 }
 
 function formatCompactNumber(value: number): string {

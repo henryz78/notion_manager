@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { AccountInfo } from '../types'
 import { bulkAccountAction, deleteAccount, openProxy } from '../api'
 import { IconCopy, IconExternalLink, IconMore, IconPlay, IconTrash, IconX } from './Icons'
+import { useT } from '../i18n'
 
 interface Props {
   account: AccountInfo
@@ -12,6 +13,7 @@ interface Props {
 // trigger so clicking it doesn't bubble up to the card's "open proxy"
 // click handler.
 export function AccountMenu({ account, onChanged }: Props) {
+  const { t } = useT()
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -100,7 +102,7 @@ export function AccountMenu({ account, onChanged }: Props) {
           setOpen((v) => !v)
         }}
         className="w-6 h-6 rounded hover:bg-white/[.08] text-text-secondary hover:text-text-primary flex items-center justify-center bg-transparent border-none cursor-pointer transition-colors"
-        title="更多操作"
+        title={t('accountMenu.moreActions')}
       >
         <IconMore size={14} />
       </button>
@@ -113,14 +115,14 @@ export function AccountMenu({ account, onChanged }: Props) {
             onClick={onCopyToken}
             disabled={!account.token_v2}
             icon={<IconCopy size={13} />}
-            label={copied ? '已复制' : '复制 token_v2'}
+            label={copied ? t('accountMenu.copiedToken') : t('accountMenu.copyToken')}
           />
-          <MenuItem onClick={onOpenProxy} disabled={account.disabled} icon={<IconExternalLink size={13} />} label="打开代理" />
+          <MenuItem onClick={onOpenProxy} disabled={account.disabled} icon={<IconExternalLink size={13} />} label={t('accountMenu.openProxy')} />
           <MenuItem
             onClick={onToggleDisabled}
             disabled={toggling}
             icon={account.disabled ? <IconPlay size={13} /> : <IconX size={13} />}
-            label={toggling ? '处理中...' : account.disabled ? '启用账号' : '禁用账号'}
+            label={toggling ? t('accountMenu.processing') : account.disabled ? t('accountMenu.enableAccount') : t('accountMenu.disableAccount')}
           />
           <div className="border-t border-border my-1" />
           <MenuItem
@@ -128,7 +130,7 @@ export function AccountMenu({ account, onChanged }: Props) {
             danger
             disabled={deleting}
             icon={<IconTrash size={13} />}
-            label={confirming ? '确认删除？' : '删除账号'}
+            label={confirming ? t('accountMenu.confirmDelete') : t('accountMenu.deleteAccount')}
           />
         </div>
       )}

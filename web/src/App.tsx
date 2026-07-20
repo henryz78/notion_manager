@@ -8,6 +8,7 @@ import { RegisterModal } from './components/RegisterModal'
 import { HistoryDrawer } from './components/HistoryDrawer'
 import { RequestHistoryDrawer } from './components/RequestHistoryDrawer'
 import { IconUserPlus, IconHistory } from './components/Icons'
+import { useT } from './i18n'
 
 // --- Icons ---
 const IconBarChart = () => (
@@ -72,6 +73,7 @@ type AccountImportRow = {
 }
 
 function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
+  const { t } = useT()
   const [token, setToken] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -118,8 +120,8 @@ function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSucces
         initialResults.push({
           line: item.line,
           status: 'skipped',
-          title: `第 ${item.line} 行已跳过`,
-          detail: `内容与第 ${firstLine} 行重复`,
+          title: t('addAccount.lineSkipped', { line: item.line }),
+          detail: t('addAccount.lineDuplicate', { line: firstLine }),
         })
         continue
       }
@@ -143,24 +145,24 @@ function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSucces
           row = {
             line: item.line,
             status: 'error',
-            title: `第 ${item.line} 行导入失败`,
-            detail: res.error || '账号信息为空',
+            title: t('addAccount.lineFailed', { line: item.line }),
+            detail: res.error || t('addAccount.emptyAccount'),
           }
         } else {
           added++
           row = {
             line: item.line,
             status: 'success',
-            title: res.account.email || res.account.name || `第 ${item.line} 行`,
-            detail: `${res.account.space || '未命名空间'} · ${res.account.plan_type || '未知套餐'}`,
+            title: res.account.email || res.account.name || t('addAccount.lineFormat', { line: item.line }),
+            detail: `${res.account.space || t('addAccount.unnamedSpace')} · ${res.account.plan_type || t('addAccount.unknownPlan')}`,
           }
         }
       } catch (err) {
         row = {
           line: item.line,
           status: 'error',
-          title: `第 ${item.line} 行导入失败`,
-          detail: err instanceof Error ? err.message : '请求失败',
+          title: t('addAccount.lineFailed', { line: item.line }),
+          detail: err instanceof Error ? err.message : t('addAccount.requestFailed'),
         }
       }
       setResults(current => [...current, row].sort((a, b) => a.line - b.line))
@@ -180,15 +182,15 @@ function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSucces
       <div className="w-full max-w-xl max-h-[92vh] overflow-auto bg-[#1a1a1a] border border-white/10 rounded-xl shadow-2xl p-6 max-sm:max-h-[96vh] max-sm:rounded-b-none max-sm:p-4" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h2 className="text-[16px] font-semibold">批量添加 Notion 账号</h2>
-            <div className="text-[11px] text-text-muted mt-0.5">一行一个 token_v2，可同时导入多个账号</div>
+            <h2 className="text-[16px] font-semibold">{t('addAccount.title')}</h2>
+            <div className="text-[11px] text-text-muted mt-0.5">{t('addAccount.subtitle')}</div>
           </div>
           <button disabled={loading} onClick={onClose} className="text-text-muted hover:text-white bg-transparent border-none cursor-pointer text-lg px-1 disabled:opacity-30">×</button>
         </div>
 
         <div className="text-[12px] text-text-secondary mb-4 space-y-1.5">
-          <p>每行粘贴一个 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">token_v2</code>，系统会逐个验证并添加，单个 token 也照常支持。</p>
-          <p className="text-text-muted">获取方式：打开 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">notion.so</code> → F12 → Application → Cookies → 复制 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">token_v2</code> 的值</p>
+          <p>{t('addAccount.helpText', { codeToken: 'token_v2' })}</p>
+          <p className="text-text-muted">{t('addAccount.getWay', { codeUrl: 'notion.so', codeToken: 'token_v2' })}</p>
         </div>
 
         <form onSubmit={handleSubmit}>
@@ -203,14 +205,14 @@ function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSucces
                 setProgress({ done: 0, total: 0 })
               }
             }}
-            placeholder={'token_v2_账号1\ntoken_v2_账号2\ntoken_v2_账号3'}
+            placeholder={t('addAccount.placeholder')}
             rows={7}
             disabled={loading}
             className="w-full py-2.5 px-3 bg-transparent border border-white/10 rounded-lg text-[13px] text-text-primary outline-none focus:border-white/30 focus:ring-1 focus:ring-white/10 transition-all placeholder:text-white/25 resize-y font-mono disabled:opacity-60"
           />
           <div className="flex items-center justify-between gap-3 mt-1.5 text-[11px] text-text-muted">
-            <span>{parsedLines.length} 行有效内容 · {uniqueTokenCount} 个待导入账号</span>
-            {loading && <span className="text-notion-blue">正在处理 {progress.done} / {progress.total}</span>}
+            <span>{t('addAccount.lineSummary', { lines: parsedLines.length, tokens: uniqueTokenCount })}</span>
+            {loading && <span className="text-notion-blue">{t('addAccount.processingProgress', { done: progress.done, total: progress.total })}</span>}
           </div>
           {error && (
             <div className="text-err text-[12px] mt-2 px-1">{error}</div>
@@ -219,12 +221,12 @@ function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSucces
           {results.length > 0 && (
             <div className="mt-3 border border-white/10 rounded-lg overflow-hidden">
               <div className="flex items-center justify-between gap-3 px-3 py-2 bg-white/[.035] text-[11px]">
-                <span className="text-text-secondary">导入结果</span>
+                <span className="text-text-secondary">{t('addAccount.resultTitle')}</span>
                 <span className="tabular-nums">
-                  <span className="text-ok">成功 {successCount}</span>
+                  <span className="text-ok">{t('addAccount.resultSuccess', { count: successCount })}</span>
                   <span className="text-text-muted"> · </span>
-                  <span className={failureCount > 0 ? 'text-err' : 'text-text-muted'}>失败 {failureCount}</span>
-                  {skippedCount > 0 && <span className="text-text-muted"> · 跳过 {skippedCount}</span>}
+                  <span className={failureCount > 0 ? 'text-err' : 'text-text-muted'}>{t('addAccount.resultFailure', { count: failureCount })}</span>
+                  {skippedCount > 0 && <span className="text-text-muted"> · {t('addAccount.resultSkipped', { count: skippedCount })}</span>}
                 </span>
               </div>
               <div className="max-h-48 overflow-auto divide-y divide-white/[.05]">
@@ -233,7 +235,7 @@ function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSucces
                     <div className="flex items-center gap-2">
                       <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${item.status === 'success' ? 'bg-ok' : item.status === 'error' ? 'bg-err' : 'bg-text-muted'}`} />
                       <span className={item.status === 'error' ? 'text-err' : 'text-text-primary'}>{item.title}</span>
-                      <span className="ml-auto text-text-muted tabular-nums">第 {item.line} 行</span>
+                      <span className="ml-auto text-text-muted tabular-nums">{t('addAccount.lineFormat', { line: item.line })}</span>
                     </div>
                     <div className="mt-0.5 ml-3.5 text-text-muted break-all">{item.detail}</div>
                   </div>
@@ -249,7 +251,7 @@ function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSucces
               disabled={loading}
               className="flex-1 py-2.5 bg-transparent hover:bg-white/5 text-text-secondary rounded-lg text-[13px] font-medium cursor-pointer transition-colors border border-white/10"
             >
-              {completed ? '关闭' : '取消'}
+              {completed ? t('common.close') : t('common.cancel')}
             </button>
             {completed ? (
               <button
@@ -263,7 +265,7 @@ function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSucces
                 }}
                 className="flex-1 py-2.5 bg-white hover:bg-white/90 text-black rounded-lg text-[13px] font-semibold cursor-pointer transition-colors border-none"
               >
-                继续添加
+                {t('addAccount.btnContinue')}
               </button>
             ) : (
               <button
@@ -271,7 +273,7 @@ function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSucces
                 disabled={loading || uniqueTokenCount === 0}
                 className="flex-1 py-2.5 bg-white hover:bg-white/90 text-black rounded-lg text-[13px] font-semibold cursor-pointer transition-colors border-none disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                {loading ? `正在导入 ${progress.done}/${progress.total}` : `导入 ${uniqueTokenCount || ''} 个账号`}
+                {loading ? t('addAccount.btnImporting', { done: progress.done, total: progress.total }) : t('addAccount.btnImportCount', { count: uniqueTokenCount || '' })}
               </button>
             )}
           </div>
@@ -284,6 +286,7 @@ function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSucces
 // --- Login Page ---
 
 function LoginPage({ onSuccess }: { onSuccess: () => void }) {
+  const { t } = useT()
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -302,11 +305,11 @@ function LoginPage({ onSuccess }: { onSuccess: () => void }) {
         onSuccess()
         return
       }
-      setError(result.error || '密码错误')
+      setError(result.error || t('login.errPasswordEmpty'))
       setPassword('')
       inputRef.current?.focus()
     } catch (err) {
-      setError(err instanceof Error ? err.message : '登录请求失败')
+      setError(err instanceof Error ? err.message : t('login.errRequestFailed'))
       setPassword('')
       inputRef.current?.focus()
     } finally {
@@ -320,7 +323,7 @@ function LoginPage({ onSuccess }: { onSuccess: () => void }) {
         <div className="flex flex-col items-center mb-8">
           <div className="w-12 h-12 bg-[#1a1a1a] border border-white/10 rounded-xl flex items-center justify-center text-xl font-extrabold text-white mb-4">N</div>
           <h1 className="text-xl font-semibold tracking-tight">notion-manager</h1>
-          <p className="text-[13px] text-text-muted mt-1">输入管理密钥以访问 Dashboard</p>
+          <p className="text-[13px] text-text-muted mt-1">{t('login.subtitle')}</p>
         </div>
         <form onSubmit={handleSubmit}>
           <div className="relative mb-4">
@@ -329,7 +332,7 @@ function LoginPage({ onSuccess }: { onSuccess: () => void }) {
               type="password"
               value={password}
               onChange={e => setPassword(e.target.value)}
-              placeholder="管理密钥"
+              placeholder={t('login.placeholder')}
               autoComplete="current-password"
               className="w-full py-2.5 px-4 bg-transparent border border-white/10 rounded-lg text-[14px] text-text-primary outline-none focus:border-white/30 focus:ring-1 focus:ring-white/10 transition-all placeholder:text-white/25"
             />
@@ -342,7 +345,7 @@ function LoginPage({ onSuccess }: { onSuccess: () => void }) {
             disabled={loading || !password.trim()}
             className="w-full py-2.5 bg-white hover:bg-white/90 text-black rounded-lg text-[14px] font-semibold cursor-pointer transition-colors border-none disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            {loading ? '验证中...' : '登录'}
+            {loading ? t('login.verifying') : t('login.button')}
           </button>
         </form>
       </div>
@@ -368,15 +371,12 @@ function Header({ query, onQuery, onLogout, authRequired, activePage, onPageChan
   onPageChange: (page: DashboardPage) => void
   version: string
 }) {
+  const { lang, setLang, t } = useT()
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === '/') {
-        // Don't hijack "/" when the user is already typing in another
-        // input/textarea/contenteditable — otherwise modals like the
-        // register form (proxy URL, credentials textarea, etc.) lose
-        // focus mid-keystroke.
         const ae = document.activeElement as HTMLElement | null
         const inEditable =
           !!ae &&
@@ -402,11 +402,11 @@ function Header({ query, onQuery, onLogout, authRequired, activePage, onPageChan
         <div className="w-7 h-7 bg-[#333] rounded-md flex items-center justify-center text-sm font-extrabold text-white">N</div>
         <span className="text-[15px] font-semibold tracking-tight">
           notion-manager
-          <span className="text-text-secondary font-normal text-[13px] ml-1.5 max-sm:hidden">dashboard</span>
+          <span className="text-text-secondary font-normal text-[13px] ml-1.5 max-sm:hidden">{t('header.dashboard')}</span>
         </span>
         <span
           className="text-[10px] text-text-muted font-mono bg-white/[.04] border border-white/[.06] rounded px-1.5 py-0.5"
-          title={`当前运行版本：${version}`}
+          title={t('header.versionTooltip', { version })}
         >
           {displayVersion(version)}
         </span>
@@ -416,13 +416,13 @@ function Header({ query, onQuery, onLogout, authRequired, activePage, onPageChan
           onClick={() => onPageChange('accounts')}
           className={`px-3 py-1.5 rounded-md text-[12px] font-medium cursor-pointer border-none transition-colors max-md:flex-1 ${activePage === 'accounts' ? 'bg-white/10 text-white shadow-sm' : 'bg-transparent text-text-muted hover:text-text-primary'}`}
         >
-          账号管理
+          {t('header.tabAccounts')}
         </button>
         <button
           onClick={() => onPageChange('settings')}
           className={`px-3 py-1.5 rounded-md text-[12px] font-medium cursor-pointer border-none transition-colors max-md:flex-1 ${activePage === 'settings' ? 'bg-white/10 text-white shadow-sm' : 'bg-transparent text-text-muted hover:text-text-primary'}`}
         >
-          设置与记录
+          {t('header.tabSettings')}
         </button>
       </nav>
       <div className="flex items-center gap-3 ml-auto max-md:order-3 max-md:ml-0 max-md:w-full">
@@ -434,18 +434,25 @@ function Header({ query, onQuery, onLogout, authRequired, activePage, onPageChan
             ref={inputRef}
             value={query}
             onChange={e => onQuery(e.target.value)}
-            placeholder="搜索账号、邮箱、计划..."
+            placeholder={t('header.searchPlaceholder')}
             className="w-full py-1.5 pl-8 pr-10 bg-bg-input border border-border rounded-md text-[13px] text-text-primary outline-none focus:border-white/20 transition-colors placeholder:text-text-muted"
           />
           <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] text-text-muted bg-bg-card border border-border rounded px-1.5 py-0.5">/</kbd>
         </div>}
+        <button
+          onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
+          className="text-[12px] text-text-secondary hover:text-text-primary cursor-pointer transition-colors bg-transparent border border-white/10 hover:border-white/20 rounded px-2.5 py-1 flex items-center gap-1 font-medium"
+          title={lang === 'zh' ? 'Switch to English' : '切换至中文'}
+        >
+          <span>🌐</span> {t('header.langToggle')}
+        </button>
         {authRequired && (
           <button
             onClick={onLogout}
             className="text-[12px] text-text-secondary hover:text-text-primary cursor-pointer transition-colors bg-transparent border-none px-2 py-1"
-            title="退出登录"
+            title={t('header.logoutTitle')}
           >
-            退出
+            {t('header.logout')}
           </button>
         )}
       </div>
@@ -491,8 +498,6 @@ function getUserQuota(account: AccountInfo) {
 
 function isSameQuota(a: { usage: number; limit: number }, b: { usage: number; limit: number }): boolean {
   return a.limit > 0 && a.limit === b.limit && a.usage === b.usage
-}
-
 function mergeQuotaStatus(statuses: Array<'ok' | 'low' | 'exhausted'>): 'ok' | 'low' | 'exhausted' {
   if (statuses.includes('exhausted')) return 'exhausted'
   if (statuses.includes('low')) return 'low'
@@ -500,6 +505,7 @@ function mergeQuotaStatus(statuses: Array<'ok' | 'low' | 'exhausted'>): 'ok' | '
 }
 
 function OverviewBar({ label, usage, limit }: { label: string; usage: number; limit: number }) {
+  const { t } = useT()
   const pct = getQuotaPct(usage, limit)
   const remaining = Math.max(limit - usage, 0)
   const status = getQuotaStatusByUsage(usage, limit)
@@ -513,7 +519,7 @@ function OverviewBar({ label, usage, limit }: { label: string; usage: number; li
       <div className="flex justify-between items-center mb-1.5">
         <span className="text-[10px] text-text-muted uppercase tracking-wider">{label}</span>
         <span className={`text-[11px] font-semibold tabular-nums ${numColor}`}>
-          {fmt(remaining)} <span className="text-text-muted font-normal">/ {fmt(limit)} 剩余</span>
+          {fmt(remaining)} <span className="text-text-muted font-normal">/ {fmt(limit)} {t('totalQuota.remaining')}</span>
         </span>
       </div>
       <div className="h-[2px] bg-white/[.06] rounded-full overflow-hidden">
@@ -524,6 +530,7 @@ function OverviewBar({ label, usage, limit }: { label: string; usage: number; li
 }
 
 function TotalQuotaBar({ summary }: { summary?: AccountSummary | null }) {
+  const { t } = useT()
   const totalSpaceUsage = summary?.total_space_usage ?? 0
   const totalSpaceLimit = summary?.total_space_limit ?? 0
   const totalUserUsage = summary?.total_user_usage ?? 0
@@ -538,23 +545,23 @@ function TotalQuotaBar({ summary }: { summary?: AccountSummary | null }) {
   return (
     <div className="mb-5 space-y-3">
       <div className="flex justify-between items-center">
-        <span className="text-[11px] text-text-secondary uppercase tracking-wider flex items-center gap-1.5"><IconBarChart /> Notion 私有接口计数（诊断）</span>
+        <span className="text-[11px] text-text-secondary uppercase tracking-wider flex items-center gap-1.5"><IconBarChart /> {t('totalQuota.title')}</span>
         {totalPremiumLimit > 0 && (
           <span className="text-[12px] text-text-muted tabular-nums">
-            Premium balance <span className="text-[#7eb8ff] font-semibold">{fmt(totalPremiumBalance)}</span> · monthly limit {fmt(totalPremiumLimit)}
+            {t('totalQuota.premiumBalance', { balance: fmt(totalPremiumBalance), limit: fmt(totalPremiumLimit) })}
           </span>
         )}
       </div>
       {sameBasicQuota ? (
-        <OverviewBar label="Basic raw" usage={totalSpaceUsage} limit={totalSpaceLimit} />
+        <OverviewBar label={t('totalQuota.basicRaw')} usage={totalSpaceUsage} limit={totalSpaceLimit} />
       ) : (
         <>
-          <OverviewBar label="Space raw" usage={totalSpaceUsage} limit={totalSpaceLimit} />
-          <OverviewBar label="User raw" usage={totalUserUsage} limit={totalUserLimit} />
+          <OverviewBar label={t('totalQuota.spaceRaw')} usage={totalSpaceUsage} limit={totalSpaceLimit} />
+          <OverviewBar label={t('totalQuota.userRaw')} usage={totalUserUsage} limit={totalUserLimit} />
         </>
       )}
       <div className="text-[10px] text-text-muted leading-relaxed">
-        以上是 Notion 私有接口返回的诊断计数，官网未公开字段定义；Custom Agents 的 Notion credits 不在这里。
+        {t('totalQuota.disclaimer')}
       </div>
     </div>
   )
@@ -610,6 +617,7 @@ function AccountCard({
   selected: boolean
   onToggleSelected: () => void
 }) {
+  const { t, locale } = useT()
   const [showModels, setShowModels] = useState(false)
   const spaceQuota = getSpaceQuota(account)
   const userQuota = getUserQuota(account)
@@ -629,31 +637,25 @@ function AccountCard({
   const modelCount = account.models?.length || 0
 
   const dotCls = status === 'exhausted' ? 'bg-err' : status === 'low' ? 'bg-err' : 'bg-ok'
-  // no_workspace shares the exhausted card style so the operator
-  // immediately sees the account is unhealthy. Click-through is blocked
-  // because Notion's /ai SPA hangs indefinitely on these accounts (the
-  // root-cause this fix is for).
   const cardBg = account.permanent ? 'bg-bg-exhausted border-white/[0.03] opacity-55'
     : manuallyDisabled || account.exhausted || noWorkspace || authInvalid || temporarilyUnavailable ? 'bg-bg-exhausted border-white/[0.03]'
     : 'bg-bg-card hover:bg-bg-card-hover border-white/[0.03] hover:border-white/[0.07]'
 
   const handleClick = () => {
     if (manuallyDisabled) {
-      alert('该账号已被手动禁用。重新启用后才会参与网关请求和代理选号。')
+      alert(t('accountCard.alertDisabled'))
       return
     }
     if (authInvalid) {
-      alert('该账号 Cookie/token 已失效，请重新导入账号。')
+      alert(t('accountCard.alertCookieInvalid'))
       return
     }
     if (noWorkspace) {
-      // Use a native alert — we don't have a toast infra and openProxy
-      // would otherwise pop a tab that displays raw JSON 409 to the user.
-      alert('该账号没有可访问的 Notion 工作区，无法打开 /ai 反代。请重新注册或选择其他账号。')
+      alert(t('accountCard.alertNoWorkspace'))
       return
     }
     if (temporarilyUnavailable) {
-      alert(`该账号刚刚请求失败，已临时跳过。原因：${account.last_failure_reason || 'temporary_failure'}`)
+      alert(t('accountCard.alertTempSkipped', { reason: account.last_failure_reason || 'temporary_failure' }))
       return
     }
     openProxy(account.email)
@@ -663,9 +665,8 @@ function AccountCard({
     <div
       className={`rounded-lg p-4 border max-sm:p-3 ${manuallyDisabled || authInvalid || noWorkspace || temporarilyUnavailable ? 'cursor-not-allowed' : 'cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30'} transition-all duration-200 ${selected ? 'ring-1 ring-notion-blue border-notion-blue/60' : ''} ${cardBg}`}
       onClick={handleClick}
-      title={manuallyDisabled ? '账号已被手动禁用，不参与网关请求和代理选号' : authInvalid ? '账号 Cookie/token 已失效，请重新导入账号' : noWorkspace ? '账号无可访问工作区，已被排除出选号池' : temporarilyUnavailable ? `临时跳过：${account.last_failure_reason || 'temporary_failure'}` : undefined}
+      title={manuallyDisabled ? t('accountCard.manualDisabledTitle') : authInvalid ? t('accountCard.cookieInvalidTitle') : noWorkspace ? t('accountCard.noWorkspaceTitle') : temporarilyUnavailable ? t('accountCard.tempSkippedTitle', { reason: account.last_failure_reason || 'temporary_failure' }) : undefined}
     >
-      {/* Header */}
       <div className="flex items-center gap-2.5 mb-2.5">
         <input
           type="checkbox"
@@ -676,8 +677,8 @@ function AccountCard({
             onToggleSelected()
           }}
           className="w-4 h-4 shrink-0 accent-notion-blue cursor-pointer"
-          aria-label={`选择账号 ${account.email}`}
-          title="选择账号进行批量操作"
+          aria-label={t('accountCard.selectAccount', { email: account.email })}
+          title={t('accountCard.selectAccountTitle')}
         />
         <div
           className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold text-white shrink-0"
@@ -687,7 +688,7 @@ function AccountCard({
         </div>
         <div className="flex-1 min-w-0">
           <div className="text-[13px] font-semibold truncate">
-            {account.name || 'Unknown'}
+            {account.name || t('accountCard.unknownName')}
             {account.space && <span className="text-text-secondary font-normal"> · {account.space}</span>}
           </div>
           <div className="text-[11px] text-text-secondary truncate">{account.email || '—'}</div>
@@ -698,57 +699,55 @@ function AccountCard({
         </div>
       </div>
 
-      {/* Badges */}
       <div className="flex gap-3 flex-wrap mt-3 mb-2.5 items-center">
         <Badge variant="plan">{account.plan || 'unknown'}</Badge>
         <Badge variant={fullNotionAI ? 'premium' : 'plan'}>
-          {fullNotionAI ? 'Notion AI 已包含' : 'AI 有限试用'}
+          {fullNotionAI ? t('accountCard.aiIncluded') : t('accountCard.aiLimitedTrial')}
         </Badge>
         {account.registered_via && (
-          <Badge variant="plan">via {providerDisplay(account.registered_via)}</Badge>
+          <Badge variant="plan">{t('accountCard.viaProvider', { provider: providerDisplay(account.registered_via) })}</Badge>
         )}
         <span title={
           account.personal_instructions_check_error
-            ? account.personal_instructions_check_error
+            ? t('accountCard.piErrorTitle', { error: account.personal_instructions_check_error })
             : account.personal_instructions_checked_at
-              ? `检测于 ${new Date(account.personal_instructions_checked_at).toLocaleString('zh-CN', { hour12: false })}`
-              : '尚未批量检测'
+              ? t('accountCard.piCheckedAtTitle', { time: new Date(account.personal_instructions_checked_at).toLocaleString(locale, { hour12: false }) })
+              : t('accountCard.piNotCheckedTitle')
         }>
           {account.personal_instructions_check_error ? (
-            <Badge variant="warning">个人指令检测失败</Badge>
+            <Badge variant="warning">{t('accountCard.piError')}</Badge>
           ) : account.personal_instructions_configured === true ? (
-            <Badge variant="ok">官网个人指令已设置</Badge>
+            <Badge variant="ok">{t('accountCard.piConfigured')}</Badge>
           ) : account.personal_instructions_configured === false ? (
-            <Badge variant="plan">官网个人指令未设置</Badge>
+            <Badge variant="plan">{t('accountCard.piNotConfigured')}</Badge>
           ) : (
-            <Badge variant="plan">个人指令未检测</Badge>
+            <Badge variant="plan">{t('accountCard.piNotChecked')}</Badge>
           )}
         </span>
-        {premium && <Badge variant="premium">Premium 接口信号</Badge>}
+        {premium && <Badge variant="premium">{t('accountCard.premiumSignalBadge')}</Badge>}
         {(account.research_usage != null && account.research_usage > 0) && (
           <Badge variant="research">
-            <IconFlask /> Research 用量 {account.research_usage}（接口值）
+            <IconFlask /> {t('accountCard.researchUsageBadge', { usage: account.research_usage })}
           </Badge>
         )}
-        {account.exhausted && !account.permanent && <Badge variant="warning">AI 当前不可用</Badge>}
-        {account.permanent && <Badge variant="warning">AI 试用已用完</Badge>}
-        {manuallyDisabled && <Badge variant="warning">已手动禁用</Badge>}
-        {authInvalid && <Badge variant="warning">Cookie 失效</Badge>}
-        {noWorkspace && <Badge variant="warning">无工作区</Badge>}
+        {account.exhausted && !account.permanent && <Badge variant="warning">{t('accountCard.aiUnavailable')}</Badge>}
+        {account.permanent && <Badge variant="warning">{t('accountCard.aiExhausted')}</Badge>}
+        {manuallyDisabled && <Badge variant="warning">{t('accountCard.manuallyDisabled')}</Badge>}
+        {authInvalid && <Badge variant="warning">{t('accountCard.cookieInvalid')}</Badge>}
+        {noWorkspace && <Badge variant="warning">{t('accountCard.noWorkspace')}</Badge>}
         {temporarilyUnavailable && (
-          <Badge variant="warning">临时跳过 {account.last_failure_reason || 'failure'}</Badge>
+          <Badge variant="warning">{t('accountCard.tempSkipped', { reason: account.last_failure_reason || 'failure' })}</Badge>
         )}
         {modelCount > 0 && (
           <button
             onClick={e => { e.stopPropagation(); setShowModels(!showModels) }}
             className="cursor-pointer border-none bg-transparent p-0 text-[11px] text-text-secondary hover:text-white transition-colors"
           >
-            {modelCount} models {showModels ? '▴' : '▾'}
+            {t('accountCard.modelsCount', { count: modelCount })} {showModels ? '▴' : '▾'}
           </button>
         )}
       </div>
 
-      {/* Quotas */}
       {sameBasicQuota ? (
         <QuotaBar label="Basic raw" usage={spaceQuota.usage} limit={spaceQuota.limit} />
       ) : (
@@ -759,11 +758,10 @@ function AccountCard({
       )}
       {premium && <QuotaBar label="Premium monthlyAllocated raw" labelClass="text-[#7eb8ff]" usage={account.premium_usage} limit={account.premium_limit} />}
       <div className="flex flex-wrap gap-3 mt-2 text-[10px] text-text-muted">
-        <span>Basic 估算余量 {fmt(account.remaining || 0)}</span>
-        {premium && <span>Premium balance 原始值 {fmt(account.premium_balance || 0)}</span>}
+        <span>{t('accountCard.basicEstimateRemaining', { rem: fmt(account.remaining || 0) })}</span>
+        {premium && <span>{t('accountCard.premiumBalanceRawValue', { bal: fmt(account.premium_balance || 0) })}</span>}
       </div>
 
-      {/* Models (expandable) */}
       {showModels && account.models && account.models.length > 0 && (
         <div className="flex flex-wrap gap-1 mt-1.5 mb-1">
           {account.models.map(m => (
@@ -774,18 +772,17 @@ function AccountCard({
         </div>
       )}
 
-      {/* Footer */}
       <div className="flex justify-between items-center mt-2 pt-2 border-t border-border">
         <span className="text-[10px] text-text-muted flex items-center gap-1 min-w-0">
           <IconClock />
-          <span className="truncate">检查 {formatCheckedAt(account.checked_at)} · 最近 AI {formatTimestampMs(account.last_usage_at)}</span>
+          <span className="truncate">{t('accountCard.checkedAt', { time: formatCheckedAt(account.checked_at), lastUsage: formatTimestampMs(account.last_usage_at) })}</span>
         </span>
         {manuallyDisabled ? (
-          <span className="text-[11px] text-err font-medium">已禁用</span>
+          <span className="text-[11px] text-err font-medium">{t('accountCard.disabledText')}</span>
         ) : noWorkspace ? (
-          <span className="text-[11px] text-err font-medium">不可用 ⚠</span>
+          <span className="text-[11px] text-err font-medium">{t('accountCard.unavailableText')}</span>
         ) : (
-          <span className="text-[11px] text-text-secondary hover:text-white font-medium transition-colors">打开代理 →</span>
+          <span className="text-[11px] text-text-secondary hover:text-white font-medium transition-colors">{t('accountCard.openProxy')}</span>
         )}
       </div>
     </div>
@@ -793,6 +790,7 @@ function AccountCard({
 }
 
 export default function App() {
+  const { t, locale } = useT()
   const [authState, setAuthState] = useState<'checking' | 'login' | 'authenticated'>('checking')
   const [authRequired, setAuthRequired] = useState(false)
   const [data, setData] = useState<DashboardData | null>(null)
@@ -824,19 +822,12 @@ export default function App() {
     setCopiedField(field)
     setTimeout(() => setCopiedField(null), 1000)
   }
-  // Local draft for the global Notion proxy input. Kept separate from
-  // settings.notion_proxy so the user can type without each keystroke
-  // hitting the API; we commit on blur/Enter and roll back on error.
   const [proxyDraft, setProxyDraft] = useState('')
   const [proxyError, setProxyError] = useState<string | null>(null)
   const [proxySaving, setProxySaving] = useState(false)
   const [promptModeSaving, setPromptModeSaving] = useState(false)
   const PAGE_SIZE = 20
 
-  // Debounced query: typing in the search box shouldn't fire a request
-  // on every keystroke; we wait 250ms after the user stops typing and
-  // only then re-fetch. The debounced value is what actually goes to
-  // the server.
   const [debouncedQuery, setDebouncedQuery] = useState('')
   useEffect(() => {
     const handle = setTimeout(() => setDebouncedQuery(query.trim()), 250)
@@ -855,7 +846,6 @@ export default function App() {
     if (window.location.hash !== nextHash) window.history.replaceState(null, '', nextHash)
   }
 
-  // Check auth on mount
   useEffect(() => {
     checkAuth().then(status => {
       setAuthRequired(status.required)
@@ -866,19 +856,16 @@ export default function App() {
         setLoading(false)
       }
     }).catch(() => {
-      setAuthState('authenticated') // fallback: skip auth
+      setAuthState('authenticated')
     })
   }, [])
 
-  // loadData fetches the *paginated* account list using the current
-  // page + debounced query. The server filters/sorts/slices for us, so
-  // `data.accounts` is already the visible page.
   const loadData = useCallback(async () => {
     try {
       const d = await fetchDashboardData({ page, pageSize: PAGE_SIZE, query: debouncedQuery })
       setData(d)
       setError(null)
-      setRefreshTime(new Date().toLocaleTimeString('zh-CN'))
+      setRefreshTime(new Date().toLocaleTimeString(locale))
       if (d.refresh) {
         setRefreshStatus(d.refresh)
       }
@@ -887,15 +874,12 @@ export default function App() {
     } finally {
       setLoading(false)
     }
-  }, [page, debouncedQuery])
+  }, [page, debouncedQuery, locale])
 
   useEffect(() => {
     if (authState === 'authenticated') loadData()
   }, [authState, loadData])
 
-  // Settings + token stats are pool-wide and don't change with the
-  // current page/query, so we only fetch them on auth — not on every
-  // page navigation.
   useEffect(() => {
     if (authState !== 'authenticated') return
     fetchSettings()
@@ -923,7 +907,6 @@ export default function App() {
     setQuotaRefreshing(true)
     try {
       await triggerRefresh()
-      // Start polling immediately
       setRefreshStatus(prev => prev ? { ...prev, refreshing: true, done: 0 } : { refreshing: true, done: 0, total: 0 })
     } catch { /* ignore */ }
     setQuotaRefreshing(false)
@@ -936,10 +919,15 @@ export default function App() {
       const result = await checkPersonalInstructions()
       await loadData()
       window.alert(
-        `个人指令检测完成：共 ${result.total} 个账号\n\n已设置：${result.configured}\n未设置：${result.missing}\n检测失败：${result.failed}`,
+        t('dialogs.checkResult', {
+          total: result.total,
+          configured: result.configured,
+          missing: result.missing,
+          failed: result.failed,
+        }),
       )
     } catch (e: any) {
-      window.alert(`个人指令检测失败：${e?.message || '请求失败'}`)
+      window.alert(t('dialogs.checkFailed', { reason: e?.message || 'Request failed' }))
     } finally {
       setCheckingPersonalInstructions(false)
     }
@@ -949,7 +937,10 @@ export default function App() {
     if (deletingMissingPersonalInstructions || (data?.total ?? 0) === 0) return
     const knownMissing = data?.summary?.personal_instructions_missing ?? 0
     const confirmed = window.confirm(
-      `系统会先重新检测全部 ${data?.total ?? 0} 个账号，然后永久删除当前确实没有设置官网默认 Agent 个人指令的账号。\n\n上次检测显示未设置：${knownMissing} 个。\n检测失败的账号不会删除。\n\n确定继续吗？`,
+      t('dialogs.deleteMissingConfirm', {
+        total: data?.total ?? 0,
+        knownMissing,
+      }),
     )
     if (!confirmed) return
     setDeletingMissingPersonalInstructions(true)
@@ -959,10 +950,15 @@ export default function App() {
       setSelectedEmails(new Set())
       await loadData()
       window.alert(
-        `清理完成：重新检测 ${result.checked} 个账号，发现未设置 ${result.matched} 个，已删除 ${result.deleted} 个${failedCount > 0 ? `，删除失败 ${failedCount} 个` : ''}。`,
+        t('dialogs.deleteMissingResult', {
+          checked: result.checked,
+          matched: result.matched,
+          deleted: result.deleted,
+          failed: failedCount > 0 ? t('dialogs.deleteMissingFailedSuffix', { count: failedCount }) : '',
+        }),
       )
     } catch (e: any) {
-      window.alert(`删除未设置个人指令账号失败：${e?.message || '请求失败'}`)
+      window.alert(t('dialogs.deleteMissingFailed', { reason: e?.message || 'Request failed' }))
     } finally {
       setDeletingMissingPersonalInstructions(false)
     }
@@ -971,15 +967,15 @@ export default function App() {
   const handleBulkSelected = async (action: BulkAccountAction) => {
     const emails = Array.from(selectedEmails)
     if (emails.length === 0 || bulkActionRunning) return
-    const labels: Record<BulkAccountAction, string> = {
-      delete: '永久删除',
-      disable: '禁用',
-      enable: '启用',
-      check_personal_instructions: '检测官网个人指令',
+    const actionLabels: Record<BulkAccountAction, string> = {
+      delete: t('bulkToolbar.labelDelete'),
+      disable: t('bulkToolbar.labelDisable'),
+      enable: t('bulkToolbar.labelEnable'),
+      check_personal_instructions: t('bulkToolbar.labelCheck'),
     }
     if (action === 'delete') {
       const confirmed = window.confirm(
-        `将永久删除选中的 ${emails.length} 个账号及其登录文件。\n\n此操作不可撤销，确定继续吗？`,
+        t('bulkToolbar.confirmDelete', { count: emails.length }),
       )
       if (!confirmed) return
     }
@@ -991,15 +987,24 @@ export default function App() {
       await loadData()
       if (action === 'check_personal_instructions' && result.check) {
         window.alert(
-          `所选账号检测完成：已设置 ${result.check.configured}，未设置 ${result.check.missing}，检测失败 ${result.check.failed}${failedCount > result.check.failed ? `，另有 ${failedCount - result.check.failed} 个账号不存在` : ''}。`,
+          t('bulkToolbar.checkComplete', {
+            configured: result.check.configured,
+            missing: result.check.missing,
+            failed: result.check.failed,
+            notFound: failedCount > result.check.failed ? t('bulkToolbar.notFoundSuffix', { count: failedCount - result.check.failed }) : '',
+          }),
         )
       } else {
         window.alert(
-          `${labels[action]}完成：成功 ${result.succeeded} 个${failedCount > 0 ? `，失败 ${failedCount} 个` : ''}。`,
+          t('bulkToolbar.actionComplete', {
+            action: actionLabels[action],
+            succeeded: result.succeeded,
+            failed: failedCount > 0 ? t('bulkToolbar.actionFailedSuffix', { count: failedCount }) : '',
+          }),
         )
       }
     } catch (e: any) {
-      window.alert(`${labels[action]}失败：${e?.message || '请求失败'}`)
+      window.alert(t('bulkToolbar.actionFailed', { action: actionLabels[action], reason: e?.message || 'Request failed' }))
     } finally {
       setBulkActionRunning(null)
     }
@@ -1010,9 +1015,9 @@ export default function App() {
     if (emails.length === 0) return
     try {
       await navigator.clipboard.writeText(emails.join('\n'))
-      window.alert(`已复制 ${emails.length} 个账号邮箱。`)
+      window.alert(t('bulkToolbar.emailsCopied', { count: emails.length }))
     } catch {
-      window.alert('复制失败，请检查浏览器剪贴板权限。')
+      window.alert(t('bulkToolbar.copyClipboardFailed'))
     }
   }
 
@@ -1020,7 +1025,7 @@ export default function App() {
     const count = data?.summary?.exhausted_trials ?? 0
     if (count <= 0 || deletingExhaustedTrials) return
     const confirmed = window.confirm(
-      `将永久删除 ${count} 个已用完 AI 试用额度的 Free/Plus 账号及其登录文件。\n\nBusiness、Enterprise、临时故障和 Cookie 失效账号不会删除。建议先刷新配额。\n\n确定继续吗？`,
+      t('dialogs.deleteExhaustedConfirm', { count }),
     )
     if (!confirmed) return
     setDeletingExhaustedTrials(true)
@@ -1028,11 +1033,11 @@ export default function App() {
       const result = await deleteExhaustedTrials()
       const failedCount = Object.keys(result.failed || {}).length
       window.alert(failedCount > 0
-        ? `已删除 ${result.deleted} 个账号，${failedCount} 个删除失败。`
-        : `已删除 ${result.deleted} 个已用完试用额度的账号。`)
+        ? t('dialogs.deleteExhaustedResultWithFailed', { deleted: result.deleted, failed: failedCount })
+        : t('dialogs.deleteExhaustedResultSuccess', { deleted: result.deleted }))
       await loadData()
     } catch (e: any) {
-      window.alert(`清理失败：${e?.message || '请求失败'}`)
+      window.alert(t('dialogs.deleteExhaustedFailed', { reason: e?.message || 'Request failed' }))
     } finally {
       setDeletingExhaustedTrials(false)
     }
@@ -1058,11 +1063,6 @@ export default function App() {
     }
   }
 
-  // saveProxy commits the proxy input draft. We skip the round trip when
-  // the value is unchanged (typical blur after focus). Backend rejects
-  // unsupported schemes with HTTP 400 + JSON error; we surface the
-  // message inline and roll the input back to the persisted value so a
-  // typo doesn't get silently saved.
   const saveProxy = async () => {
     if (!settings) return
     const next = proxyDraft.trim()
@@ -1078,14 +1078,13 @@ export default function App() {
       setSettings(updated)
       setProxyDraft(updated.notion_proxy ?? '')
     } catch (e: any) {
-      setProxyError(e?.message || '保存失败')
+      setProxyError(e?.message || t('settings.saveFailed'))
       setProxyDraft(settings.notion_proxy ?? '')
     } finally {
       setProxySaving(false)
     }
   }
 
-  // Auto-poll when backend is refreshing quotas
   useEffect(() => {
     if (!refreshStatus?.refreshing) return
     const interval = setInterval(async () => {
@@ -1094,10 +1093,6 @@ export default function App() {
     return () => clearInterval(interval)
   }, [refreshStatus?.refreshing, loadData])
 
-  // Server-paginated: data.accounts is already the visible page slice
-  // (filtered + sorted server-side). filtered_total tells us how many
-  // entries match the current query across the whole pool, which is
-  // what we need to render pagination controls.
   const accounts = data?.accounts || []
   const paged = accounts
   const filteredTotal = data?.filtered_total ?? data?.total ?? accounts.length
@@ -1124,10 +1119,7 @@ export default function App() {
     })
   }
 
-  // Reset page when the (debounced) query changes so the user always
-  // lands on the first page of new search results.
   useEffect(() => { setPage(0) }, [debouncedQuery])
-  // Clamp `page` if the result set shrank below the current page.
   useEffect(() => {
     if (page > 0 && page >= totalPages) setPage(Math.max(0, totalPages - 1))
   }, [page, totalPages])
@@ -1135,9 +1127,6 @@ export default function App() {
   const summary = useMemo(() => {
     if (!data) return null
     const s = data.summary
-    // Note: backend's AvailableCount already excludes no_workspace, so
-    // (total - available) lumps "exhausted" and "no workspace" together.
-    // We split them out explicitly for the operator.
     const exhausted = data.total - data.available
     const exhaustedOnly = s?.exhausted_only ?? 0
     const noWorkspace = s?.no_workspace ?? 0
@@ -1168,7 +1157,6 @@ export default function App() {
     }
   }, [data])
 
-  // Auth checking spinner
   if (authState === 'checking') {
     return (
       <div className="flex items-center justify-center h-screen gap-3 text-text-secondary text-sm">
@@ -1177,7 +1165,6 @@ export default function App() {
     )
   }
 
-  // Login page
   if (authState === 'login') {
     return <LoginPage onSuccess={() => { setAuthState('authenticated'); setLoading(true) }} />
   }
@@ -1186,7 +1173,7 @@ export default function App() {
     return (
       <div className="flex items-center justify-center h-screen gap-3 text-text-secondary text-sm">
         <div className="w-4 h-4 border-2 border-border border-t-notion-blue rounded-full animate-spin" />
-        加载账号数据...
+        {t('grid.loadingData')}
       </div>
     )
   }
@@ -1194,19 +1181,19 @@ export default function App() {
   if (error && !data) {
     return (
       <div className="flex items-center justify-center h-screen text-err text-sm">
-        加载失败: {error}
+        {t('grid.loadFailed', { error })}
       </div>
     )
   }
 
   const accountSummaryParts = summary
     ? [
-      `${data!.available} 可用`,
-      summary.exhaustedOnly > 0 ? `${summary.exhaustedOnly} 耗尽` : null,
-      summary.noWorkspace > 0 ? `${summary.noWorkspace} 无工作区` : null,
-      summary.authInvalid > 0 ? `${summary.authInvalid} Cookie 失效` : null,
-      summary.disabled > 0 ? `${summary.disabled} 手动禁用` : null,
-      summary.otherUnavailable > 0 ? `${summary.otherUnavailable} 临时跳过` : null,
+      `${data!.available} ${t('stats.available')}`,
+      summary.exhaustedOnly > 0 ? `${summary.exhaustedOnly} exhausted` : null,
+      summary.noWorkspace > 0 ? `${summary.noWorkspace} no workspace` : null,
+      summary.authInvalid > 0 ? `${summary.authInvalid} cookie invalid` : null,
+      summary.disabled > 0 ? `${summary.disabled} disabled` : null,
+      summary.otherUnavailable > 0 ? `${summary.otherUnavailable} temp skipped` : null,
     ].filter(Boolean).join(' / ')
     : ''
 
@@ -1223,53 +1210,50 @@ export default function App() {
       />
 
       <main className="max-w-[1280px] mx-auto px-6 py-6 max-sm:px-3 max-sm:py-4">
-        {/* Summary */}
         {activePage === 'accounts' && summary && (
           <div className="grid grid-cols-5 divide-x divide-white/[.05] mb-6 max-lg:grid-cols-3 max-md:grid-cols-2 max-md:divide-x-0 max-sm:mb-4">
             <StatCard
-              label="总账号" value={data!.total}
+              label={t('stats.totalAccounts')} value={data!.total}
               sub={accountSummaryParts}
             />
             <StatCard
-              label="可用" value={data!.available}
-              sub={`占比 ${summary.availableRate}%`}
+              label={t('stats.available')} value={data!.available}
+              sub={t('stats.availableRatio', { rate: summary.availableRate })}
               color="var(--color-ok)"
             />
             <StatCard
-              label="接口 Basic 估算余量" value={fmt(summary.totalRemaining)}
+              label={t('stats.basicQuotaEstimate')} value={fmt(summary.totalRemaining)}
               sub={summary.sameBasicQuota
-                ? 'Space / User 返回值一致 · 非官网承诺额度'
-                : `Space ${fmt(summary.totalSpaceRemaining)} · User ${fmt(summary.totalUserRemaining)}（接口值）`}
+                ? t('stats.quotaSame')
+                : t('stats.quotaDiff', { space: fmt(summary.totalSpaceRemaining), user: fmt(summary.totalUserRemaining) })}
             />
             <StatCard
-              label="Premium balance 原始值" value={fmt(summary.totalPremiumBalance)}
+              label={t('stats.premiumBalanceRaw')} value={fmt(summary.totalPremiumBalance)}
               sub={summary.totalPremiumLimit > 0
-                ? `${summary.premiumAccounts} 个接口信号 · Research 接口用量 ${summary.totalResearchUsage}`
-                : '接口未返回 Premium 数值 · 不代表 Custom Agents credits'}
+                ? t('stats.premiumSignal', { count: summary.premiumAccounts, research: summary.totalResearchUsage })
+                : t('stats.premiumNotReturned')}
               color="var(--color-research, #9b51e0)"
             />
             <StatCard
               icon={<IconActivity />}
-              label="Token 用量"
+              label={t('stats.tokenUsage')}
               value={formatTokens(tokenStats?.total.total ?? 0)}
               sub={tokenStats
-                ? `今日 ${formatTokens(tokenStats.today.total)} · 输入 ${formatTokens(tokenStats.today.input)} · 输出 ${formatTokens(tokenStats.today.output)}`
-                : '尚未产生用量'}
+                ? t('stats.todayUsage', { total: formatTokens(tokenStats.today.total), input: formatTokens(tokenStats.today.input), output: formatTokens(tokenStats.today.output) })
+                : t('stats.noUsageYet')}
               color="var(--color-notion-blue)"
             />
           </div>
         )}
 
-        {/* Total Quota Bar */}
         {activePage === 'accounts' && <TotalQuotaBar summary={data?.summary} />}
 
-        {/* Refresh Status Banner */}
         {activePage === 'accounts' && refreshStatus?.refreshing && (
           <div className="bg-notion-blue/10 border border-notion-blue/20 rounded-lg p-3 mb-5 flex items-center gap-3">
             <div className="w-4 h-4 border-2 border-notion-blue/30 border-t-notion-blue rounded-full animate-spin shrink-0" />
             <div className="flex-1 min-w-0">
               <div className="text-[13px] font-medium text-[#5c9ce6]">
-                正在刷新配额... {refreshStatus.done}/{refreshStatus.total}
+                {t('refreshBanner.refreshing', { done: refreshStatus.done, total: refreshStatus.total })}
               </div>
               <div className="h-1.5 bg-white/[.06] rounded-full overflow-hidden mt-1.5">
                 <div
@@ -1281,71 +1265,70 @@ export default function App() {
           </div>
         )}
 
-        {/* Actions */}
         {activePage === 'accounts' && <div className="flex items-center gap-2.5 mb-5 flex-wrap max-sm:grid max-sm:grid-cols-2 max-sm:gap-2 max-sm:[&>button]:justify-center max-sm:[&>button]:px-2 max-sm:[&>button]:text-[12px]">
           <button
             onClick={openBestProxy}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-white hover:bg-white/90 text-[#111] rounded-md text-[13px] font-medium cursor-pointer transition-colors border-none"
           >
-            <IconZap /> 打开最优账号
+            <IconZap /> {t('actions.openBest')}
           </button>
           <button
             onClick={handleQuotaRefresh}
             disabled={quotaRefreshing || refreshStatus?.refreshing}
             className={`inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border disabled:opacity-50 disabled:cursor-not-allowed ${refreshStatus?.refreshing ? 'animate-pulse' : ''}`}
           >
-            <IconRefresh /> 刷新配额
+            <IconRefresh /> {t('actions.refreshQuota')}
           </button>
           <button
             onClick={refresh}
             disabled={refreshing}
             className={`inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border disabled:opacity-50 disabled:cursor-not-allowed ${refreshing ? 'animate-pulse' : ''}`}
           >
-            <IconRefresh /> 刷新数据
+            <IconRefresh /> {t('actions.refreshData')}
           </button>
           <button
             onClick={handleCheckPersonalInstructions}
             disabled={checkingPersonalInstructions || deletingMissingPersonalInstructions}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border disabled:opacity-50 disabled:cursor-not-allowed"
-            title="只检测默认 Notion Agent 是否绑定了官网个人指令页面，不读取或保存指令正文"
+            title={t('actions.checkInstructionsTitle')}
           >
-            <IconActivity /> {checkingPersonalInstructions ? '正在检测个人指令...' : '检测官网个人指令'}
+            <IconActivity /> {checkingPersonalInstructions ? t('actions.checkingInstructions') : t('actions.checkInstructions')}
           </button>
           <button
             onClick={handleDeleteMissingPersonalInstructions}
             disabled={deletingMissingPersonalInstructions || checkingPersonalInstructions || (data?.total ?? 0) === 0}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-err/10 hover:bg-err/20 text-err rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-err/25 disabled:opacity-40 disabled:cursor-not-allowed"
-            title="会先重新检测全部账号，只永久删除当前确实没有设置官网默认 Agent 个人指令的账号"
+            title={t('actions.deleteMissingInstructionsTitle')}
           >
             <IconTrash /> {deletingMissingPersonalInstructions
-              ? '正在检测并清理...'
-              : `删除未设置个人指令（${data?.summary?.personal_instructions_missing ?? 0}）`}
+              ? t('actions.deletingMissingInstructions')
+              : t('actions.deleteMissingInstructions', { count: data?.summary?.personal_instructions_missing ?? 0 })}
           </button>
           <button
             onClick={handleDeleteExhaustedTrials}
             disabled={deletingExhaustedTrials || (data?.summary?.exhausted_trials ?? 0) <= 0 || !!refreshStatus?.refreshing}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-err/10 hover:bg-err/20 text-err rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-err/25 disabled:opacity-40 disabled:cursor-not-allowed"
-            title="仅永久删除因 complimentary AI responses 用完而禁用的 Free/Plus 账号；不会删除其他故障账号"
+            title={t('actions.deleteExhaustedTitle')}
           >
-            <IconTrash /> {deletingExhaustedTrials ? '正在清理...' : `清理已用完试用账号（${data?.summary?.exhausted_trials ?? 0}）`}
+            <IconTrash /> {deletingExhaustedTrials ? t('actions.cleaningExhausted') : t('actions.deleteExhausted', { count: data?.summary?.exhausted_trials ?? 0 })}
           </button>
           <button
             onClick={() => setShowAddModal(true)}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border"
           >
-            <IconPlus /> 添加账号
+            <IconPlus /> {t('actions.addAccount')}
           </button>
           <button
             onClick={() => setRegisterOpen(true)}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border"
           >
-            <IconUserPlus size={13} /> 注册账号
+            <IconUserPlus size={13} /> {t('actions.registerAccount')}
           </button>
           {refreshTime && (
             <span className="text-[11px] text-text-muted max-sm:col-span-2">
-              更新于 {refreshTime}
+              {t('actions.updatedAt', { time: refreshTime })}
               {refreshStatus?.last_refresh_at && !refreshStatus.refreshing && (
-                <> · 配额刷新于 {new Date(refreshStatus.last_refresh_at).toLocaleTimeString('zh-CN')}</>
+                <>{t('actions.quotaUpdatedAt', { time: new Date(refreshStatus.last_refresh_at).toLocaleTimeString(locale) })}</>
               )}
             </span>
           )}
@@ -1354,34 +1337,33 @@ export default function App() {
         {activePage === 'settings' && (
           <div className="mb-6">
             <div className="mb-5">
-              <h2 className="text-[18px] font-semibold text-text-primary">设置与记录</h2>
-              <p className="text-[12px] text-text-muted mt-1">集中管理 API、代理、功能开关和运行记录。</p>
+              <h2 className="text-[18px] font-semibold text-text-primary">{t('settings.title')}</h2>
+              <p className="text-[12px] text-text-muted mt-1">{t('settings.subtitle')}</p>
             </div>
             <div className="grid grid-cols-3 gap-3 max-md:grid-cols-1">
               <div className="bg-bg-card border border-border rounded-lg p-4">
-                <div className="text-[11px] text-text-muted uppercase tracking-wider">当前版本</div>
+                <div className="text-[11px] text-text-muted uppercase tracking-wider">{t('settings.currentVersion')}</div>
                 <div className="text-[20px] font-semibold font-mono mt-1" title={appVersion}>{displayVersion(appVersion)}</div>
-                <div className="text-[11px] text-text-muted mt-1">用于确认 Railway 是否已经更新</div>
+                <div className="text-[11px] text-text-muted mt-1">{t('settings.versionSub')}</div>
               </div>
               <button
                 onClick={() => setRequestHistoryOpen(true)}
                 className="text-left bg-bg-card hover:bg-bg-card-hover border border-border rounded-lg p-4 cursor-pointer transition-colors"
               >
-                <div className="flex items-center gap-2 text-[13px] font-medium"><IconActivity /> 调用记录</div>
-                <div className="text-[11px] text-text-muted mt-2">查看最近 100 条模型、账号、耗时和错误记录</div>
+                <div className="flex items-center gap-2 text-[13px] font-medium"><IconActivity /> {t('settings.callHistory')}</div>
+                <div className="text-[11px] text-text-muted mt-2">{t('settings.callHistorySub')}</div>
               </button>
               <button
                 onClick={() => setHistoryOpen(true)}
                 className="text-left bg-bg-card hover:bg-bg-card-hover border border-border rounded-lg p-4 cursor-pointer transition-colors"
               >
-                <div className="flex items-center gap-2 text-[13px] font-medium"><IconHistory size={13} /> 注册任务</div>
-                <div className="text-[11px] text-text-muted mt-2">查看批量注册历史、结果和重试状态</div>
+                <div className="flex items-center gap-2 text-[13px] font-medium"><IconHistory size={13} /> {t('settings.registerJobs')}</div>
+                <div className="text-[11px] text-text-muted mt-2">{t('settings.registerJobsSub')}</div>
               </button>
             </div>
           </div>
         )}
 
-        {/* API Settings */}
         {activePage === 'settings' && settings && (() => {
           const apiKey = document.querySelector('meta[name="api-key"]')?.getAttribute('content') || ''
           const apiBase = `${window.location.origin}/v1`
@@ -1389,17 +1371,17 @@ export default function App() {
           return (
             <div className="mb-6 px-5 py-5 bg-[#171717] border border-white/5 rounded-lg shadow-inner max-sm:px-3 max-sm:py-4">
               <div className="mb-4">
-                <div className="text-[14px] text-text-primary font-semibold flex items-center gap-2"><IconSettings /> API 与功能设置</div>
-                <div className="text-[11px] text-text-muted mt-1">修改后立即保存；服务重启后继续生效。</div>
+                <div className="text-[14px] text-text-primary font-semibold flex items-center gap-2"><IconSettings /> {t('settings.apiHeader')}</div>
+                <div className="text-[11px] text-text-muted mt-1">{t('settings.apiSub')}</div>
               </div>
               <div className="mb-5 rounded-lg border border-white/[.07] bg-white/[.025] p-3.5">
                 <div className="flex items-center justify-between gap-3 mb-3 max-sm:items-start">
                   <div>
-                    <div className="text-[13px] font-medium text-text-primary">提示词与工具处理</div>
-                    <div className="text-[11px] text-text-muted mt-0.5">三个开关互相独立，可以任意组合；修改后会从新会话开始生效。</div>
+                    <div className="text-[13px] font-medium text-text-primary">{t('settings.promptTitle')}</div>
+                    <div className="text-[11px] text-text-muted mt-0.5">{t('settings.promptSub')}</div>
                   </div>
                   <span className="text-[10px] text-ok bg-ok/10 border border-ok/20 rounded px-2 py-0.5 shrink-0">
-                    {promptModeSaving ? '保存中' : '已保存'}
+                    {promptModeSaving ? t('common.saving') : t('common.saved')}
                   </span>
                 </div>
                 <div className="grid grid-cols-3 gap-2 max-lg:grid-cols-1">
@@ -1412,10 +1394,10 @@ export default function App() {
                     className={`text-left rounded-lg border p-3 cursor-pointer transition-colors disabled:cursor-wait ${settings.use_client_system_prompt ? 'border-notion-blue/60 bg-notion-blue/10' : 'border-border bg-bg-card hover:bg-bg-card-hover'}`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-[12px] font-semibold text-text-primary">客户端 System Prompt</span>
-                      <span className={`text-[10px] ${settings.use_client_system_prompt ? 'text-ok' : 'text-text-muted'}`}>{settings.use_client_system_prompt ? '开启' : '关闭'}</span>
+                      <span className="text-[12px] font-semibold text-text-primary">{t('settings.clientSystemPrompt')}</span>
+                      <span className={`text-[10px] ${settings.use_client_system_prompt ? 'text-ok' : 'text-text-muted'}`}>{settings.use_client_system_prompt ? 'ON' : 'OFF'}</span>
                     </div>
-                    <div className="text-[11px] text-text-muted mt-1.5 leading-relaxed">开启：保留客户端传来的 system prompt。关闭：忽略这部分，但普通问题仍会发送。</div>
+                    <div className="text-[11px] text-text-muted mt-1.5 leading-relaxed">{t('settings.clientSystemPromptDesc')}</div>
                   </button>
                   <button
                     type="button"
@@ -1426,10 +1408,10 @@ export default function App() {
                     className={`text-left rounded-lg border p-3 cursor-pointer transition-colors disabled:cursor-wait ${settings.use_notion_personal_instructions ? 'border-notion-blue/60 bg-notion-blue/10' : 'border-border bg-bg-card hover:bg-bg-card-hover'}`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-[12px] font-semibold text-text-primary">Notion 官网个人指令</span>
-                      <span className={`text-[10px] ${settings.use_notion_personal_instructions ? 'text-ok' : 'text-text-muted'}`}>{settings.use_notion_personal_instructions ? '开启' : '关闭'}</span>
+                      <span className="text-[12px] font-semibold text-text-primary">{t('settings.notionPersonalInstructions')}</span>
+                      <span className={`text-[10px] ${settings.use_notion_personal_instructions ? 'text-ok' : 'text-text-muted'}`}>{settings.use_notion_personal_instructions ? 'ON' : 'OFF'}</span>
                     </div>
-                    <div className="text-[11px] text-text-muted mt-1.5 leading-relaxed">开启：由当前 Notion 账号的默认 Agent 加载官网保存的个人指令，可和左侧同时开启。</div>
+                    <div className="text-[11px] text-text-muted mt-1.5 leading-relaxed">{t('settings.notionPersonalInstructionsDesc')}</div>
                   </button>
                   <button
                     type="button"
@@ -1440,28 +1422,28 @@ export default function App() {
                     className={`text-left rounded-lg border p-3 cursor-pointer transition-colors disabled:cursor-wait ${settings.enable_tool_bridge ? 'border-notion-blue/60 bg-notion-blue/10' : 'border-border bg-bg-card hover:bg-bg-card-hover'}`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-[12px] font-semibold text-text-primary">外部工具兼容</span>
-                      <span className={`text-[10px] ${settings.enable_tool_bridge ? 'text-ok' : 'text-text-muted'}`}>{settings.enable_tool_bridge ? '开启' : '关闭'}</span>
+                      <span className="text-[12px] font-semibold text-text-primary">{t('settings.externalToolBridge')}</span>
+                      <span className={`text-[10px] ${settings.enable_tool_bridge ? 'text-ok' : 'text-text-muted'}`}>{settings.enable_tool_bridge ? 'ON' : 'OFF'}</span>
                     </div>
-                    <div className="text-[11px] text-text-muted mt-1.5 leading-relaxed">开启：让 Claude Code、Tools 和函数调用正常工作。关闭：按普通聊天发送，外部工具调用停用。</div>
+                    <div className="text-[11px] text-text-muted mt-1.5 leading-relaxed">{t('settings.externalToolBridgeDesc')}</div>
                   </button>
                 </div>
               </div>
               <div className="flex items-center gap-6 flex-wrap max-sm:flex-col max-sm:items-stretch max-sm:gap-4">
                 <div className="flex items-center gap-6 flex-wrap max-sm:flex-col max-sm:items-stretch max-sm:gap-3 max-sm:w-full">
                   <div className="flex items-center gap-1.5 max-sm:flex-wrap">
-                    <span className="text-[11px] text-text-muted">API Key</span>
+                    <span className="text-[11px] text-text-muted">{t('settings.apiKey')}</span>
                     <code
                       className={`text-[11px] bg-white/[.05] px-1.5 py-0.5 rounded cursor-pointer hover:bg-white/[.1] transition-colors font-mono max-sm:max-w-[220px] max-sm:truncate ${copiedField === 'key' ? 'text-ok' : 'text-text-primary'}`}
                       onClick={() => copyToClipboard(apiKey, 'key')}
-                      title="点击复制"
+                      title={t('settings.clickToCopy')}
                     >
-                      {copiedField === 'key' ? '✓ 已复制' : (apiKeyRevealed ? apiKey : maskedKey)}
+                      {copiedField === 'key' ? `✓ ${t('common.copied')}` : (apiKeyRevealed ? apiKey : maskedKey)}
                     </code>
                     <button
                       onClick={() => setApiKeyRevealed(!apiKeyRevealed)}
                       className="ml-3 text-text-muted hover:text-text-primary transition-colors bg-transparent border-none cursor-pointer px-0.5 flex items-center"
-                      title={apiKeyRevealed ? '隐藏' : '显示'}
+                      title={apiKeyRevealed ? t('settings.hide') : t('settings.show')}
                     >
                       {apiKeyRevealed ? (
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -1475,20 +1457,20 @@ export default function App() {
                     </button>
                   </div>
                   <div className="flex items-center gap-1.5 max-sm:flex-wrap">
-                    <span className="text-[11px] text-text-muted">Base URL</span>
+                    <span className="text-[11px] text-text-muted">{t('settings.baseUrl')}</span>
                     <code
                       className={`text-[11px] bg-white/[.05] px-1.5 py-0.5 rounded cursor-pointer hover:bg-white/[.1] transition-colors font-mono break-all ${copiedField === 'base' ? 'text-ok' : 'text-text-primary'}`}
                       onClick={() => copyToClipboard(apiBase, 'base')}
-                      title="点击复制"
+                      title={t('settings.clickToCopy')}
                     >
-                      {copiedField === 'base' ? '✓ 已复制' : apiBase}
+                      {copiedField === 'base' ? `✓ ${t('common.copied')}` : apiBase}
                     </code>
                   </div>
                   <div className="flex items-center gap-1.5 max-sm:grid max-sm:grid-cols-[auto_8px_1fr]">
-                    <span className="text-[11px] text-text-muted">全局代理</span>
+                    <span className="text-[11px] text-text-muted">{t('settings.globalProxy')}</span>
                     <span
                       className={`inline-block w-1.5 h-1.5 rounded-full ${proxyError ? 'bg-err' : settings.notion_proxy ? 'bg-ok' : 'bg-text-muted/60'}`}
-                      title={proxyError ? proxyError : settings.notion_proxy ? '已启用代理' : '直连'}
+                      title={proxyError ? proxyError : settings.notion_proxy ? t('settings.proxyEnabled') : t('settings.proxyDirect')}
                     />
                     <input
                       type="text"
@@ -1503,10 +1485,10 @@ export default function App() {
                           ;(e.target as HTMLInputElement).blur()
                         }
                       }}
-                      placeholder="留空 = 直连"
+                      placeholder={t('settings.proxyPlaceholder')}
                       disabled={proxySaving}
                       className={`text-[11px] bg-white/[.05] px-1.5 py-0.5 rounded font-mono outline-none border w-[160px] focus:w-[280px] transition-[width,border-color] duration-150 max-sm:w-full max-sm:focus:w-full ${proxyError ? 'border-err text-err' : 'border-transparent focus:border-white/20 text-text-primary'} placeholder:text-text-muted/60`}
-                      title={proxyError || (settings.notion_proxy ? `当前: ${settings.notion_proxy}` : '当前: 直连')}
+                      title={proxyError || (settings.notion_proxy ? t('settings.proxyCurrent', { val: settings.notion_proxy }) : t('settings.proxyDirect'))}
                     />
                   </div>
                 </div>
@@ -1518,7 +1500,7 @@ export default function App() {
                     >
                       <span className={`absolute top-[2px] left-[2px] w-3 h-3 rounded-full transition-all duration-200 ${settings.enable_web_search ? 'bg-white shadow-sm translate-x-[12px]' : 'bg-white/40'}`} />
                     </button>
-                    <span className="text-[12px] text-white font-medium">联网搜索</span>
+                    <span className="text-[12px] text-white font-medium">{t('settings.webSearch')}</span>
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer select-none">
                     <button
@@ -1527,11 +1509,11 @@ export default function App() {
                     >
                       <span className={`absolute top-[2px] left-[2px] w-3 h-3 rounded-full transition-all duration-200 ${settings.enable_workspace_search ? 'bg-white shadow-sm translate-x-[12px]' : 'bg-white/40'}`} />
                     </button>
-                    <span className="text-[12px] text-text-primary">工作区搜索</span>
+                    <span className="text-[12px] text-text-primary">{t('settings.workspaceSearch')}</span>
                   </label>
                   <label
                     className="flex items-center gap-2 cursor-pointer select-none"
-                    title="开启后所有请求默认进入 ASK 模式（仅回答、不写入页面）。单次覆盖：在模型名末尾追加 -ask，例如 claude-sonnet-4.6-ask"
+                    title={t('settings.askModeTitle')}
                   >
                     <button
                       onClick={() => toggleSetting('ask_mode_default')}
@@ -1539,7 +1521,7 @@ export default function App() {
                     >
                       <span className={`absolute top-[2px] left-[2px] w-3 h-3 rounded-full transition-all duration-200 ${settings.ask_mode_default ? 'bg-white shadow-sm translate-x-[12px]' : 'bg-white/40'}`} />
                     </button>
-                    <span className="text-[12px] text-text-primary">ASK 模式</span>
+                    <span className="text-[12px] text-text-primary">{t('settings.askMode')}</span>
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer select-none">
                     <button
@@ -1548,7 +1530,7 @@ export default function App() {
                     >
                       <span className={`absolute top-[2px] left-[2px] w-3 h-3 rounded-full transition-all duration-200 ${settings.debug_logging ? 'bg-white shadow-sm translate-x-[12px]' : 'bg-white/40'}`} />
                     </button>
-                    <span className="text-[12px] text-text-primary">调试日志</span>
+                    <span className="text-[12px] text-text-primary">{t('settings.debugLogging')}</span>
                   </label>
                 </div>
               </div>
@@ -1557,18 +1539,17 @@ export default function App() {
         })()}
 
         {activePage === 'accounts' && <>
-        {/* Bulk selection toolbar */}
         <div className="mb-4 rounded-lg border border-border bg-bg-card px-3 py-2.5 flex items-center gap-2.5 flex-wrap max-sm:items-stretch">
           <button
             onClick={toggleCurrentPageSelection}
             disabled={pageEmails.length === 0 || !!bulkActionRunning}
             className="px-3 py-1.5 bg-bg-secondary hover:bg-bg-card-hover text-text-primary rounded-md text-[12px] font-medium cursor-pointer border border-border disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            {allPageSelected ? '取消本页' : '本页全选'}
+            {allPageSelected ? t('bulkToolbar.deselectPage') : t('bulkToolbar.selectAllPage')}
           </button>
           <span className="text-[12px] text-text-secondary mr-auto self-center">
-            已选 <strong className="text-text-primary tabular-nums">{selectedEmails.size}</strong> 个
-            {selectedOnPage > 0 && selectedEmails.size !== selectedOnPage ? `（本页 ${selectedOnPage} 个）` : ''}
+            {t('bulkToolbar.selectedCount', { count: selectedEmails.size })}
+            {selectedOnPage > 0 && selectedEmails.size !== selectedOnPage ? t('bulkToolbar.pageSelectedCount', { count: selectedOnPage }) : ''}
           </span>
           <div className="flex items-center gap-2 flex-wrap max-sm:grid max-sm:grid-cols-2 max-sm:w-full">
             <button
@@ -1576,56 +1557,54 @@ export default function App() {
               disabled={selectedEmails.size === 0 || !!bulkActionRunning}
               className="px-3 py-1.5 bg-bg-secondary hover:bg-bg-card-hover text-text-secondary hover:text-text-primary rounded-md text-[12px] cursor-pointer border border-border disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              复制邮箱
+              {t('bulkToolbar.copyEmails')}
             </button>
             <button
               onClick={() => handleBulkSelected('check_personal_instructions')}
               disabled={selectedEmails.size === 0 || !!bulkActionRunning || checkingPersonalInstructions || deletingMissingPersonalInstructions}
               className="px-3 py-1.5 bg-bg-secondary hover:bg-bg-card-hover text-text-secondary hover:text-text-primary rounded-md text-[12px] cursor-pointer border border-border disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {bulkActionRunning === 'check_personal_instructions' ? '正在检测...' : '检测所选'}
+              {bulkActionRunning === 'check_personal_instructions' ? t('bulkToolbar.checkingSelected') : t('bulkToolbar.checkSelected')}
             </button>
             <button
               onClick={() => handleBulkSelected('disable')}
               disabled={selectedEmails.size === 0 || !!bulkActionRunning}
               className="px-3 py-1.5 bg-warn/10 hover:bg-warn/20 text-warn rounded-md text-[12px] cursor-pointer border border-warn/25 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {bulkActionRunning === 'disable' ? '正在禁用...' : '禁用所选'}
+              {bulkActionRunning === 'disable' ? t('bulkToolbar.disablingSelected') : t('bulkToolbar.disableSelected')}
             </button>
             <button
               onClick={() => handleBulkSelected('enable')}
               disabled={selectedEmails.size === 0 || !!bulkActionRunning}
               className="px-3 py-1.5 bg-ok/10 hover:bg-ok/20 text-ok rounded-md text-[12px] cursor-pointer border border-ok/25 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {bulkActionRunning === 'enable' ? '正在启用...' : '启用所选'}
+              {bulkActionRunning === 'enable' ? t('bulkToolbar.enablingSelected') : t('bulkToolbar.enableSelected')}
             </button>
             <button
               onClick={() => handleBulkSelected('delete')}
               disabled={selectedEmails.size === 0 || !!bulkActionRunning}
               className="px-3 py-1.5 bg-err/10 hover:bg-err/20 text-err rounded-md text-[12px] cursor-pointer border border-err/25 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {bulkActionRunning === 'delete' ? '正在删除...' : '删除所选'}
+              {bulkActionRunning === 'delete' ? t('bulkToolbar.deletingSelected') : t('bulkToolbar.deleteSelected')}
             </button>
             <button
               onClick={() => setSelectedEmails(new Set())}
               disabled={selectedEmails.size === 0 || !!bulkActionRunning}
               className="px-3 py-1.5 bg-transparent hover:bg-white/[.05] text-text-muted hover:text-text-primary rounded-md text-[12px] cursor-pointer border border-transparent disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              清空选择
+              {t('bulkToolbar.clearSelection')}
             </button>
           </div>
         </div>
 
-        {/* Section Title */}
         <div className="text-[12px] font-semibold text-text-secondary uppercase tracking-wider mb-3.5 flex items-center gap-1.5">
-          <span>账号池</span>
+          <span>{t('grid.poolTitle')}</span>
           <span className="font-normal text-text-muted">({filteredTotal})</span>
         </div>
 
-        {/* Grid */}
         {filteredTotal === 0 ? (
           <div className="text-center py-16 text-text-secondary text-sm">
-            没有找到匹配的账号
+            {t('grid.noAccountsFound')}
           </div>
         ) : (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(340px,1fr))] gap-2.5 mb-4 max-sm:grid-cols-1">
