@@ -93,11 +93,13 @@ Or download a pre-built binary from [Releases](https://github.com/SleepingBag945
 
 - Embedded React dashboard at `/dashboard/`
 - Password login with session cookies
-- Pool view with **server-side search, sort, and pagination** (`q`, `page`, `page_size`)
+- Pool view with **server-side search, status filters, sort, and pagination** (`q`, `status`, `page`, `page_size`)
 - Per-account actions: open proxy, copy token, manually disable/enable, **delete account file + pool entry**
-- Multi-select across pages with bulk copy-email, personal-instructions check, disable, enable, and delete actions
+- Multi-select across pages, including one-click selection of every account matching the current search and status filter
+- Checks, enable/disable, delete, and cleanup run as background jobs with 10 workers by default, live progress, refresh-safe status, and failed-item retry
 - Bulk-check whether each account has a default Notion Agent personal-instructions page configured; only the yes/no result and check status are stored, never the page ID or instruction text
 - One-click cleanup re-checks the full pool and deletes only accounts currently missing default-Agent personal instructions; probe failures are retained
+- Add Account accepts one token per line and validates up to five tokens concurrently
 - Token usage statistics page — lifetime totals, today, last 24h, 30-day series, top-N models, top-N accounts
 - Toggle `enable_web_search`, `enable_workspace_search`, `ask_mode_default`, `debug_logging`
 - Edit upstream `notion_proxy` URL at runtime without a restart

@@ -1,0 +1,100 @@
+package proxy
+
+import (
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func waitForAccountBatchJob(t *testing.T, manager *AccountBatchManager, id string) *AccountBatchJob {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		job, ok := manager.Get(id)
+		if !ok {
+			t.Fatalf("job %s disappeared", id)
+		}
+		if job.State != "running" {
+			return job
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("job %s did not finish", id)
+	return nil
+}
+
+func TestAccountBatchManagerRunsAndPersistsParallelDisable(t *testing.T) {
+	dir := t.TempDir()
+	accounts := []*Account{
+		{UserEmail: "a@example.com", QuotaInfo: &QuotaInfo{IsEligible: true}},
+		{UserEmail: "b@example.com", QuotaInfo: &QuotaInfo{IsEligible: true}},
+		{UserEmail: "c@example.com", QuotaInfo: &QuotaInfo{IsEligible: true}},
+		{UserEmail: "d@example.com", QuotaInfo: &QuotaInfo{IsEligible: true}},
+	}
+	for _, account := range accounts {
+		writeBulkActionAccountFile(t, dir, account)
+	}
+	pool := NewAccountPool()
+	pool.accounts = accounts
+	path := filepath.Join(dir, ".account_batch_jobs.json")
+	manager, err := NewAccountBatchManager(pool, dir, path)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	job, err := manager.Start(AccountBatchDisable, []string{
+		accounts[0].UserEmail,
+		accounts[1].UserEmail,
+		accounts[2].UserEmail,
+		accounts[3].UserEmail,
+	}, 4)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	finished := waitForAccountBatchJob(t, manager, job.ID)
+	if finished.State != "done" || finished.Done != 4 || finished.Succeeded != 4 || finished.Failed != 0 {
+		t.Fatalf("unexpected finished job: %+v", finished)
+	}
+	if finished.Concurrency != 4 {
+		t.Fatalf("concurrency=%d, want 4", finished.Concurrency)
+	}
+	if got := pool.AvailableCount(); got != 0 {
+		t.Fatalf("available=%d, want 0", got)
+	}
+
+	reloaded, err := NewAccountBatchManager(pool, dir, path)
+	if err != nil {
+		t.Fatalf("reload manager: %v", err)
+	}
+	restored, ok := reloaded.Get(job.ID)
+	if !ok || restored.State != "done" || restored.Succeeded != 4 {
+		t.Fatalf("persisted job not restored: %+v", restored)
+	}
+}
+
+func TestAccountBatchManagerRetryUsesFailedAccounts(t *testing.T) {
+	dir := t.TempDir()
+	account := &Account{UserEmail: "exists@example.com", QuotaInfo: &QuotaInfo{IsEligible: true}}
+	writeBulkActionAccountFile(t, dir, account)
+	pool := NewAccountPool()
+	pool.accounts = []*Account{account}
+	manager, err := NewAccountBatchManager(pool, dir, "")
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	job, err := manager.Start(AccountBatchDisable, []string{account.UserEmail, "missing@example.com"}, 2)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	finished := waitForAccountBatchJob(t, manager, job.ID)
+	if finished.Succeeded != 1 || finished.Failed != 1 {
+		t.Fatalf("unexpected first job: %+v", finished)
+	}
+	retry, err := manager.Retry(job.ID)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	retried := waitForAccountBatchJob(t, manager, retry.ID)
+	if retried.Total != 1 || retried.Failed != 1 || retried.Steps[0].Email != "missing@example.com" {
+		t.Fatalf("retry did not isolate failed account: %+v", retried)
+	}
+}

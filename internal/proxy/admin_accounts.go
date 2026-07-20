@@ -114,6 +114,57 @@ func filterAccountDetails(accounts []map[string]interface{}, q string) []map[str
 	return out
 }
 
+// filterAccountDetailsByStatus applies the dashboard's operator-facing health
+// and personal-instructions filters. Unknown/empty values preserve the full
+// list for backward compatibility.
+func filterAccountDetailsByStatus(accounts []map[string]interface{}, status string) []map[string]interface{} {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "" || status == "all" {
+		return accounts
+	}
+	out := make([]map[string]interface{}, 0, len(accounts))
+	for _, account := range accounts {
+		if accountMatchesStatus(account, status) {
+			out = append(out, account)
+		}
+	}
+	return out
+}
+
+func accountMatchesStatus(account map[string]interface{}, status string) bool {
+	switch status {
+	case "available":
+		return !mapBool(account, "disabled") &&
+			!mapBool(account, "exhausted") &&
+			!mapBool(account, "permanent") &&
+			!mapBool(account, "no_workspace") &&
+			!mapBool(account, "auth_invalid") &&
+			!mapBool(account, "temporarily_unavailable")
+	case "disabled":
+		return mapBool(account, "disabled")
+	case "exhausted":
+		return mapBool(account, "exhausted") || mapBool(account, "permanent")
+	case "auth_invalid":
+		return mapBool(account, "auth_invalid")
+	case "no_workspace":
+		return mapBool(account, "no_workspace")
+	case "temporarily_unavailable":
+		return mapBool(account, "temporarily_unavailable")
+	case "personal_configured":
+		return mapString(account, "personal_instructions_check_error") == "" && mapBool(account, "personal_instructions_configured")
+	case "personal_missing":
+		_, checked := account["personal_instructions_configured"]
+		return checked && mapString(account, "personal_instructions_check_error") == "" && !mapBool(account, "personal_instructions_configured")
+	case "personal_failed":
+		return mapString(account, "personal_instructions_check_error") != ""
+	case "personal_unchecked":
+		_, checked := account["personal_instructions_configured"]
+		return !checked && mapString(account, "personal_instructions_check_error") == ""
+	default:
+		return true
+	}
+}
+
 func matchAccountQuery(a map[string]interface{}, qLower string) bool {
 	for _, k := range []string{"email", "name", "plan", "space"} {
 		if s, ok := a[k].(string); ok && s != "" {

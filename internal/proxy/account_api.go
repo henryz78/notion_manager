@@ -614,6 +614,48 @@ func accountsMatchingEmails(pool *AccountPool, requested []string) ([]*Account, 
 	return matched, missing
 }
 
+type parallelAccountResult struct {
+	email string
+	err   error
+}
+
+func runAccountsParallel(accounts []*Account, concurrency int, worker func(*Account) error) []parallelAccountResult {
+	if len(accounts) == 0 || worker == nil {
+		return nil
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > 20 {
+		concurrency = 20
+	}
+	jobs := make(chan *Account)
+	results := make(chan parallelAccountResult, len(accounts))
+	var workers sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for account := range jobs {
+				results <- parallelAccountResult{email: account.UserEmail, err: worker(account)}
+			}
+		}()
+	}
+	go func() {
+		for _, account := range accounts {
+			jobs <- account
+		}
+		close(jobs)
+		workers.Wait()
+		close(results)
+	}()
+	out := make([]parallelAccountResult, 0, len(accounts))
+	for result := range results {
+		out = append(out, result)
+	}
+	return out
+}
+
 // HandleBulkAccountAction applies an operator action to explicitly selected
 // accounts. Manual disable is persisted and only changes routing eligibility;
 // it does not overwrite quota, auth, or personal-instructions state.
@@ -666,20 +708,27 @@ func HandleBulkAccountAction(pool *AccountPool, accountsDir string, auth *Dashbo
 
 		switch body.Action {
 		case "delete":
-			for _, acc := range accounts {
-				if err := deleteAccountByEmail(pool, accountsDir, acc.UserEmail); err != nil {
-					result.Failed[acc.UserEmail] = err.Error()
+			for _, item := range runAccountsParallel(accounts, 10, func(acc *Account) error {
+				return deleteAccountByEmail(pool, accountsDir, acc.UserEmail)
+			}) {
+				if item.err != nil {
+					result.Failed[item.email] = item.err.Error()
 					continue
 				}
 				result.Succeeded++
 			}
 		case "disable", "enable":
 			disabled := body.Action == "disable"
-			for _, acc := range accounts {
+			for _, item := range runAccountsParallel(accounts, 10, func(acc *Account) error {
 				previous := acc.setManuallyDisabled(disabled)
 				if err := saveAccountFile(accountsDir, acc); err != nil {
 					acc.setManuallyDisabled(previous)
-					result.Failed[acc.UserEmail] = err.Error()
+					return err
+				}
+				return nil
+			}) {
+				if item.err != nil {
+					result.Failed[item.email] = item.err.Error()
 					continue
 				}
 				result.Succeeded++
@@ -734,14 +783,21 @@ func deleteMissingPersonalInstructions(pool *AccountPool, accountsDir string, fe
 		Failed:  make(map[string]string),
 		Check:   check,
 	}
-	for _, email := range candidates {
-		if err := deleteAccountByEmail(pool, accountsDir, email); err != nil {
-			result.Failed[email] = err.Error()
+	accounts, missing := accountsMatchingEmails(pool, candidates)
+	for _, email := range missing {
+		result.Failed[email] = "account not found"
+	}
+	for _, item := range runAccountsParallel(accounts, 10, func(acc *Account) error {
+		return deleteAccountByEmail(pool, accountsDir, acc.UserEmail)
+	}) {
+		if item.err != nil {
+			result.Failed[item.email] = item.err.Error()
 			continue
 		}
-		result.Emails = append(result.Emails, email)
+		result.Emails = append(result.Emails, item.email)
 		result.Deleted++
 	}
+	sort.Strings(result.Emails)
 	return result
 }
 
@@ -884,29 +940,30 @@ func HandleDeleteExhaustedComplimentaryAccounts(pool *AccountPool, accountsDir s
 		emails := exhaustedComplimentaryEmails(pool)
 		deleted := make([]string, 0, len(emails))
 		failed := make(map[string]string)
-		for _, email := range emails {
-			// Re-check immediately before each irreversible deletion in case a
-			// quota refresh completed after the initial candidate snapshot.
-			var stillExhausted bool
-			pool.mu.RLock()
-			for _, acc := range pool.accounts {
-				if strings.EqualFold(acc.UserEmail, email) {
-					stillExhausted = isExhaustedComplimentaryAccount(acc)
-					break
-				}
-			}
-			pool.mu.RUnlock()
-			if !stillExhausted {
-				continue
-			}
-
-			if err := deleteAccountByEmail(pool, accountsDir, email); err != nil {
-				failed[email] = err.Error()
-				log.Printf("[delete-exhausted-trials] failed %s: %v", email, err)
-				continue
-			}
-			deleted = append(deleted, email)
+		accounts, missing := accountsMatchingEmails(pool, emails)
+		for _, email := range missing {
+			failed[email] = "account not found"
 		}
+		for _, item := range runAccountsParallel(accounts, 10, func(acc *Account) error {
+			// Re-check inside the worker in case a quota refresh recovered the
+			// account after the initial candidate snapshot.
+			if !isExhaustedComplimentaryAccount(acc) {
+				return nil
+			}
+			return deleteAccountByEmail(pool, accountsDir, acc.UserEmail)
+		}) {
+			if item.err != nil {
+				failed[item.email] = item.err.Error()
+				log.Printf("[delete-exhausted-trials] failed %s: %v", item.email, item.err)
+				continue
+			}
+			// A recovered account returns nil and stays in the pool; count only
+			// accounts that actually disappeared.
+			if _, remaining := accountsMatchingEmails(pool, []string{item.email}); len(remaining) == 1 {
+				deleted = append(deleted, item.email)
+			}
+		}
+		sort.Strings(deleted)
 
 		log.Printf("[delete-exhausted-trials] deleted=%d failed=%d", len(deleted), len(failed))
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{

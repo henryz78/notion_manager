@@ -1,6 +1,9 @@
 package proxy
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 )
@@ -85,6 +88,61 @@ func TestFilterAccountDetailsMatchesEmailNamePlanSpace(t *testing.T) {
 				t.Fatalf("filter %q: got=%v want=%v", tc.query, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestFilterAccountDetailsByStatus(t *testing.T) {
+	accounts := []map[string]interface{}{
+		account("Available", "available@example.com", map[string]interface{}{"personal_instructions_configured": true}),
+		account("Disabled", "disabled@example.com", map[string]interface{}{"disabled": true}),
+		account("Missing", "missing@example.com", map[string]interface{}{"personal_instructions_configured": false}),
+		account("Cookie", "cookie@example.com", map[string]interface{}{"auth_invalid": true}),
+	}
+	cases := map[string][]string{
+		"available":           {"Available", "Missing"},
+		"disabled":            {"Disabled"},
+		"auth_invalid":        {"Cookie"},
+		"personal_configured": {"Available"},
+		"personal_missing":    {"Missing"},
+		"personal_unchecked":  {"Disabled", "Cookie"},
+	}
+	for status, want := range cases {
+		filtered := filterAccountDetailsByStatus(accounts, status)
+		got := make([]string, 0, len(filtered))
+		for _, item := range filtered {
+			got = append(got, mapString(item, "name"))
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("status %s: got=%v want=%v", status, got, want)
+		}
+	}
+}
+
+func TestAdminAccountSelectionReturnsAllFilteredEmails(t *testing.T) {
+	configured := true
+	missing := false
+	pool := NewAccountPool()
+	pool.accounts = []*Account{
+		{UserName: "Alpha", UserEmail: "alpha@example.com", PersonalInstructionsConfigured: &configured},
+		{UserName: "Beta", UserEmail: "beta@example.com", PersonalInstructionsConfigured: &missing},
+		{UserName: "Other", UserEmail: "other@example.com", PersonalInstructionsConfigured: &missing},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/admin/accounts/selection?q=example&status=personal_missing", nil)
+	rec := httptest.NewRecorder()
+	HandleAdminAccountSelection(pool, NewDashboardAuth("", "")).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Total  int      `json:"total"`
+		Emails []string `json:"emails"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := []string{"beta@example.com", "other@example.com"}
+	if response.Total != 2 || !reflect.DeepEqual(response.Emails, want) {
+		t.Fatalf("response=%+v want=%v", response, want)
 	}
 }
 

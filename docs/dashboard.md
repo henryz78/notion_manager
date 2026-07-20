@@ -42,18 +42,21 @@ version is also available in the `X-Notion-Manager-Version` response header on
 - Discovered models, last-checked timestamp
 - Default Notion Agent personal-instructions status: configured, missing, failed, or not checked
 - Per-row actions: **Open proxy**, **Copy token**, **Disable/enable account**, **Delete account**
+- Filter by available, disabled, exhausted, invalid-cookie, no-workspace, temporarily unavailable, or personal-instructions state. `GET /admin/accounts/selection` returns only emails matching the current search/filter for true select-all across every page; it never returns tokens
 - Account checkboxes support cross-page selection. Bulk actions: copy emails, check selected personal instructions, disable, enable, delete, and clear selection
-- Bulk personal-instructions check through `POST /admin/accounts/check-personal-instructions`. The probe reads only the workspace setting that indicates whether a page is bound; it never loads or stores the page ID or instruction text
-- `POST /admin/accounts/delete-missing-personal-instructions` re-checks the full pool and deletes only accounts currently confirmed as missing instructions. Failed probes are never treated as missing
+- Checks, enable/disable, deletion, missing-instructions cleanup, and exhausted-trial cleanup use `/admin/account-batch-jobs`. Jobs run with 10 workers by default (maximum 20), expose live progress, survive browser refresh, and allow retrying failed items
+- The personal-instructions probe reads only whether a page is bound; it never loads or stores the page ID or instruction text. Missing-instructions cleanup re-checks each account and retains probe failures
 - Bulk cleanup for Free / Plus accounts explicitly disabled after exhausting complimentary AI responses. It requires confirmation and excludes Business / Enterprise, temporary failures, invalid cookies, and no-workspace accounts
 
-Manual disable uses `POST /admin/accounts/bulk` and persists `disabled: true`
-in the matching account JSON. The account remains visible and can still be
-re-enabled, but every API/proxy account picker skips it while disabled.
+Manual disable persists `disabled: true` in the matching account JSON. The
+account remains visible and can still be re-enabled, but every API/proxy
+account picker skips it while disabled.
 
-The list is fetched from `GET /admin/accounts?q=&page=&page_size=`. The Go server applies the same sort the dashboard previously did client-side, then filters and paginates, so big pools (1k+ accounts) stay responsive. The response includes a pool-wide `summary` block (premium count, total remaining, etc.) for the headline cards regardless of pagination.
+The latest 20 batch-job snapshots are stored in `accounts/.account_batch_jobs.json`. Completed history remains after a Railway restart. A task running at the instant of a service restart is marked interrupted, and its unfinished accounts can be retried. Add Account accepts one token per line and validates up to five concurrently.
 
-When `q`/`page`/`page_size` are all absent, the response keeps its historical shape (full unsorted list) so older scripts and curl pipelines stay happy.
+The list is fetched from `GET /admin/accounts?q=&status=&page=&page_size=`. The Go server filters by query/status, sorts by health, then paginates, so big pools (1k+ accounts) stay responsive. The response includes a pool-wide `summary` block (premium count, total remaining, etc.) for the headline cards regardless of pagination.
+
+When `q`/`status`/`page`/`page_size` are all absent, the response keeps its historical shape (full unsorted list) so older scripts and curl pipelines stay happy.
 
 ## Headline cards
 

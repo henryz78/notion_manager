@@ -48,7 +48,7 @@ func apiKeyAuthMiddleware(apiKey string, next http.Handler) http.Handler {
 	})
 }
 
-func newMux(pool *proxy.AccountPool, accountsDir string, apiKey string, dashAuth *proxy.DashboardAuth, usageStats *proxy.UsageStats, requestHistory *proxy.RequestHistoryStore, regDeps *proxy.RegisterJobsDeps) *http.ServeMux {
+func newMux(pool *proxy.AccountPool, accountsDir string, apiKey string, dashAuth *proxy.DashboardAuth, usageStats *proxy.UsageStats, requestHistory *proxy.RequestHistoryStore, regDeps *proxy.RegisterJobsDeps, batchManager *proxy.AccountBatchManager) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// Anthropic + OpenAI-compatible API endpoints
@@ -63,12 +63,15 @@ func newMux(pool *proxy.AccountPool, accountsDir string, apiKey string, dashAuth
 
 	// Admin API endpoints
 	mux.HandleFunc("/admin/accounts", proxy.HandleAdminAccounts(pool, dashAuth))
+	mux.HandleFunc("/admin/accounts/selection", proxy.HandleAdminAccountSelection(pool, dashAuth))
 	mux.HandleFunc("/admin/accounts/add", proxy.HandleAddAccount(pool, accountsDir, dashAuth))
 	mux.HandleFunc("/admin/accounts/delete", proxy.HandleDeleteAccount(pool, accountsDir, dashAuth))
 	mux.HandleFunc("/admin/accounts/bulk", proxy.HandleBulkAccountAction(pool, accountsDir, dashAuth))
 	mux.HandleFunc("/admin/accounts/check-personal-instructions", proxy.HandleCheckPersonalInstructions(pool, accountsDir, dashAuth))
 	mux.HandleFunc("/admin/accounts/delete-missing-personal-instructions", proxy.HandleDeleteMissingPersonalInstructions(pool, accountsDir, dashAuth))
 	mux.HandleFunc("/admin/accounts/delete-exhausted-complimentary", proxy.HandleDeleteExhaustedComplimentaryAccounts(pool, accountsDir, dashAuth))
+	mux.HandleFunc("/admin/account-batch-jobs", proxy.HandleAccountBatchJobs(batchManager, dashAuth))
+	mux.HandleFunc("/admin/account-batch-jobs/", proxy.HandleAccountBatchJobRouter(batchManager, dashAuth))
 	mux.HandleFunc("/admin/models", proxy.HandleAdminModels(pool, dashAuth))
 	mux.HandleFunc("/admin/refresh", proxy.HandleAdminRefresh(pool, accountsDir, dashAuth))
 	mux.HandleFunc("/admin/settings", proxy.HandleAdminSettings("config.yaml", dashAuth))
@@ -203,6 +206,12 @@ func main() {
 		Providers:   registry,
 		Auth:        dashAuth,
 	}
+	batchJobsPath := filepath.Join(accountsDir, ".account_batch_jobs.json")
+	batchManager, err := proxy.NewAccountBatchManager(pool, accountsDir, batchJobsPath)
+	if err != nil {
+		log.Printf("[account-batch] load %s: %v (starting with empty history)", batchJobsPath, err)
+		batchManager, _ = proxy.NewAccountBatchManager(pool, accountsDir, "")
+	}
 
 	cors := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -217,7 +226,7 @@ func main() {
 		})
 	}
 
-	mux := newMux(pool, accountsDir, apiKey, dashAuth, usageStats, requestHistory, regDeps)
+	mux := newMux(pool, accountsDir, apiKey, dashAuth, usageStats, requestHistory, regDeps, batchManager)
 
 	log.Printf("=== notion-manager ===")
 	log.Printf("Listening on :%s", port)

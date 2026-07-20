@@ -41,18 +41,19 @@ Dashboard 顶部拆成两个页面：
 - 已发现模型、最近一次检查时间
 - 官网默认 Notion Agent 个人指令状态：已设置、未设置、检测失败或未检测
 - 单行操作：**打开代理**、**复制 token**、**禁用/启用账号**、**删除账号**
+- 可按可用、禁用、额度用完、Cookie 失效、无工作区、临时跳过及个人指令状态筛选。`GET /admin/accounts/selection` 只返回当前搜索和筛选命中的邮箱，用于“一键选择全部结果”，不会返回 token
 - 账号卡片可勾选并跨页保留选择。批量操作包括：复制邮箱、检测所选个人指令、禁用、启用、删除和清空选择
-- 批量个人指令检测使用 `POST /admin/accounts/check-personal-instructions`。检测只读取“当前工作区是否绑定个人指令页面”这个状态，不加载、不保存页面 ID 和指令正文
-- `POST /admin/accounts/delete-missing-personal-instructions` 会先重新检测整个账号池，只删除当前确认未设置个人指令的账号；检测失败不会被当成未设置
+- 检测个人指令、禁用、启用、删除、删除未设置个人指令账号和清理已用完试用账号统一使用 `/admin/account-batch-jobs` 后台任务。默认并发 10，最大 20；页面显示实时进度与失败原因，刷新后继续显示，失败项可单独重试
+- 个人指令检测只读取“当前工作区是否绑定个人指令页面”这个状态，不加载、不保存页面 ID 和指令正文。删除未设置个人指令账号会逐个重新确认；检测失败不会被当成未设置
 - 批量操作：清理所有已明确因 complimentary AI responses 用完而禁用的 Free / Plus 账号。执行前会二次确认，不会删除 Business / Enterprise、临时故障、Cookie 失效或无工作区账号
 
-手动禁用通过 `POST /admin/accounts/bulk` 操作，并把 `disabled: true`
-持久化到对应账号 JSON。账号仍会显示，也能重新启用；禁用期间不会参与
-API 请求或代理选号。
+手动禁用会把 `disabled: true` 持久化到对应账号 JSON。账号仍会显示，也能重新启用；禁用期间不会参与 API 请求或代理选号。
 
-列表来源于 `GET /admin/accounts?q=&page=&page_size=`。Server 端先按 Dashboard 旧的客户端排序规则排序，再按关键字过滤、再分页，所以 1k+ 大池也不卡。响应里始终带一份池级 `summary`（付费账号数、总剩余等），保证 headline 卡片不被分页影响。
+最近 20 条批量任务记录保存在 `accounts/.account_batch_jobs.json`。Railway 休眠后重新启动时，已完成记录仍在；重启瞬间尚未结束的任务会标记为中断，未完成账号可通过“重试失败项”继续。添加账号也支持一行一个 token，前端默认同时验证 5 个。
 
-当 `q`/`page`/`page_size` 都缺省时，响应保持**历史完整列表形态**，老脚本 / curl 流水线照旧能用。
+列表来源于 `GET /admin/accounts?q=&status=&page=&page_size=`。Server 端按关键字和状态过滤、健康度排序后再分页，所以 1k+ 大池也不卡。响应里始终带一份池级 `summary`（付费账号数、总剩余等），保证 headline 卡片不被分页影响。
+
+当 `q`/`status`/`page`/`page_size` 都缺省时，响应保持**历史完整列表形态**，老脚本 / curl 流水线照旧能用。
 
 ## Headline 卡片
 

@@ -122,6 +122,7 @@ func friendlyModelNameByInternalID(id string) string {
 //
 // Query parameters (all optional, dashboard-friendly):
 //   - q          : case-insensitive substring filter on email/name/plan/space.
+//   - status     : operator status filter (available/disabled/exhausted/etc.).
 //   - page       : 0-based page index. Defaults to 0.
 //   - page_size  : max entries to return; clamped to [1, maxAccountsPageSize].
 //
@@ -142,9 +143,10 @@ func HandleAdminAccounts(pool *AccountPool, auth *DashboardAuth) http.HandlerFun
 		}
 
 		q := strings.TrimSpace(r.URL.Query().Get("q"))
+		status := strings.TrimSpace(r.URL.Query().Get("status"))
 		pageStr := r.URL.Query().Get("page")
 		sizeStr := r.URL.Query().Get("page_size")
-		paginated := pageStr != "" || sizeStr != "" || q != ""
+		paginated := pageStr != "" || sizeStr != "" || q != "" || status != ""
 
 		all := pool.GetAccountDetails()
 		resp := map[string]interface{}{
@@ -164,6 +166,7 @@ func HandleAdminAccounts(pool *AccountPool, auth *DashboardAuth) http.HandlerFun
 		}
 
 		filtered := filterAccountDetails(all, q)
+		filtered = filterAccountDetailsByStatus(filtered, status)
 		sortAccountDetails(filtered)
 
 		page, _ := strconv.Atoi(pageStr)
@@ -183,6 +186,36 @@ func HandleAdminAccounts(pool *AccountPool, auth *DashboardAuth) http.HandlerFun
 		resp["page_size"] = size
 		resp["filtered_total"] = len(filtered)
 		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// HandleAdminAccountSelection returns only matching account emails so the
+// dashboard can select every filtered result without downloading tokens,
+// models, quota payloads, or walking through every page.
+func HandleAdminAccountSelection(pool *AccountPool, auth *DashboardAuth) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodGet {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		if auth.HasAdminPassword() && !auth.ValidateSession(r) {
+			http.Error(w, `{"error":"unauthorized, dashboard login required"}`, http.StatusUnauthorized)
+			return
+		}
+		accounts := filterAccountDetails(pool.GetAccountDetails(), r.URL.Query().Get("q"))
+		accounts = filterAccountDetailsByStatus(accounts, r.URL.Query().Get("status"))
+		sortAccountDetails(accounts)
+		emails := make([]string, 0, len(accounts))
+		for _, account := range accounts {
+			if email := strings.TrimSpace(mapString(account, "email")); email != "" {
+				emails = append(emails, email)
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"total":  len(emails),
+			"emails": emails,
+		})
 	}
 }
 

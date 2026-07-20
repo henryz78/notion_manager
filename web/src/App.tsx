@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import type { DashboardData, AccountInfo, AccountSummary, RefreshStatus, TokenStats } from './types'
-import { fetchDashboardData, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats, deleteExhaustedTrials, checkPersonalInstructions, bulkAccountAction, deleteMissingPersonalInstructions } from './api'
-import type { SearchSettings, BulkAccountAction } from './api'
+import { fetchDashboardData, fetchAccountSelection, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats, startAccountBatchJob, getAccountBatchJob, listAccountBatchJobs, retryAccountBatchJob } from './api'
+import type { SearchSettings, AccountStatusFilter, AccountBatchJob, AccountBatchJobAction } from './api'
 import { fmt, formatTokens, getQuotaStatusByUsage, getQuotaPct, avatarColor, avatarLetter, formatCheckedAt, formatTimestampMs, providerDisplay } from './utils'
 import { AccountMenu } from './components/AccountMenu'
 import { RegisterModal } from './components/RegisterModal'
@@ -134,38 +134,45 @@ function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSucces
     setProgress({ done: 0, total: candidates.length })
 
     let added = 0
-    for (let index = 0; index < candidates.length; index++) {
-      const item = candidates[index]
-      let row: AccountImportRow
-      try {
-        const res = await addAccount(item.token)
-        if (res.error || !res.account) {
+    let cursor = 0
+    let done = 0
+    const importConcurrency = Math.min(5, candidates.length)
+    const worker = async () => {
+      while (cursor < candidates.length) {
+        const item = candidates[cursor++]
+        let row: AccountImportRow
+        try {
+          const res = await addAccount(item.token)
+          if (res.error || !res.account) {
+            row = {
+              line: item.line,
+              status: 'error',
+              title: `第 ${item.line} 行导入失败`,
+              detail: res.error || '账号信息为空',
+            }
+          } else {
+            added++
+            row = {
+              line: item.line,
+              status: 'success',
+              title: res.account.email || res.account.name || `第 ${item.line} 行`,
+              detail: `${res.account.space || '未命名空间'} · ${res.account.plan_type || '未知套餐'}`,
+            }
+          }
+        } catch (err) {
           row = {
             line: item.line,
             status: 'error',
             title: `第 ${item.line} 行导入失败`,
-            detail: res.error || '账号信息为空',
-          }
-        } else {
-          added++
-          row = {
-            line: item.line,
-            status: 'success',
-            title: res.account.email || res.account.name || `第 ${item.line} 行`,
-            detail: `${res.account.space || '未命名空间'} · ${res.account.plan_type || '未知套餐'}`,
+            detail: err instanceof Error ? err.message : '请求失败',
           }
         }
-      } catch (err) {
-        row = {
-          line: item.line,
-          status: 'error',
-          title: `第 ${item.line} 行导入失败`,
-          detail: err instanceof Error ? err.message : '请求失败',
-        }
+        done++
+        setResults(current => [...current, row].sort((a, b) => a.line - b.line))
+        setProgress({ done, total: candidates.length })
       }
-      setResults(current => [...current, row].sort((a, b) => a.line - b.line))
-      setProgress({ done: index + 1, total: candidates.length })
     }
+    await Promise.all(Array.from({ length: importConcurrency }, () => worker()))
 
     if (added > 0) onSuccess()
     setLoading(false)
@@ -187,7 +194,7 @@ function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSucces
         </div>
 
         <div className="text-[12px] text-text-secondary mb-4 space-y-1.5">
-          <p>每行粘贴一个 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">token_v2</code>，系统会逐个验证并添加，单个 token 也照常支持。</p>
+          <p>每行粘贴一个 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">token_v2</code>，系统默认并行验证 5 个，单个 token 也照常支持。</p>
           <p className="text-text-muted">获取方式：打开 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">notion.so</code> → F12 → Application → Cookies → 复制 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">token_v2</code> 的值</p>
         </div>
 
@@ -792,6 +799,94 @@ function AccountCard({
   )
 }
 
+const accountBatchActionLabels: Record<AccountBatchJobAction, string> = {
+  check_personal_instructions: '检测官网个人指令',
+  disable: '批量禁用账号',
+  enable: '批量启用账号',
+  delete: '批量删除账号',
+  delete_missing_personal_instructions: '检测并删除未设置个人指令账号',
+  delete_exhausted: '清理已用完试用额度账号',
+}
+
+const accountStatusFilterOptions: Array<{ value: AccountStatusFilter; label: string }> = [
+  { value: 'all', label: '全部账号' },
+  { value: 'available', label: '可用账号' },
+  { value: 'disabled', label: '手动禁用' },
+  { value: 'exhausted', label: '额度用完' },
+  { value: 'auth_invalid', label: 'Cookie 失效' },
+  { value: 'no_workspace', label: '无工作区' },
+  { value: 'temporarily_unavailable', label: '临时跳过' },
+  { value: 'personal_configured', label: '个人指令已设置' },
+  { value: 'personal_missing', label: '个人指令未设置' },
+  { value: 'personal_failed', label: '个人指令检测失败' },
+  { value: 'personal_unchecked', label: '个人指令未检测' },
+]
+
+function AccountBatchProgress({
+  job,
+  retrying,
+  onRetry,
+  onClose,
+}: {
+  job: AccountBatchJob
+  retrying: boolean
+  onRetry: () => void
+  onClose: () => void
+}) {
+  const pct = job.total > 0 ? Math.min(100, Math.round((job.done / job.total) * 100)) : 0
+  const activeSteps = job.steps.filter(step => step.status === 'running').slice(0, 3)
+  const failedSteps = job.steps.filter(step => step.status === 'failed').slice(0, 3)
+  const isPersonal = job.action === 'check_personal_instructions' || job.action === 'delete_missing_personal_instructions'
+  return (
+    <div className="mb-4 rounded-lg border border-notion-blue/35 bg-notion-blue/[.07] p-3.5">
+      <div className="flex items-start gap-3 max-sm:flex-col">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[13px] font-semibold text-text-primary">{accountBatchActionLabels[job.action]}</span>
+            <span className={`text-[10px] px-1.5 py-0.5 rounded ${job.state === 'running' ? 'text-notion-blue bg-notion-blue/10' : job.failed > 0 ? 'text-warn bg-warn/10' : 'text-ok bg-ok/10'}`}>
+              {job.state === 'running' ? '并行处理中' : job.state === 'interrupted' ? '任务中断' : '已完成'}
+            </span>
+            <span className="text-[10px] text-text-muted">并发 {job.concurrency}</span>
+          </div>
+          <div className="mt-2 flex items-center gap-3 text-[11px] text-text-secondary flex-wrap">
+            <span>进度 <strong className="text-text-primary tabular-nums">{job.done} / {job.total}</strong></span>
+            <span className="text-ok">成功 {job.succeeded}</span>
+            {job.skipped > 0 && <span className="text-text-muted">保留 {job.skipped}</span>}
+            {job.failed > 0 && <span className="text-err">失败 {job.failed}</span>}
+            {isPersonal && <><span>已设置 {job.configured}</span><span>未设置 {job.missing}</span></>}
+          </div>
+          <div className="mt-2 h-1.5 bg-white/[.07] rounded-full overflow-hidden">
+            <div className="h-full bg-notion-blue rounded-full transition-all duration-300" style={{ width: `${pct}%` }} />
+          </div>
+          {activeSteps.length > 0 && (
+            <div className="mt-2 text-[10px] text-text-muted truncate">
+              正在处理：{activeSteps.map(step => step.email).join('、')}
+            </div>
+          )}
+          {job.state !== 'running' && failedSteps.length > 0 && (
+            <div className="mt-2 text-[10px] text-err space-y-0.5">
+              {failedSteps.map(step => <div key={step.email} className="truncate" title={step.message}>{step.email}：{step.message || '处理失败'}</div>)}
+              {job.failed > failedSteps.length && <div>另有 {job.failed - failedSteps.length} 个失败账号</div>}
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-2 shrink-0 max-sm:w-full max-sm:grid max-sm:grid-cols-2">
+          {job.state !== 'running' && job.failed > 0 && (
+            <button onClick={onRetry} disabled={retrying} className="px-3 py-1.5 bg-warn/10 hover:bg-warn/20 text-warn rounded-md text-[12px] cursor-pointer border border-warn/25 disabled:opacity-40">
+              {retrying ? '正在重试...' : `重试失败项（${job.failed}）`}
+            </button>
+          )}
+          {job.state !== 'running' && (
+            <button onClick={onClose} className="px-3 py-1.5 bg-bg-card hover:bg-bg-card-hover text-text-secondary rounded-md text-[12px] cursor-pointer border border-border">
+              关闭
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   const [authState, setAuthState] = useState<'checking' | 'login' | 'authenticated'>('checking')
   const [authRequired, setAuthRequired] = useState(false)
@@ -800,13 +895,13 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [quotaRefreshing, setQuotaRefreshing] = useState(false)
-  const [checkingPersonalInstructions, setCheckingPersonalInstructions] = useState(false)
-  const [deletingMissingPersonalInstructions, setDeletingMissingPersonalInstructions] = useState(false)
-  const [deletingExhaustedTrials, setDeletingExhaustedTrials] = useState(false)
-  const [bulkActionRunning, setBulkActionRunning] = useState<BulkAccountAction | null>(null)
+  const [batchStartingAction, setBatchStartingAction] = useState<AccountBatchJobAction | null>(null)
+  const [activeBatchJob, setActiveBatchJob] = useState<AccountBatchJob | null>(null)
+  const [selectingAllResults, setSelectingAllResults] = useState(false)
   const [selectedEmails, setSelectedEmails] = useState<Set<string>>(() => new Set())
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus | null>(null)
   const [query, setQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<AccountStatusFilter>('all')
   const [refreshTime, setRefreshTime] = useState('')
   const [page, setPage] = useState(0)
   const [settings, setSettings] = useState<SearchSettings | null>(null)
@@ -832,6 +927,7 @@ export default function App() {
   const [proxySaving, setProxySaving] = useState(false)
   const [promptModeSaving, setPromptModeSaving] = useState(false)
   const PAGE_SIZE = 20
+  const completedBatchJobsRef = useRef<Set<string>>(new Set())
 
   // Debounced query: typing in the search box shouldn't fire a request
   // on every keystroke; we wait 250ms after the user stops typing and
@@ -875,7 +971,7 @@ export default function App() {
   // `data.accounts` is already the visible page.
   const loadData = useCallback(async () => {
     try {
-      const d = await fetchDashboardData({ page, pageSize: PAGE_SIZE, query: debouncedQuery })
+      const d = await fetchDashboardData({ page, pageSize: PAGE_SIZE, query: debouncedQuery, status: statusFilter })
       setData(d)
       setError(null)
       setRefreshTime(new Date().toLocaleTimeString('zh-CN'))
@@ -887,7 +983,7 @@ export default function App() {
     } finally {
       setLoading(false)
     }
-  }, [page, debouncedQuery])
+  }, [page, debouncedQuery, statusFilter])
 
   useEffect(() => {
     if (authState === 'authenticated') loadData()
@@ -906,6 +1002,53 @@ export default function App() {
       .catch(() => {})
     fetchTokenStats().then(setTokenStats).catch(() => {})
   }, [authState])
+
+  // Restore the active account-batch task after a browser refresh. The server
+  // keeps the task and its step progress, so closing/reloading the page does
+  // not restart the work.
+  useEffect(() => {
+    if (authState !== 'authenticated') return
+    const storedID = window.localStorage.getItem('notion-manager-active-account-batch-job')
+    const restore = async () => {
+      try {
+        if (storedID) {
+          const job = await getAccountBatchJob(storedID)
+          setActiveBatchJob(job)
+          return
+        }
+        const jobs = await listAccountBatchJobs()
+        const running = jobs.find(job => job.state === 'running')
+        if (running) {
+          setActiveBatchJob(running)
+          window.localStorage.setItem('notion-manager-active-account-batch-job', running.id)
+        }
+      } catch {
+        window.localStorage.removeItem('notion-manager-active-account-batch-job')
+      }
+    }
+    restore()
+  }, [authState])
+
+  useEffect(() => {
+    if (!activeBatchJob || activeBatchJob.state !== 'running') return
+    const poll = async () => {
+      try {
+        setActiveBatchJob(await getAccountBatchJob(activeBatchJob.id))
+      } catch { /* next poll retries */ }
+    }
+    const interval = window.setInterval(poll, 800)
+    return () => window.clearInterval(interval)
+  }, [activeBatchJob?.id, activeBatchJob?.state])
+
+  useEffect(() => {
+    if (!activeBatchJob || activeBatchJob.state === 'running' || completedBatchJobsRef.current.has(activeBatchJob.id)) return
+    completedBatchJobsRef.current.add(activeBatchJob.id)
+    window.localStorage.removeItem('notion-manager-active-account-batch-job')
+    if (['delete', 'delete_missing_personal_instructions', 'delete_exhausted'].includes(activeBatchJob.action)) {
+      setSelectedEmails(new Set())
+    }
+    loadData()
+  }, [activeBatchJob, loadData])
 
   const handleLogout = async () => {
     await logout()
@@ -929,79 +1072,65 @@ export default function App() {
     setQuotaRefreshing(false)
   }
 
-  const handleCheckPersonalInstructions = async () => {
-    if (checkingPersonalInstructions) return
-    setCheckingPersonalInstructions(true)
+  const launchAccountBatch = async (action: AccountBatchJobAction, emails: string[]) => {
+    if (emails.length === 0 || batchStartingAction || activeBatchJob?.state === 'running') return
+    setBatchStartingAction(action)
     try {
-      const result = await checkPersonalInstructions()
-      await loadData()
-      window.alert(
-        `个人指令检测完成：共 ${result.total} 个账号\n\n已设置：${result.configured}\n未设置：${result.missing}\n检测失败：${result.failed}`,
-      )
+      const job = await startAccountBatchJob(action, emails, 10)
+      setActiveBatchJob(job)
+      window.localStorage.setItem('notion-manager-active-account-batch-job', job.id)
     } catch (e: any) {
-      window.alert(`个人指令检测失败：${e?.message || '请求失败'}`)
+      window.alert(`启动批量任务失败：${e?.message || '请求失败'}`)
     } finally {
-      setCheckingPersonalInstructions(false)
+      setBatchStartingAction(null)
     }
   }
 
+  const launchAllPoolBatch = async (action: AccountBatchJobAction) => {
+    try {
+      await launchAccountBatch(action, await fetchAccountSelection('', 'all'))
+    } catch (e: any) {
+      window.alert(`读取全部账号失败：${e?.message || '请求失败'}`)
+    }
+  }
+
+  const handleCheckPersonalInstructions = async () => {
+    if ((data?.total ?? 0) === 0) return
+    await launchAllPoolBatch('check_personal_instructions')
+  }
+
   const handleDeleteMissingPersonalInstructions = async () => {
-    if (deletingMissingPersonalInstructions || (data?.total ?? 0) === 0) return
+    if ((data?.total ?? 0) === 0 || activeBatchJob?.state === 'running') return
     const knownMissing = data?.summary?.personal_instructions_missing ?? 0
     const confirmed = window.confirm(
       `系统会先重新检测全部 ${data?.total ?? 0} 个账号，然后永久删除当前确实没有设置官网默认 Agent 个人指令的账号。\n\n上次检测显示未设置：${knownMissing} 个。\n检测失败的账号不会删除。\n\n确定继续吗？`,
     )
     if (!confirmed) return
-    setDeletingMissingPersonalInstructions(true)
-    try {
-      const result = await deleteMissingPersonalInstructions()
-      const failedCount = Object.keys(result.failed || {}).length
-      setSelectedEmails(new Set())
-      await loadData()
-      window.alert(
-        `清理完成：重新检测 ${result.checked} 个账号，发现未设置 ${result.matched} 个，已删除 ${result.deleted} 个${failedCount > 0 ? `，删除失败 ${failedCount} 个` : ''}。`,
-      )
-    } catch (e: any) {
-      window.alert(`删除未设置个人指令账号失败：${e?.message || '请求失败'}`)
-    } finally {
-      setDeletingMissingPersonalInstructions(false)
-    }
+    await launchAllPoolBatch('delete_missing_personal_instructions')
   }
 
-  const handleBulkSelected = async (action: BulkAccountAction) => {
+  const handleBulkSelected = async (action: Extract<AccountBatchJobAction, 'delete' | 'disable' | 'enable' | 'check_personal_instructions'>) => {
     const emails = Array.from(selectedEmails)
-    if (emails.length === 0 || bulkActionRunning) return
-    const labels: Record<BulkAccountAction, string> = {
-      delete: '永久删除',
-      disable: '禁用',
-      enable: '启用',
-      check_personal_instructions: '检测官网个人指令',
-    }
+    if (emails.length === 0) return
     if (action === 'delete') {
       const confirmed = window.confirm(
         `将永久删除选中的 ${emails.length} 个账号及其登录文件。\n\n此操作不可撤销，确定继续吗？`,
       )
       if (!confirmed) return
     }
-    setBulkActionRunning(action)
+    await launchAccountBatch(action, emails)
+  }
+
+  const handleSelectAllResults = async () => {
+    if (selectingAllResults) return
+    setSelectingAllResults(true)
     try {
-      const result = await bulkAccountAction(action, emails)
-      const failedCount = Object.keys(result.failed || {}).length
-      if (action === 'delete') setSelectedEmails(new Set())
-      await loadData()
-      if (action === 'check_personal_instructions' && result.check) {
-        window.alert(
-          `所选账号检测完成：已设置 ${result.check.configured}，未设置 ${result.check.missing}，检测失败 ${result.check.failed}${failedCount > result.check.failed ? `，另有 ${failedCount - result.check.failed} 个账号不存在` : ''}。`,
-        )
-      } else {
-        window.alert(
-          `${labels[action]}完成：成功 ${result.succeeded} 个${failedCount > 0 ? `，失败 ${failedCount} 个` : ''}。`,
-        )
-      }
+      const emails = await fetchAccountSelection(debouncedQuery, statusFilter)
+      setSelectedEmails(new Set(emails))
     } catch (e: any) {
-      window.alert(`${labels[action]}失败：${e?.message || '请求失败'}`)
+      window.alert(`选择全部结果失败：${e?.message || '请求失败'}`)
     } finally {
-      setBulkActionRunning(null)
+      setSelectingAllResults(false)
     }
   }
 
@@ -1016,26 +1145,35 @@ export default function App() {
     }
   }
 
+  const handleRetryActiveBatch = async () => {
+    if (!activeBatchJob || activeBatchJob.failed <= 0 || batchStartingAction) return
+    setBatchStartingAction(activeBatchJob.action)
+    try {
+      const job = await retryAccountBatchJob(activeBatchJob.id)
+      completedBatchJobsRef.current.delete(job.id)
+      setActiveBatchJob(job)
+      window.localStorage.setItem('notion-manager-active-account-batch-job', job.id)
+    } catch (e: any) {
+      window.alert(`重试失败项失败：${e?.message || '请求失败'}`)
+    } finally {
+      setBatchStartingAction(null)
+    }
+  }
+
+  const closeActiveBatch = () => {
+    if (activeBatchJob?.state === 'running') return
+    setActiveBatchJob(null)
+    window.localStorage.removeItem('notion-manager-active-account-batch-job')
+  }
+
   const handleDeleteExhaustedTrials = async () => {
     const count = data?.summary?.exhausted_trials ?? 0
-    if (count <= 0 || deletingExhaustedTrials) return
+    if (count <= 0 || activeBatchJob?.state === 'running') return
     const confirmed = window.confirm(
       `将永久删除 ${count} 个已用完 AI 试用额度的 Free/Plus 账号及其登录文件。\n\nBusiness、Enterprise、临时故障和 Cookie 失效账号不会删除。建议先刷新配额。\n\n确定继续吗？`,
     )
     if (!confirmed) return
-    setDeletingExhaustedTrials(true)
-    try {
-      const result = await deleteExhaustedTrials()
-      const failedCount = Object.keys(result.failed || {}).length
-      window.alert(failedCount > 0
-        ? `已删除 ${result.deleted} 个账号，${failedCount} 个删除失败。`
-        : `已删除 ${result.deleted} 个已用完试用额度的账号。`)
-      await loadData()
-    } catch (e: any) {
-      window.alert(`清理失败：${e?.message || '请求失败'}`)
-    } finally {
-      setDeletingExhaustedTrials(false)
-    }
+    await launchAllPoolBatch('delete_exhausted')
   }
 
   const toggleSetting = async (key: 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'debug_logging') => {
@@ -1105,6 +1243,7 @@ export default function App() {
   const pageEmails = paged.map(account => account.email)
   const selectedOnPage = pageEmails.filter(email => selectedEmails.has(email)).length
   const allPageSelected = pageEmails.length > 0 && selectedOnPage === pageEmails.length
+  const batchBusy = !!batchStartingAction || activeBatchJob?.state === 'running'
 
   const toggleSelectedEmail = (email: string) => {
     setSelectedEmails(current => {
@@ -1126,7 +1265,7 @@ export default function App() {
 
   // Reset page when the (debounced) query changes so the user always
   // lands on the first page of new search results.
-  useEffect(() => { setPage(0) }, [debouncedQuery])
+  useEffect(() => { setPage(0) }, [debouncedQuery, statusFilter])
   // Clamp `page` if the result set shrank below the current page.
   useEffect(() => {
     if (page > 0 && page >= totalPages) setPage(Math.max(0, totalPages - 1))
@@ -1305,29 +1444,29 @@ export default function App() {
           </button>
           <button
             onClick={handleCheckPersonalInstructions}
-            disabled={checkingPersonalInstructions || deletingMissingPersonalInstructions}
+            disabled={batchBusy || (data?.total ?? 0) === 0}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border disabled:opacity-50 disabled:cursor-not-allowed"
             title="只检测默认 Notion Agent 是否绑定了官网个人指令页面，不读取或保存指令正文"
           >
-            <IconActivity /> {checkingPersonalInstructions ? '正在检测个人指令...' : '检测官网个人指令'}
+            <IconActivity /> {batchStartingAction === 'check_personal_instructions' ? '正在启动...' : '检测官网个人指令'}
           </button>
           <button
             onClick={handleDeleteMissingPersonalInstructions}
-            disabled={deletingMissingPersonalInstructions || checkingPersonalInstructions || (data?.total ?? 0) === 0}
+            disabled={batchBusy || (data?.total ?? 0) === 0}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-err/10 hover:bg-err/20 text-err rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-err/25 disabled:opacity-40 disabled:cursor-not-allowed"
             title="会先重新检测全部账号，只永久删除当前确实没有设置官网默认 Agent 个人指令的账号"
           >
-            <IconTrash /> {deletingMissingPersonalInstructions
-              ? '正在检测并清理...'
+            <IconTrash /> {batchStartingAction === 'delete_missing_personal_instructions'
+              ? '正在启动...'
               : `删除未设置个人指令（${data?.summary?.personal_instructions_missing ?? 0}）`}
           </button>
           <button
             onClick={handleDeleteExhaustedTrials}
-            disabled={deletingExhaustedTrials || (data?.summary?.exhausted_trials ?? 0) <= 0 || !!refreshStatus?.refreshing}
+            disabled={batchBusy || (data?.summary?.exhausted_trials ?? 0) <= 0 || !!refreshStatus?.refreshing}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-err/10 hover:bg-err/20 text-err rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-err/25 disabled:opacity-40 disabled:cursor-not-allowed"
             title="仅永久删除因 complimentary AI responses 用完而禁用的 Free/Plus 账号；不会删除其他故障账号"
           >
-            <IconTrash /> {deletingExhaustedTrials ? '正在清理...' : `清理已用完试用账号（${data?.summary?.exhausted_trials ?? 0}）`}
+            <IconTrash /> {batchStartingAction === 'delete_exhausted' ? '正在启动...' : `清理已用完试用账号（${data?.summary?.exhausted_trials ?? 0}）`}
           </button>
           <button
             onClick={() => setShowAddModal(true)}
@@ -1557,14 +1696,40 @@ export default function App() {
         })()}
 
         {activePage === 'accounts' && <>
+        {activeBatchJob && (
+          <AccountBatchProgress
+            job={activeBatchJob}
+            retrying={!!batchStartingAction}
+            onRetry={handleRetryActiveBatch}
+            onClose={closeActiveBatch}
+          />
+        )}
+
         {/* Bulk selection toolbar */}
         <div className="mb-4 rounded-lg border border-border bg-bg-card px-3 py-2.5 flex items-center gap-2.5 flex-wrap max-sm:items-stretch">
+          <select
+            value={statusFilter}
+            onChange={event => setStatusFilter(event.target.value as AccountStatusFilter)}
+            disabled={batchBusy}
+            className="px-3 py-1.5 bg-bg-secondary text-text-primary rounded-md text-[12px] border border-border outline-none cursor-pointer disabled:opacity-40 max-sm:col-span-2"
+            title="按账号状态筛选"
+          >
+            {accountStatusFilterOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
           <button
             onClick={toggleCurrentPageSelection}
-            disabled={pageEmails.length === 0 || !!bulkActionRunning}
+            disabled={pageEmails.length === 0 || batchBusy}
             className="px-3 py-1.5 bg-bg-secondary hover:bg-bg-card-hover text-text-primary rounded-md text-[12px] font-medium cursor-pointer border border-border disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {allPageSelected ? '取消本页' : '本页全选'}
+          </button>
+          <button
+            onClick={handleSelectAllResults}
+            disabled={filteredTotal === 0 || batchBusy || selectingAllResults}
+            className="px-3 py-1.5 bg-notion-blue/10 hover:bg-notion-blue/20 text-notion-blue rounded-md text-[12px] font-medium cursor-pointer border border-notion-blue/25 disabled:opacity-40 disabled:cursor-not-allowed"
+            title="一次选择当前搜索文字和状态筛选下的全部账号，包括其他页面"
+          >
+            {selectingAllResults ? '正在全选...' : `全选全部结果（${filteredTotal}）`}
           </button>
           <span className="text-[12px] text-text-secondary mr-auto self-center">
             已选 <strong className="text-text-primary tabular-nums">{selectedEmails.size}</strong> 个
@@ -1573,42 +1738,42 @@ export default function App() {
           <div className="flex items-center gap-2 flex-wrap max-sm:grid max-sm:grid-cols-2 max-sm:w-full">
             <button
               onClick={copySelectedEmails}
-              disabled={selectedEmails.size === 0 || !!bulkActionRunning}
+              disabled={selectedEmails.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-bg-secondary hover:bg-bg-card-hover text-text-secondary hover:text-text-primary rounded-md text-[12px] cursor-pointer border border-border disabled:opacity-40 disabled:cursor-not-allowed"
             >
               复制邮箱
             </button>
             <button
               onClick={() => handleBulkSelected('check_personal_instructions')}
-              disabled={selectedEmails.size === 0 || !!bulkActionRunning || checkingPersonalInstructions || deletingMissingPersonalInstructions}
+              disabled={selectedEmails.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-bg-secondary hover:bg-bg-card-hover text-text-secondary hover:text-text-primary rounded-md text-[12px] cursor-pointer border border-border disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {bulkActionRunning === 'check_personal_instructions' ? '正在检测...' : '检测所选'}
+              {batchStartingAction === 'check_personal_instructions' ? '正在启动...' : '检测所选'}
             </button>
             <button
               onClick={() => handleBulkSelected('disable')}
-              disabled={selectedEmails.size === 0 || !!bulkActionRunning}
+              disabled={selectedEmails.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-warn/10 hover:bg-warn/20 text-warn rounded-md text-[12px] cursor-pointer border border-warn/25 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {bulkActionRunning === 'disable' ? '正在禁用...' : '禁用所选'}
+              {batchStartingAction === 'disable' ? '正在启动...' : '禁用所选'}
             </button>
             <button
               onClick={() => handleBulkSelected('enable')}
-              disabled={selectedEmails.size === 0 || !!bulkActionRunning}
+              disabled={selectedEmails.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-ok/10 hover:bg-ok/20 text-ok rounded-md text-[12px] cursor-pointer border border-ok/25 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {bulkActionRunning === 'enable' ? '正在启用...' : '启用所选'}
+              {batchStartingAction === 'enable' ? '正在启动...' : '启用所选'}
             </button>
             <button
               onClick={() => handleBulkSelected('delete')}
-              disabled={selectedEmails.size === 0 || !!bulkActionRunning}
+              disabled={selectedEmails.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-err/10 hover:bg-err/20 text-err rounded-md text-[12px] cursor-pointer border border-err/25 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {bulkActionRunning === 'delete' ? '正在删除...' : '删除所选'}
+              {batchStartingAction === 'delete' ? '正在启动...' : '删除所选'}
             </button>
             <button
               onClick={() => setSelectedEmails(new Set())}
-              disabled={selectedEmails.size === 0 || !!bulkActionRunning}
+              disabled={selectedEmails.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-transparent hover:bg-white/[.05] text-text-muted hover:text-text-primary rounded-md text-[12px] cursor-pointer border border-transparent disabled:opacity-40 disabled:cursor-not-allowed"
             >
               清空选择

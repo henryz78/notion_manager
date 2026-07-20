@@ -121,7 +121,7 @@ The settings page exposes three independent request-processing switches:
 The dashboard fetches from `GET /admin/accounts` with the dashboard
 session cookie (or `Authorization: Bearer <api-key>`).
 
-Pagination params (all optional): `?q=<substr>&page=<n>&page_size=<n>`.
+Pagination params (all optional): `?q=<substr>&status=<filter>&page=<n>&page_size=<n>`.
 - Without any params, the response is the full unsorted list (legacy
   shape; kept for scripts/integrations).
 - With any param the server filters by `q` (matches email/name/plan/space,
@@ -174,19 +174,26 @@ Response shape:
 }
 ```
 
-`POST /admin/accounts/check-personal-instructions` probes every account for
-the default Notion Agent personal-instructions binding. The UI displays
-configured / missing / failed / unchecked. Persist only the boolean result,
-timestamp, and optional error; never persist or render the page ID or
+Personal-instructions batch jobs probe the default Notion Agent binding. The UI
+displays configured / missing / failed / unchecked. Persist only the boolean
+result, timestamp, and optional error; never persist or render the page ID or
 instruction text.
 
-Account cards expose persistent cross-page selection. Selected accounts use
-`POST /admin/accounts/bulk` with `delete`, `disable`, `enable`, or
-`check_personal_instructions`. Manual disable persists as `disabled: true` and
-must be honored by every account picker. The separate
-`POST /admin/accounts/delete-missing-personal-instructions` action re-checks
-the complete pool before deleting confirmed-missing accounts; probe errors
-must remain untouched.
+Account cards expose persistent cross-page selection. `GET
+/admin/accounts/selection` returns the emails for the active query/status
+filter, enabling true select-all without exposing account tokens. Selected
+account work uses `/admin/account-batch-jobs`: check, disable, enable, delete,
+delete missing-personal-instructions, and exhausted-trial cleanup. Jobs default
+to concurrency 10 (server cap 20), report live step progress, preserve the last
+20 snapshots in `accounts/.account_batch_jobs.json`, restore after browser
+refresh, and allow failed-only retry. A service restart marks in-flight work as
+interrupted. Manual disable persists as `disabled: true` and must be honored by
+every account picker. Personal-instructions cleanup re-checks every candidate;
+probe errors must remain untouched.
+
+Add Account accepts one token per line and validates five accounts concurrently
+by default. Registration jobs and quota refresh retain their existing bounded
+worker pools.
 
 ### Proxy Navigation
 

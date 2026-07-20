@@ -79,7 +79,8 @@ func TestNewMux_RegistersModelsRoutes(t *testing.T) {
 	usageStats := proxy.InitUsageStats("")
 	requestHistory, _ := proxy.NewRequestHistoryStore("", 100)
 	regDeps := &proxy.RegisterJobsDeps{Pool: pool, AccountsDir: "", Auth: dashAuth}
-	mux := newMux(pool, "", "sk-test", dashAuth, usageStats, requestHistory, regDeps)
+	batchManager, _ := proxy.NewAccountBatchManager(pool, "", "")
+	mux := newMux(pool, "", "sk-test", dashAuth, usageStats, requestHistory, regDeps, batchManager)
 	handler := apiKeyAuthMiddleware("sk-test", mux)
 
 	for _, path := range []string{"/v1/models", "/models"} {
@@ -106,7 +107,8 @@ func TestNewMux_RegistersOpenAIRoutes(t *testing.T) {
 	usageStats := proxy.InitUsageStats("")
 	requestHistory, _ := proxy.NewRequestHistoryStore("", 100)
 	regDeps := &proxy.RegisterJobsDeps{Pool: pool, AccountsDir: "", Auth: dashAuth}
-	mux := newMux(pool, "", "sk-test", dashAuth, usageStats, requestHistory, regDeps)
+	batchManager, _ := proxy.NewAccountBatchManager(pool, "", "")
+	mux := newMux(pool, "", "sk-test", dashAuth, usageStats, requestHistory, regDeps, batchManager)
 	handler := apiKeyAuthMiddleware("sk-test", mux)
 
 	tests := []struct {

@@ -175,7 +175,21 @@ export interface AccountListParams {
   page?: number
   pageSize?: number
   query?: string
+  status?: AccountStatusFilter
 }
+
+export type AccountStatusFilter =
+  | 'all'
+  | 'available'
+  | 'disabled'
+  | 'exhausted'
+  | 'auth_invalid'
+  | 'no_workspace'
+  | 'temporarily_unavailable'
+  | 'personal_configured'
+  | 'personal_missing'
+  | 'personal_failed'
+  | 'personal_unchecked'
 
 export async function fetchDashboardData(params: AccountListParams = {}): Promise<DashboardData> {
   // Uses dashboard session cookie for auth (not API key).
@@ -185,6 +199,7 @@ export async function fetchDashboardData(params: AccountListParams = {}): Promis
   if (params.page !== undefined) sp.set('page', String(params.page))
   if (params.pageSize !== undefined) sp.set('page_size', String(params.pageSize))
   if (params.query && params.query.trim()) sp.set('q', params.query.trim())
+  if (params.status && params.status !== 'all') sp.set('status', params.status)
   const qs = sp.toString()
   const url = qs ? `/admin/accounts?${qs}` : '/admin/accounts'
   const resp = await fetch(url)
@@ -203,6 +218,16 @@ export async function fetchTokenStats(): Promise<TokenStats> {
   const resp = await fetch('/admin/stats')
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
   return resp.json()
+}
+
+export async function fetchAccountSelection(query = '', status: AccountStatusFilter = 'all'): Promise<string[]> {
+  const sp = new URLSearchParams()
+  if (query.trim()) sp.set('q', query.trim())
+  if (status !== 'all') sp.set('status', status)
+  const resp = await fetch(`/admin/accounts/selection?${sp.toString()}`, { credentials: 'same-origin' })
+  const data = await readJson<{ emails: string[] }>(resp, '全选账号接口返回了无效响应')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return data.emails || []
 }
 
 export interface RequestHistoryParams {
@@ -346,6 +371,76 @@ export async function deleteMissingPersonalInstructions(): Promise<DeleteMissing
     credentials: 'same-origin',
   })
   const data = await readJson<DeleteMissingPersonalInstructionsResult>(resp, '删除未设置个人指令账号时返回了无效响应')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return data
+}
+
+export type AccountBatchJobAction =
+  | 'check_personal_instructions'
+  | 'disable'
+  | 'enable'
+  | 'delete'
+  | 'delete_missing_personal_instructions'
+  | 'delete_exhausted'
+
+export interface AccountBatchJobStep {
+  email: string
+  status: 'pending' | 'running' | 'success' | 'failed' | 'skipped'
+  message?: string
+  configured?: boolean
+}
+
+export interface AccountBatchJob {
+  id: string
+  action: AccountBatchJobAction
+  state: 'running' | 'done' | 'interrupted'
+  created_at: string
+  ended_at?: string
+  concurrency: number
+  total: number
+  done: number
+  succeeded: number
+  failed: number
+  skipped: number
+  configured: number
+  missing: number
+  message?: string
+  steps: AccountBatchJobStep[]
+}
+
+export async function startAccountBatchJob(action: AccountBatchJobAction, emails: string[], concurrency = 10): Promise<AccountBatchJob> {
+  const resp = await fetch('/admin/account-batch-jobs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify({ action, emails, concurrency }),
+  })
+  const data = await readJson<AccountBatchJob>(resp, '启动批量任务时返回了无效响应')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return data
+}
+
+export async function getAccountBatchJob(id: string): Promise<AccountBatchJob> {
+  const resp = await fetch(`/admin/account-batch-jobs/${encodeURIComponent(id)}`, { credentials: 'same-origin' })
+  const data = await readJson<AccountBatchJob>(resp, '批量任务状态接口返回了无效响应')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return data
+}
+
+export async function listAccountBatchJobs(): Promise<AccountBatchJob[]> {
+  const resp = await fetch('/admin/account-batch-jobs', { credentials: 'same-origin' })
+  const data = await readJson<{ jobs: AccountBatchJob[] }>(resp, '批量任务列表接口返回了无效响应')
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return data.jobs || []
+}
+
+export async function retryAccountBatchJob(id: string): Promise<AccountBatchJob> {
+  const resp = await fetch(`/admin/account-batch-jobs/${encodeURIComponent(id)}/retry`, {
+    method: 'POST',
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+  })
+  const data = await readJson<AccountBatchJob>(resp, '重试批量任务时返回了无效响应')
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
   return data
 }
