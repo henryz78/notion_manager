@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback } from 'react'
 import type { ProviderInfo, RegisterStep } from '../types'
 import { fetchSettings, listProviders, startRegisterJob } from '../api'
 import { useJobStream } from '../hooks/useJobStream'
+import { useT } from '../i18n'
 import {
   IconAlert,
   IconCheck,
@@ -19,8 +20,7 @@ interface Props {
   onJobFinished: () => void // parent should refresh the account list
 }
 
-const MS_PLACEHOLDER = `每行一个账号，使用四个连字符分隔字段：
-email----password----client_id----refresh_token
+const MS_PLACEHOLDER = `email----password----client_id----refresh_token
 
 example@hotmail.com----P@ssw0rd----abcd-1234----0.AYI...`
 
@@ -33,6 +33,7 @@ const FUTURE_PROVIDERS: ProviderInfo[] = [
 ]
 
 export function RegisterModal({ open, onClose, onJobFinished }: Props) {
+  const { t } = useT()
   const [input, setInput] = useState('')
   const [concurrency, setConcurrency] = useState(1)
   const [proxy, setProxy] = useState('')
@@ -118,16 +119,16 @@ export function RegisterModal({ open, onClose, onJobFinished }: Props) {
   const handleSubmit = async () => {
     setSubmitError(null)
     if (!activeProvider) {
-      setSubmitError('未找到可用的注册渠道')
+      setSubmitError(t('common.error'))
       return
     }
     if (!input.trim()) {
-      setSubmitError('请粘贴至少一行账号')
+      setSubmitError(t('registerModal.credentialsLabel'))
       return
     }
     const trimmedProxy = proxy.trim()
     if (trimmedProxy && !/^(https?|socks5h?):\/\//i.test(trimmedProxy)) {
-      setSubmitError('代理 URL 必须以 http://、https://、socks5:// 或 socks5h:// 开头')
+      setSubmitError('Proxy URL must start with http://, https://, socks5://, or socks5h://')
       return
     }
     setSubmitting(true)
@@ -135,7 +136,7 @@ export function RegisterModal({ open, onClose, onJobFinished }: Props) {
       const resp = await startRegisterJob(activeProvider.id, input, concurrency, trimmedProxy || undefined)
       setJobId(resp.job_id)
     } catch (e: any) {
-      setSubmitError(e?.message ?? '提交失败')
+      setSubmitError(e?.message ?? t('common.error'))
     } finally {
       setSubmitting(false)
     }
@@ -156,12 +157,12 @@ export function RegisterModal({ open, onClose, onJobFinished }: Props) {
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-border max-sm:px-3">
           <div className="flex items-center gap-2 text-text-primary">
             <IconUserPlus size={16} />
-            <span className="text-[14px] font-semibold tracking-tight">批量注册账号</span>
+            <span className="text-[14px] font-semibold tracking-tight">{t('registerModal.title')}</span>
           </div>
           <button
             onClick={onClose}
             className="text-text-secondary hover:text-text-primary bg-transparent border-none cursor-pointer p-1 flex items-center"
-            title="关闭"
+            title={t('common.close')}
           >
             <IconClose size={16} />
           </button>
@@ -197,13 +198,13 @@ export function RegisterModal({ open, onClose, onJobFinished }: Props) {
         <div className="flex items-center justify-between gap-2 px-5 py-3 border-t border-border bg-bg-secondary max-sm:px-3">
           {!job ? (
             <>
-              <span className="text-[11px] text-text-muted max-sm:hidden">关闭模态框不会取消已提交的任务，可在「历史任务」中查看。</span>
+              <span className="text-[11px] text-text-muted max-sm:hidden">{t('registerModal.subtitle')}</span>
               <div className="flex gap-2">
                 <button
                   onClick={onClose}
                   className="px-3 py-1.5 bg-transparent text-text-secondary hover:text-text-primary rounded-md text-[13px] cursor-pointer border border-border"
                 >
-                  取消
+                  {t('common.cancel')}
                 </button>
                 <button
                   onClick={handleSubmit}
@@ -211,20 +212,20 @@ export function RegisterModal({ open, onClose, onJobFinished }: Props) {
                   className="inline-flex items-center gap-1.5 px-4 py-1.5 bg-white hover:bg-white/90 text-[#111] rounded-md text-[13px] font-medium cursor-pointer transition-colors border-none disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {submitting ? <IconSpinner size={13} className="animate-spin" /> : <IconPlay size={13} />}
-                  开始注册
+                  {submitting ? t('registerModal.btnRegistering') : t('registerModal.btnRegister')}
                 </button>
               </div>
             </>
           ) : (
             <>
               <span className="text-[11px] text-text-muted tabular-nums">
-                {job.state === 'running' ? '后台运行中…' : '已完成'}
+                {job.state === 'running' ? t('common.processing') : t('registerModal.stepSuccess')}
               </span>
               <button
                 onClick={onClose}
                 className="px-4 py-1.5 bg-white hover:bg-white/90 text-[#111] rounded-md text-[13px] font-medium cursor-pointer border-none"
               >
-                {job.state === 'running' ? '后台运行并关闭' : '完成'}
+                {t('common.close')}
               </button>
             </>
           )}
@@ -296,6 +297,7 @@ function InputForm({
   globalProxy: string
   submitError: string | null
 }) {
+  const { t } = useT()
   const lineCount = useMemo(() => {
     const n = input.split(/\r?\n/).filter((l) => l.trim().length > 0).length
     return n
@@ -309,7 +311,7 @@ function InputForm({
     <div className="p-5 space-y-4">
       <div>
         <label className="block text-[12px] text-text-secondary mb-1.5 font-medium">
-          {provider ? `${provider.display} 账号凭据` : '账号凭据'}
+          {provider ? `${provider.display} ${t('registerModal.credentialsLabel')}` : t('registerModal.credentialsLabel')}
         </label>
         <textarea
           value={input}
@@ -320,12 +322,12 @@ function InputForm({
           spellCheck={false}
         />
         <div className="flex justify-between items-center mt-1">
-          <span className="text-[11px] text-text-muted">{lineCount} 行待处理</span>
+          <span className="text-[11px] text-text-muted">{lineCount} lines</span>
         </div>
       </div>
 
       <div className="flex items-center gap-3">
-        <label className="text-[12px] text-text-secondary font-medium">并发</label>
+        <label className="text-[12px] text-text-secondary font-medium">{t('registerModal.concurrencyLabel')}</label>
         <input
           type="number"
           min={1}
@@ -338,13 +340,13 @@ function InputForm({
         />
         <span className="inline-flex items-center gap-1 text-[11px] text-text-muted">
           <IconAlert size={12} className="text-warn" />
-          MS / Notion 风控建议 ≤ 5
+          MS / Notion risk control recommendation ≤ 5
         </span>
       </div>
 
       <div>
         <label className="block text-[12px] text-text-secondary mb-1.5 font-medium">
-          代理 URL <span className="text-text-muted font-normal">(可选)</span>
+          {t('registerModal.proxyLabel')} <span className="text-text-muted font-normal">(optional)</span>
         </label>
         <input
           type="text"
@@ -352,17 +354,13 @@ function InputForm({
           onChange={(e) => onProxy(e.target.value)}
           placeholder={
             globalProxy
-              ? `留空 = 使用全局代理 (${globalProxy})`
-              : '留空 = 直连; 例: socks5://user:pass@host:port'
+              ? t('registerModal.proxyPlaceholderWithGlobal', { global: globalProxy })
+              : t('registerModal.proxyPlaceholderDirect')
           }
           className="w-full bg-bg-input border border-border rounded-md px-3 py-1.5 text-[12px] text-text-primary outline-none focus:border-white/20 transition-colors placeholder:text-text-muted font-mono"
           spellCheck={false}
           autoComplete="off"
         />
-        <div className="text-[11px] text-text-muted mt-1">
-          支持 socks5 / socks5h / http / https。注册时此处填写的代理优先生效；留空则
-          {globalProxy ? '回落到全局代理（已启用）' : '直连（当前未配置全局代理）'}。
-        </div>
       </div>
 
       {submitError && (
@@ -383,6 +381,7 @@ function ProgressPanel({
   streamConnected: boolean
   streamError: string | null
 }) {
+  const { t } = useT()
   if (!job) return null
   const total = job.total
   const done = job.done
@@ -396,12 +395,12 @@ function ProgressPanel({
         <div className="flex justify-between items-center">
           <div className="flex items-center gap-2">
             <span className="text-[13px] font-semibold tracking-tight">
-              {job.state === 'running' ? '注册进行中' : job.state === 'cancelled' ? '已取消' : '注册完成'}
+              {job.state === 'running' ? t('common.processing') : t('registerModal.stepSuccess')}
             </span>
             {job.state === 'running' && <IconSpinner size={13} className="animate-spin text-text-muted" />}
           </div>
           <span className="text-[12px] text-text-muted tabular-nums">
-            {done} / {total} · OK {ok} · 失败 {fail} · 并发 {job.concurrency}
+            {done} / {total} · {t('registerModal.jobSuccessCount', { count: ok })} · {t('registerModal.jobFailedCount', { count: fail })} · {t('registerModal.concurrencyLabel')} {job.concurrency}
           </span>
         </div>
         <div className="h-1.5 bg-white/[.06] rounded-full overflow-hidden">
@@ -412,7 +411,7 @@ function ProgressPanel({
         </div>
         {!streamConnected && job.state === 'running' && (
           <div className="text-[11px] text-warn flex items-center gap-1">
-            <IconAlert size={11} /> 实时流断开，正在轮询… {streamError && `(${streamError})`}
+            <IconAlert size={11} /> Reconnecting stream... {streamError && `(${streamError})`}
           </div>
         )}
       </div>
@@ -427,6 +426,7 @@ function ProgressPanel({
 }
 
 function StepRow({ step, index }: { step: RegisterStep; index: number }) {
+  const { t } = useT()
   const [expanded, setExpanded] = useState(false)
   const startedAt = step.started_at
   const endedAt = step.ended_at
@@ -436,26 +436,26 @@ function StepRow({ step, index }: { step: RegisterStep; index: number }) {
   let bg = ''
   switch (step.status) {
     case 'pending':
-      statusEl = <span className="text-text-muted text-[11px]">等待</span>
+      statusEl = <span className="text-text-muted text-[11px]">{t('common.loading')}</span>
       break
     case 'running':
       statusEl = (
         <span className="inline-flex items-center gap-1 text-[11px] text-notion-blue">
-          <IconSpinner size={11} className="animate-spin" /> 进行中
+          <IconSpinner size={11} className="animate-spin" /> {t('common.processing')}
         </span>
       )
       break
     case 'ok':
       statusEl = (
         <span className="inline-flex items-center gap-1 text-[11px] text-ok">
-          <IconCheck size={11} /> 成功
+          <IconCheck size={11} /> {t('common.success')}
         </span>
       )
       break
     case 'fail':
       statusEl = (
         <span className="inline-flex items-center gap-1 text-[11px] text-err">
-          <IconX size={11} /> 失败
+          <IconX size={11} /> {t('common.failed')}
         </span>
       )
       bg = 'bg-err/[.04]'
@@ -477,7 +477,7 @@ function StepRow({ step, index }: { step: RegisterStep; index: number }) {
             className="text-[11px] text-text-secondary hover:text-text-primary inline-flex items-center gap-1 bg-transparent border-none p-0 cursor-pointer"
           >
             <IconChevronRight size={11} className={expanded ? 'rotate-90 transition-transform' : 'transition-transform'} />
-            {expanded ? '收起' : '查看详情'}
+            {expanded ? t('common.close') : t('common.loading')}
           </button>
           {expanded && (
             <pre className="mt-1 p-2 bg-bg-input border border-border rounded text-[11px] text-text-secondary whitespace-pre-wrap break-all max-h-48 overflow-auto font-mono">
