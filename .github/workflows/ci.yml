@@ -44,7 +44,10 @@ jobs:
         run: |
           rm -rf internal/web/dist
           cp -R web/dist internal/web/dist
-          git diff --exit-code -- internal/web/dist
+          # Vite leaves one harmless blank line in index.html on Windows but
+          # not on Linux. Ignore line-ending/blank-line noise while still
+          # catching changed asset hashes or compiled JS/CSS.
+          git diff --ignore-space-at-eol --ignore-blank-lines --exit-code -- internal/web/dist
 
       - name: Check Go formatting
         run: |
