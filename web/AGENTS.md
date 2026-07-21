@@ -191,6 +191,10 @@ interrupted. Manual disable persists as `disabled: true` and must be honored by
 every account picker. Personal-instructions cleanup re-checks every candidate;
 probe errors must remain untouched.
 
+The batch manager permits one running job globally. A conflicting start returns
+HTTP 409 with `active_job`; the frontend must adopt that job and show its
+progress rather than starting a duplicate operation or showing a generic error.
+
 Add Account accepts one token per line and validates five accounts concurrently
 by default. Registration jobs and quota refresh retain their existing bounded
 worker pools.

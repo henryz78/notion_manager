@@ -415,9 +415,10 @@ export async function startAccountBatchJob(action: AccountBatchJobAction, emails
     credentials: 'same-origin',
     body: JSON.stringify({ action, emails, concurrency }),
   })
-  const data = await readJson<AccountBatchJob>(resp, '启动批量任务时返回了无效响应')
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-  return data
+  const data = await readJson<AccountBatchJob | { error?: string; active_job?: AccountBatchJob }>(resp, '启动批量任务时返回了无效响应')
+  if (resp.status === 409 && 'active_job' in data && data.active_job) return data.active_job
+  if (!resp.ok) throw new Error(('error' in data && data.error) || `HTTP ${resp.status}`)
+  return data as AccountBatchJob
 }
 
 export async function getAccountBatchJob(id: string): Promise<AccountBatchJob> {
@@ -440,9 +441,10 @@ export async function retryAccountBatchJob(id: string): Promise<AccountBatchJob>
     headers: { Accept: 'application/json' },
     credentials: 'same-origin',
   })
-  const data = await readJson<AccountBatchJob>(resp, '重试批量任务时返回了无效响应')
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-  return data
+  const data = await readJson<AccountBatchJob | { error?: string; active_job?: AccountBatchJob }>(resp, '重试批量任务时返回了无效响应')
+  if (resp.status === 409 && 'active_job' in data && data.active_job) return data.active_job
+  if (!resp.ok) throw new Error(('error' in data && data.error) || `HTTP ${resp.status}`)
+  return data as AccountBatchJob
 }
 
 export interface DeleteExhaustedTrialsResult {

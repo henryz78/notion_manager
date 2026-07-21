@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -22,6 +23,8 @@ const (
 	accountBatchHistoryLimit = 20
 	accountBatchMaxAccounts  = 20000
 )
+
+var ErrAccountBatchJobRunning = errors.New("account batch job already running")
 
 type AccountBatchStep struct {
 	Email      string `json:"email"`
@@ -175,6 +178,28 @@ func clampAccountBatchConcurrency(value int) int {
 	return value
 }
 
+func (m *AccountBatchManager) activeLocked() *AccountBatchJob {
+	for index := len(m.order) - 1; index >= 0; index-- {
+		if job := m.jobs[m.order[index]]; job != nil && job.State == "running" {
+			return job
+		}
+	}
+	return nil
+}
+
+// Active returns the currently running account batch job. The manager permits
+// only one live job so two dashboard tabs cannot mutate the same account pool
+// at the same time.
+func (m *AccountBatchManager) Active() (*AccountBatchJob, bool) {
+	if m == nil {
+		return nil, false
+	}
+	m.mu.RLock()
+	job := cloneAccountBatchJob(m.activeLocked())
+	m.mu.RUnlock()
+	return job, job != nil
+}
+
 func (m *AccountBatchManager) Start(action string, emails []string, concurrency int) (*AccountBatchJob, error) {
 	if m == nil || m.pool == nil {
 		return nil, fmt.Errorf("batch manager is not initialized")
@@ -223,6 +248,11 @@ func (m *AccountBatchManager) Start(action string, emails []string, concurrency 
 		Steps:       steps,
 	}
 	m.mu.Lock()
+	if active := m.activeLocked(); active != nil {
+		snapshot := cloneAccountBatchJob(active)
+		m.mu.Unlock()
+		return snapshot, ErrAccountBatchJobRunning
+	}
 	m.jobs[job.ID] = job
 	m.order = append(m.order, job.ID)
 	m.trimLocked()
@@ -472,6 +502,14 @@ func HandleAccountBatchJobs(manager *AccountBatchManager, auth *DashboardAuth) h
 			}
 			job, err := manager.Start(body.Action, body.Emails, body.Concurrency)
 			if err != nil {
+				if errors.Is(err, ErrAccountBatchJobRunning) {
+					w.WriteHeader(http.StatusConflict)
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"error":      "已有批量任务正在运行",
+						"active_job": job,
+					})
+					return
+				}
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
 				return
 			}
@@ -504,6 +542,14 @@ func HandleAccountBatchJobRouter(manager *AccountBatchManager, auth *DashboardAu
 			}
 			job, err := manager.Retry(id)
 			if err != nil {
+				if errors.Is(err, ErrAccountBatchJobRunning) {
+					w.WriteHeader(http.StatusConflict)
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"error":      "已有批量任务正在运行",
+						"active_job": job,
+					})
+					return
+				}
 				status := http.StatusBadRequest
 				if os.IsNotExist(err) {
 					status = http.StatusNotFound

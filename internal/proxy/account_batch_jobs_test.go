@@ -1,7 +1,12 @@
 package proxy
 
 import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -96,5 +101,73 @@ func TestAccountBatchManagerRetryUsesFailedAccounts(t *testing.T) {
 	retried := waitForAccountBatchJob(t, manager, retry.ID)
 	if retried.Total != 1 || retried.Failed != 1 || retried.Steps[0].Email != "missing@example.com" {
 		t.Fatalf("retry did not isolate failed account: %+v", retried)
+	}
+}
+
+func TestAccountBatchManagerReturnsExistingRunningJob(t *testing.T) {
+	pool := NewAccountPool()
+	pool.accounts = []*Account{{UserEmail: "selected@example.com"}}
+	manager, err := NewAccountBatchManager(pool, t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	active := &AccountBatchJob{
+		ID:        "already-running",
+		Action:    AccountBatchCheckPersonal,
+		State:     "running",
+		CreatedAt: time.Now().UTC(),
+		Total:     1,
+		Steps:     []AccountBatchStep{{Email: "other@example.com", Status: "running"}},
+	}
+	manager.jobs[active.ID] = active
+	manager.order = append(manager.order, active.ID)
+
+	got, err := manager.Start(AccountBatchDisable, []string{"selected@example.com"}, 10)
+	if !errors.Is(err, ErrAccountBatchJobRunning) {
+		t.Fatalf("error=%v, want ErrAccountBatchJobRunning", err)
+	}
+	if got == nil || got.ID != active.ID {
+		t.Fatalf("returned job=%+v, want active job %s", got, active.ID)
+	}
+	if len(manager.List(20)) != 1 {
+		t.Fatalf("duplicate job was created")
+	}
+}
+
+func TestHandleAccountBatchJobsConflictReturnsActiveJob(t *testing.T) {
+	pool := NewAccountPool()
+	pool.accounts = []*Account{{UserEmail: "selected@example.com"}}
+	manager, err := NewAccountBatchManager(pool, t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	active := &AccountBatchJob{
+		ID:        "active-from-other-tab",
+		Action:    AccountBatchDisable,
+		State:     "running",
+		CreatedAt: time.Now().UTC(),
+		Total:     1,
+		Steps:     []AccountBatchStep{{Email: "other@example.com", Status: "running"}},
+	}
+	manager.jobs[active.ID] = active
+	manager.order = append(manager.order, active.ID)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/account-batch-jobs", strings.NewReader(
+		`{"action":"enable","emails":["selected@example.com"],"concurrency":10}`,
+	))
+	rec := httptest.NewRecorder()
+	HandleAccountBatchJobs(manager, NewDashboardAuth("", "")).ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Error     string           `json:"error"`
+		ActiveJob *AccountBatchJob `json:"active_job"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Error == "" || response.ActiveJob == nil || response.ActiveJob.ID != active.ID {
+		t.Fatalf("unexpected response: %+v", response)
 	}
 }

@@ -45,6 +45,7 @@ version is also available in the `X-Notion-Manager-Version` response header on
 - Filter by available, disabled, exhausted, invalid-cookie, no-workspace, temporarily unavailable, or personal-instructions state. `GET /admin/accounts/selection` returns only emails matching the current search/filter for true select-all across every page; it never returns tokens
 - Account checkboxes support cross-page selection. Bulk actions: copy emails, check selected personal instructions, disable, enable, delete, and clear selection
 - Checks, enable/disable, deletion, missing-instructions cleanup, and exhausted-trial cleanup use `/admin/account-batch-jobs`. Jobs run with 10 workers by default (maximum 20), expose live progress, survive browser refresh, and allow retrying failed items
+- Only one pool-wide batch job may run at a time. A second dashboard tab receives and displays the existing job instead of starting duplicate mutations
 - The personal-instructions probe reads only whether a page is bound; it never loads or stores the page ID or instruction text. Missing-instructions cleanup re-checks each account and retains probe failures
 - Bulk cleanup for Free / Plus accounts explicitly disabled after exhausting complimentary AI responses. It requires confirmation and excludes Business / Enterprise, temporary failures, invalid cookies, and no-workspace accounts
 

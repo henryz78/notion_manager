@@ -9,7 +9,35 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run Go checks
+        run: |
+          go test ./...
+          go vet ./...
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -36,11 +64,11 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: '1.26'
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Build frontend
         working-directory: web
@@ -59,7 +87,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
         run: |
-          go build -ldflags="-s -w -X notion-manager/internal/proxy.BuildVersion=${{ github.sha }}" -o notion-manager-${{ matrix.suffix }}${{ matrix.ext }} ./cmd/notion-manager
+          go build -ldflags="-s -w -X notion-manager/internal/proxy.BuildVersion=${{ github.ref_name }}" -o notion-manager-${{ matrix.suffix }}${{ matrix.ext }} ./cmd/notion-manager
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
