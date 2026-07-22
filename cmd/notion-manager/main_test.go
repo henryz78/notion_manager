@@ -41,7 +41,9 @@ func TestResolveVolumeFile(t *testing.T) {
 	if got := resolveVolumeFile("token.txt", "accounts", true); got != filepath.Join("accounts", "token.txt") {
 		t.Fatalf("local accounts path=%q", got)
 	}
-	if got := resolveVolumeFile(`C:\tmp\token.txt`, `C:\app\accounts`, true); got != `C:\tmp\token.txt` {
+	absoluteToken := filepath.Join(t.TempDir(), "token.txt")
+	absoluteAccounts := filepath.Join(t.TempDir(), "accounts")
+	if got := resolveVolumeFile(absoluteToken, absoluteAccounts, true); got != absoluteToken {
 		t.Fatalf("absolute path=%q", got)
 	}
 }
