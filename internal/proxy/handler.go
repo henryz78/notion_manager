@@ -281,7 +281,8 @@ func HandleAdminModels(pool *AccountPool, auth *DashboardAuth) http.HandlerFunc 
 }
 
 // HandleAdminSettings handles GET (read) and PUT (update) for dashboard-controlled settings.
-// Settings are persisted to config.yaml using YAML node manipulation to preserve comments.
+// Settings are persisted to the active config file using YAML node manipulation
+// to preserve comments.
 func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -393,7 +394,7 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				}
 			}
 
-			// Persist to config.yaml
+			// Persist to the active config file
 			if changed && configPath != "" {
 				persistSearchSettings(configPath)
 			}
@@ -426,7 +427,7 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 	}
 }
 
-// persistSearchSettings writes the current dashboard settings back to config.yaml.
+// persistSearchSettings writes the current dashboard settings back to the active config file.
 func persistSearchSettings(configPath string) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {

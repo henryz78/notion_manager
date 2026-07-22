@@ -369,6 +369,11 @@ DEBUG_LOGGING=false
 /app/accounts
 ```
 
+设置页内容会自动保存到这个 Volume 里的
+`/app/accounts/.notion-manager-config.yaml`，所以 Railway 休眠或重新部署后
+不会回到默认值。`ACCOUNTS_DIR=/app/accounts` 和 Volume 两项都要保留；如果
+只设置变量、没有挂载 Volume，设置仍会随容器消失。
+
 4. 在 **Networking** 中生成 Public Domain。
 5. 部署完成后访问：
 
@@ -400,7 +405,7 @@ ghcr.io/henryz78/notion_manager:latest
 注意：
 
 - 不要把 `accounts/`、`config.yaml`、`token.txt` 提交到 GitHub；`.dockerignore` 已经默认排除这些文件。
-- Railway 的容器文件系统会随重建丢失，账号 JSON、注册历史和 token 统计都应保存在 `/app/accounts` 这个 Volume 中。
+- Railway 的容器文件系统会随重建丢失；账号 JSON、注册历史、token 统计和 Dashboard 设置都保存在 `/app/accounts` 这个 Volume 中。
 - Railway 会自动注入 `PORT`，不需要手动设置 `server.port`。
 
 ## 详细文档

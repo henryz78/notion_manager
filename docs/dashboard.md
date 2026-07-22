@@ -96,7 +96,9 @@ A history drawer (`History` button) shows the most recent jobs from `/admin/regi
 
 ## Settings & history page
 
-Editable knobs persisted into `config.yaml`:
+Editable knobs are persisted into the active config file: local launches use
+`config.yaml`; Docker/Railway deployments with `ACCOUNTS_DIR` use
+`accounts/.notion-manager-config.yaml`, so the settings live on the Volume:
 
 - `enable_web_search`, `enable_workspace_search`
 - `ask_mode_default` — when ON, every request behaves as if the user toggled Notion's "Ask" (read-only). The per-request `-ask` model suffix overrides this for one call
@@ -124,4 +126,4 @@ The reverse proxy auto-handles:
 
 - **Delete** — `DELETE /admin/accounts/{email}` removes the matching JSON file from `accounts/` and drops the live pool entry. Useful for retired accounts so they don't poison the picker
 - **Refresh** — `POST /admin/refresh` runs the quota / models check across the whole pool. The endpoint returns `started: false` if a refresh is already in flight
-- **Settings** — `PUT /admin/settings` is idempotent and persists to `config.yaml` via YAML node manipulation (so comments survive)
+- **Settings** — `PUT /admin/settings` is idempotent and persists to the active config file via YAML node manipulation (so comments survive)

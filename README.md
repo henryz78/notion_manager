@@ -356,6 +356,12 @@ DEBUG_LOGGING=false
 /app/accounts
 ```
 
+Dashboard settings are automatically stored in
+`/app/accounts/.notion-manager-config.yaml` on that Volume, so Railway sleep
+and redeploys keep the settings. Keep both `ACCOUNTS_DIR=/app/accounts` and the
+Volume; an environment variable without the mounted Volume does not preserve
+the file.
+
 4. Generate a public domain in **Networking**.
 5. Open the dashboard:
 
@@ -387,7 +393,7 @@ ghcr.io/henryz78/notion_manager:latest
 Notes:
 
 - Do not commit `accounts/`, `config.yaml`, or `token.txt` to GitHub; `.dockerignore` excludes them from image builds.
-- Railway container filesystems are ephemeral across rebuilds. Keep account JSON files, register history, and token stats in the `/app/accounts` Volume.
+- Railway container filesystems are ephemeral across rebuilds. Keep account JSON files, register history, token stats, and Dashboard settings in the `/app/accounts` Volume.
 - Railway injects `PORT` automatically, so `server.port` does not need to be set manually.
 
 ## Documentation

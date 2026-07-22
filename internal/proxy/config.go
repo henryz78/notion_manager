@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +18,7 @@ import (
 )
 
 // Config holds all configurable values for notion-manager.
-// Priority: environment variable > config.yaml > default value.
+// Priority: environment variable > active config file > default value.
 type Config struct {
 	Server   ServerConfig      `yaml:"server"`
 	Proxy    ProxyConfig       `yaml:"proxy"`
@@ -116,6 +117,48 @@ type RegisterConfig struct {
 // AppConfig is the global configuration instance
 var AppConfig *Config
 
+// ResolveConfigPath chooses the runtime configuration file. Local launches
+// keep using config.yaml. Container launches that set ACCOUNTS_DIR (as the
+// Railway Docker deployment does) store the mutable config beside the account
+// files, so settings survive a container replacement. CONFIG_PATH is an
+// explicit override for operators who want a different persistent location.
+// When the persistent file does not exist yet, seed it from the bundled
+// config.yaml without replacing an existing file.
+func ResolveConfigPath(defaultPath string) (string, error) {
+	defaultPath = strings.TrimSpace(defaultPath)
+	target := defaultPath
+	if configured := strings.TrimSpace(os.Getenv("CONFIG_PATH")); configured != "" {
+		target = configured
+	} else if accountsDir := strings.TrimSpace(os.Getenv("ACCOUNTS_DIR")); accountsDir != "" {
+		target = filepath.Join(accountsDir, ".notion-manager-config.yaml")
+	}
+	if target == "" || filepath.Clean(target) == filepath.Clean(defaultPath) {
+		return target, nil
+	}
+
+	if _, err := os.Stat(target); err == nil {
+		return target, nil
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("stat persistent config %s: %w", target, err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		return "", fmt.Errorf("create persistent config directory: %w", err)
+	}
+	data, err := os.ReadFile(defaultPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("read default config %s: %w", defaultPath, err)
+		}
+		data = []byte("{}\n")
+	}
+	if err := os.WriteFile(target, data, 0o600); err != nil {
+		return "", fmt.Errorf("seed persistent config %s: %w", target, err)
+	}
+	log.Printf("[config] using persistent config %s", target)
+	return target, nil
+}
+
 // DefaultConfig returns the default configuration (matching original hardcoded values)
 func DefaultConfig() *Config {
 	return &Config{
@@ -177,8 +220,8 @@ func DefaultConfig() *Config {
 	}
 }
 
-// LoadConfig loads configuration with priority: env > config.yaml > defaults.
-// configPath is the path to config.yaml (can be empty to skip file loading).
+// LoadConfig loads configuration with priority: env > active config file >
+// defaults. configPath can be empty to skip file loading.
 func LoadConfig(configPath string) (*Config, error) {
 	cfg := DefaultConfig()
 	loadedFromFile := false

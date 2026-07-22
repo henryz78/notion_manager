@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"notion-manager/internal/regjob"
@@ -28,6 +29,11 @@ const postRegisterRefreshTimeout = 30 * time.Second
 // account is written. Production callers leave it nil and we use the
 // pool's RefreshAndPersistAccount.
 var postRegisterRefreshHook func(deps *RegisterJobsDeps, email string)
+
+// Windows keeps directory-read handles open briefly while concurrent workers
+// scan account JSON files. Serialize the small disk mutation section so
+// parallel batch jobs do not race a delete against another worker's scan.
+var accountDeleteMu sync.Mutex
 
 // triggerPostRegisterRefresh runs the per-account quota refresh in the
 // background. We never block the runner goroutine on a Notion round-trip
@@ -219,18 +225,18 @@ func HandleAdminRegisterStart(deps *RegisterJobsDeps) http.HandlerFunc {
 		// Detach from the request context so cancelled HTTP clients don't
 		// kill the background run.
 		runCtx := context.Background()
-	go regjob.Run(runCtx, deps.Store, job.ID, prov, creds, regjob.RunOpts{
-		Concurrency: concurrency,
-		AccountsDir: deps.AccountsDir,
-		Proxy:       proxyURL,
-		OnSuccess: func(email string) {
-			deps.Pool.ReloadFromDir(deps.AccountsDir)
-			triggerPostRegisterRefresh(deps, email)
-		},
-	})
+		go regjob.Run(runCtx, deps.Store, job.ID, prov, creds, regjob.RunOpts{
+			Concurrency: concurrency,
+			AccountsDir: deps.AccountsDir,
+			Proxy:       proxyURL,
+			OnSuccess: func(email string) {
+				deps.Pool.ReloadFromDir(deps.AccountsDir)
+				triggerPostRegisterRefresh(deps, email)
+			},
+		})
 
-	resp := map[string]interface{}{
-		"job_id":      job.ID,
+		resp := map[string]interface{}{
+			"job_id":      job.ID,
 			"provider":    prov.ID(),
 			"total":       len(creds),
 			"concurrency": concurrency,
@@ -620,6 +626,9 @@ func HandleAdminDeleteAccount(deps *RegisterJobsDeps) http.HandlerFunc {
 // matches and drops the corresponding pool entry. Returns os.ErrNotExist if
 // no file matches; that's mapped to a 404 by the handler.
 func deleteAccountByEmail(pool *AccountPool, dir, email string) error {
+	accountDeleteMu.Lock()
+	defer accountDeleteMu.Unlock()
+
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err

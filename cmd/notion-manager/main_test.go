@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -27,6 +28,21 @@ func TestRequiresAPIKey(t *testing.T) {
 		if got := requiresAPIKey(tc.path); got != tc.want {
 			t.Fatalf("requiresAPIKey(%q) = %v, want %v", tc.path, got, tc.want)
 		}
+	}
+}
+
+func TestResolveVolumeFile(t *testing.T) {
+	if got := resolveVolumeFile("token.txt", "/app/accounts", true); got != filepath.Join("/app/accounts", "token.txt") {
+		t.Fatalf("token path=%q", got)
+	}
+	if got := resolveVolumeFile("accounts/.register_history.json", "/app/accounts", true); got != filepath.Join("/app/accounts", ".register_history.json") {
+		t.Fatalf("history path=%q", got)
+	}
+	if got := resolveVolumeFile("token.txt", "accounts", true); got != filepath.Join("accounts", "token.txt") {
+		t.Fatalf("local accounts path=%q", got)
+	}
+	if got := resolveVolumeFile(`C:\tmp\token.txt`, `C:\app\accounts`, true); got != `C:\tmp\token.txt` {
+		t.Fatalf("absolute path=%q", got)
 	}
 }
 
@@ -80,7 +96,7 @@ func TestNewMux_RegistersModelsRoutes(t *testing.T) {
 	requestHistory, _ := proxy.NewRequestHistoryStore("", 100)
 	regDeps := &proxy.RegisterJobsDeps{Pool: pool, AccountsDir: "", Auth: dashAuth}
 	batchManager, _ := proxy.NewAccountBatchManager(pool, "", "")
-	mux := newMux(pool, "", "sk-test", dashAuth, usageStats, requestHistory, regDeps, batchManager)
+	mux := newMux(pool, "", "config.yaml", "sk-test", dashAuth, usageStats, requestHistory, regDeps, batchManager)
 	handler := apiKeyAuthMiddleware("sk-test", mux)
 
 	for _, path := range []string{"/v1/models", "/models"} {
@@ -108,7 +124,7 @@ func TestNewMux_RegistersOpenAIRoutes(t *testing.T) {
 	requestHistory, _ := proxy.NewRequestHistoryStore("", 100)
 	regDeps := &proxy.RegisterJobsDeps{Pool: pool, AccountsDir: "", Auth: dashAuth}
 	batchManager, _ := proxy.NewAccountBatchManager(pool, "", "")
-	mux := newMux(pool, "", "sk-test", dashAuth, usageStats, requestHistory, regDeps, batchManager)
+	mux := newMux(pool, "", "config.yaml", "sk-test", dashAuth, usageStats, requestHistory, regDeps, batchManager)
 	handler := apiKeyAuthMiddleware("sk-test", mux)
 
 	tests := []struct {

@@ -93,7 +93,9 @@ Research Mode 试用的数字上限。Custom Agents 的 Notion credits 是独立
 
 ## 设置与记录页面
 
-可在线编辑、写回 `config.yaml`：
+可在线编辑，并写回当前配置文件：本地是 `config.yaml`；Docker / Railway
+设置 `ACCOUNTS_DIR` 后自动使用 `accounts/.notion-manager-config.yaml`，因此
+会跟随 Volume 保存：
 
 - `enable_web_search`、`enable_workspace_search`
 - `ask_mode_default` —— 打开后所有请求等同于 Notion 前端的 “Ask”（read-only）模式；请求级 `-ask` 后缀仍可对单次请求覆盖
@@ -120,4 +122,4 @@ Research Mode 试用的数字上限。Custom Agents 的 Notion credits 是独立
 
 - **删除** —— `DELETE /admin/accounts/{email}` 同时移除 `accounts/` 下的 JSON 文件和池内对象。退役账号不再污染选择器
 - **刷新** —— `POST /admin/refresh` 触发整池配额 / 模型检查；如果已经有刷新在跑，端点返回 `started: false`
-- **设置** —— `PUT /admin/settings` 是幂等的，并通过 YAML 节点修改持久化到 `config.yaml`，不会破坏注释
+- **设置** —— `PUT /admin/settings` 是幂等的，并通过 YAML 节点修改持久化到当前配置文件，不会破坏注释

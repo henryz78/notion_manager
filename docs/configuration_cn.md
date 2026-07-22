@@ -8,13 +8,27 @@
 环境变量 > config.yaml > 代码默认值
 ```
 
+### 配置文件位置与 Railway 持久化
+
+本地直接运行时继续使用仓库根目录的 `config.yaml`。当设置了
+`ACCOUNTS_DIR`（Docker / Railway 默认是 `/app/accounts`）时，程序会首次启动
+时把默认配置复制到 `${ACCOUNTS_DIR}/.notion-manager-config.yaml`，之后
+Dashboard 修改的设置都会写入这个持久卷文件。这样 Railway 休眠、重新创建
+容器或拉取新镜像后，设置仍会保留。也可以用 `CONFIG_PATH` 指定一个明确的
+配置文件路径；它优先于自动路径。
+
+Railway 需要同时满足两点：`ACCOUNTS_DIR=/app/accounts`，并且确实挂载了
+`/app/accounts` Volume。只设置环境变量而没有挂载 Volume，容器重建后文件仍
+会消失。环境变量（例如 `USE_NOTION_PERSONAL_INSTRUCTIONS`）优先级最高，
+会覆盖 Dashboard 保存的同名设置。
+
 ## Server
 
 | 配置项 | 仓库样例 | 代码默认 | 说明 |
 | --- | --- | --- | --- |
 | `server.port` | `3000` | `8081` | 监听端口 |
 | `server.accounts_dir` | `accounts` | `accounts` | 账号 JSON 目录；同时存放 `.register_history.json` / `.token_stats.json` / `.register_inputs/` |
-| `server.token_file` | `token.txt` | `token.txt` | 单账号回退文件 |
+| `server.token_file` | `token.txt` | `token.txt` | 单账号回退文件；容器部署且使用 `ACCOUNTS_DIR` 时会自动放入该持久卷 |
 | `server.api_key` | 空 | 自动生成 | `/v1/messages` 鉴权 |
 | `server.admin_password` | 空 | 自动生成 | 首次启动后哈希回写；环境变量 `ADMIN_PASSWORD` 可覆盖 |
 | `server.log_file` | `server.stderr.log` | 空（stderr） | `log.Printf` 全部追加到该文件 |
@@ -58,7 +72,7 @@
 
 | 配置项 | 代码默认 | 说明 |
 | --- | --- | --- |
-| `register.history_file` | `accounts/.register_history.json` | Job 历史持久化文件，重启时回放 |
+| `register.history_file` | `accounts/.register_history.json` | Job 历史持久化文件，容器部署且使用 `ACCOUNTS_DIR` 时会自动映射到该持久卷 |
 | `register.history_memory_cap` | `100` | 内存 / 磁盘最多保留多少个 Job |
 | `register.default_concurrency` | `1` | Dashboard 注册抽屉的默认并发值 |
 
@@ -83,6 +97,7 @@ export ENABLE_TOOL_BRIDGE=true
 export NOTION_PROXY=socks5h://127.0.0.1:1080
 export QUOTA_LIVE_CHECK_SECONDS=5
 export REFRESH_CONCURRENCY=10
+export CONFIG_PATH=/app/accounts/.notion-manager-config.yaml # 可选；ACCOUNTS_DIR 已设置时会自动使用这个路径
 ```
 
 `NOTION_PROXY` 写错（不支持的 scheme 等）时，启动会打印一次日志并清空，避免错误的 URL 渗透到每个 Notion 请求里。
@@ -134,7 +149,7 @@ notion-manager/
 
 ## 使用建议与限制
 
-- `admin_password` 留空会自动生成随机密码并打印到控制台，哈希后写回 `config.yaml`。**首次启动一定要保存控制台显示的明文密码**，事后无法恢复
+- `admin_password` 留空会自动生成随机密码并打印到控制台，哈希后写回当前配置文件。**首次启动一定要保存控制台显示的明文密码**，事后无法恢复
 - 反向代理优先使用包含 `full_cookie` 的账号；Microsoft SSO 注册器生成的账号自带可用的 `full_cookie`
 - Free / Plus 的 complimentary trial 用完后可能长期不可用，但账号文件会保留并持续复查，升级到 Business / Enterprise 后可自动恢复
 - 修改 `web/` 前端源码后需要在 `web/` 目录执行 `npm run build`，并把产物同步到 `internal/web/dist/`，否则运行时仍走旧资源

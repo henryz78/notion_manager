@@ -48,7 +48,53 @@ func apiKeyAuthMiddleware(apiKey string, next http.Handler) http.Handler {
 	})
 }
 
-func newMux(pool *proxy.AccountPool, accountsDir string, apiKey string, dashAuth *proxy.DashboardAuth, usageStats *proxy.UsageStats, requestHistory *proxy.RequestHistoryStore, regDeps *proxy.RegisterJobsDeps, batchManager *proxy.AccountBatchManager) *http.ServeMux {
+// resolveVolumeFile moves relative runtime state files into the account
+// volume for container deployments. Local launches keep their historical
+// paths; Railway deployments set ACCOUNTS_DIR and therefore get durable
+// fallback-token and register-history paths automatically.
+func resolveVolumeFile(path, accountsDir string, volumeMode bool) string {
+	path = strings.TrimSpace(path)
+	accountsDir = strings.TrimSpace(accountsDir)
+	if !volumeMode || path == "" || accountsDir == "" || filepath.IsAbs(path) {
+		return path
+	}
+	clean := filepath.Clean(path)
+	slash := filepath.ToSlash(clean)
+	if filepath.Clean(accountsDir) == filepath.Clean("accounts") {
+		if slash == "accounts" || strings.HasPrefix(slash, "accounts/") {
+			return clean
+		}
+		return filepath.Join(accountsDir, clean)
+	}
+	if slash == "accounts" {
+		return accountsDir
+	}
+	if strings.HasPrefix(slash, "accounts/") {
+		return filepath.Join(accountsDir, strings.TrimPrefix(slash, "accounts/"))
+	}
+	return filepath.Join(accountsDir, clean)
+}
+
+func migrateFileToVolume(source, target string) {
+	if source == "" || target == "" || filepath.Clean(source) == filepath.Clean(target) {
+		return
+	}
+	if _, err := os.Stat(target); err == nil {
+		return
+	}
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		return
+	}
+	if err := os.WriteFile(target, data, 0o600); err == nil {
+		log.Printf("[config] copied fallback state into persistent volume: %s", target)
+	}
+}
+
+func newMux(pool *proxy.AccountPool, accountsDir string, configPath string, apiKey string, dashAuth *proxy.DashboardAuth, usageStats *proxy.UsageStats, requestHistory *proxy.RequestHistoryStore, regDeps *proxy.RegisterJobsDeps, batchManager *proxy.AccountBatchManager) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// Anthropic + OpenAI-compatible API endpoints
@@ -74,7 +120,7 @@ func newMux(pool *proxy.AccountPool, accountsDir string, apiKey string, dashAuth
 	mux.HandleFunc("/admin/account-batch-jobs/", proxy.HandleAccountBatchJobRouter(batchManager, dashAuth))
 	mux.HandleFunc("/admin/models", proxy.HandleAdminModels(pool, dashAuth))
 	mux.HandleFunc("/admin/refresh", proxy.HandleAdminRefresh(pool, accountsDir, dashAuth))
-	mux.HandleFunc("/admin/settings", proxy.HandleAdminSettings("config.yaml", dashAuth))
+	mux.HandleFunc("/admin/settings", proxy.HandleAdminSettings(configPath, dashAuth))
 	mux.HandleFunc("/admin/stats", proxy.HandleAdminStats(usageStats, dashAuth))
 	mux.HandleFunc("/admin/request-history", proxy.HandleAdminRequestHistory(requestHistory, dashAuth))
 
@@ -112,12 +158,16 @@ func newMux(pool *proxy.AccountPool, accountsDir string, apiKey string, dashAuth
 }
 
 func main() {
-	cfg, err := proxy.LoadConfig("config.yaml")
+	configPath, err := proxy.ResolveConfigPath("config.yaml")
+	if err != nil {
+		log.Fatalf("[config] resolve path: %v", err)
+	}
+	cfg, err := proxy.LoadConfig(configPath)
 	if err != nil {
 		log.Fatalf("[config] %v", err)
 	}
 
-	proxy.EnsureApiKey(cfg, "config.yaml")
+	proxy.EnsureApiKey(cfg, configPath)
 
 	if cfg.Server.AdminPassword == "" {
 		generated := proxy.GenerateAdminPassword()
@@ -132,12 +182,19 @@ func main() {
 		fmt.Fprintln(os.Stderr, "")
 	}
 
-	proxy.EnsureAdminPassword(cfg, "config.yaml")
+	proxy.EnsureAdminPassword(cfg, configPath)
 	proxy.ApplyConfig(cfg)
 
 	port := cfg.Server.Port
 	accountsDir := cfg.Server.AccountsDir
 	tokenFile := cfg.Server.TokenFile
+	volumeMode := strings.TrimSpace(os.Getenv("ACCOUNTS_DIR")) != ""
+	if volumeMode {
+		originalTokenFile := tokenFile
+		tokenFile = resolveVolumeFile(tokenFile, accountsDir, true)
+		migrateFileToVolume(originalTokenFile, tokenFile)
+		cfg.Register.HistoryFile = resolveVolumeFile(cfg.Register.HistoryFile, accountsDir, true)
+	}
 
 	pool := proxy.NewAccountPool()
 
@@ -226,7 +283,7 @@ func main() {
 		})
 	}
 
-	mux := newMux(pool, accountsDir, apiKey, dashAuth, usageStats, requestHistory, regDeps, batchManager)
+	mux := newMux(pool, accountsDir, configPath, apiKey, dashAuth, usageStats, requestHistory, regDeps, batchManager)
 
 	log.Printf("=== notion-manager ===")
 	log.Printf("Listening on :%s", port)

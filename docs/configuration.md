@@ -8,13 +8,28 @@
 environment variables > config.yaml > code defaults
 ```
 
+### Config file location and Railway persistence
+
+Local launches continue to use the repository `config.yaml`. When
+`ACCOUNTS_DIR` is set (the Docker/Railway default is `/app/accounts`), the
+process seeds `${ACCOUNTS_DIR}/.notion-manager-config.yaml` on first startup and
+writes Dashboard changes there. The file lives beside the account volume, so
+settings survive Railway sleep, container replacement, and image updates. Set
+`CONFIG_PATH` to choose an explicit file; it takes precedence over the automatic
+path.
+
+Railway needs both `ACCOUNTS_DIR=/app/accounts` and an actual Volume mounted at
+`/app/accounts`. An environment variable without the Volume does not preserve
+files across container replacement. Environment variables such as
+`USE_NOTION_PERSONAL_INSTRUCTIONS` remain higher priority than Dashboard values.
+
 ## Server
 
 | Setting | Repo sample | Code default | Notes |
 | --- | --- | --- | --- |
 | `server.port` | `3000` | `8081` | Listening port |
 | `server.accounts_dir` | `accounts` | `accounts` | Account JSON directory; also stores `.register_history.json` / `.token_stats.json` / `.register_inputs/` |
-| `server.token_file` | `token.txt` | `token.txt` | Fallback single-account file |
+| `server.token_file` | `token.txt` | `token.txt` | Fallback single-account file; container deployments with `ACCOUNTS_DIR` move it into the persistent volume |
 | `server.api_key` | empty | auto-generated | Used by `/v1/messages` |
 | `server.admin_password` | empty | auto-generated | Hashed on first startup; override with `ADMIN_PASSWORD` |
 | `server.log_file` | `server.stderr.log` | empty (stderr) | All `log.Printf` output is appended here |
@@ -58,7 +73,7 @@ environment variables > config.yaml > code defaults
 
 | Setting | Code default | Notes |
 | --- | --- | --- |
-| `register.history_file` | `accounts/.register_history.json` | Persisted job history; reloaded on startup |
+| `register.history_file` | `accounts/.register_history.json` | Persisted job history; container deployments with `ACCOUNTS_DIR` map it into the persistent volume |
 | `register.history_memory_cap` | `100` | Max jobs kept in RAM (and on disk) |
 | `register.default_concurrency` | `1` | Pre-filled value in the dashboard register modal |
 
@@ -83,6 +98,7 @@ export ENABLE_TOOL_BRIDGE=true
 export NOTION_PROXY=socks5h://127.0.0.1:1080
 export QUOTA_LIVE_CHECK_SECONDS=5
 export REFRESH_CONCURRENCY=10
+export CONFIG_PATH=/app/accounts/.notion-manager-config.yaml # optional; automatic when ACCOUNTS_DIR is set
 ```
 
 An invalid `NOTION_PROXY` is logged once at startup and dropped — runtime falls back to direct dial rather than leaking the misconfigured URL into every Notion request.
