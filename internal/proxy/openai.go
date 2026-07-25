@@ -347,6 +347,12 @@ func (t *openAIChatStreamTranscoder) HandleFrame(frame anthropicSSEFrame) error 
 		index := intValue(payload["index"])
 		delta, _ := payload["delta"].(map[string]interface{})
 		switch stringValue(delta["type"]) {
+		case "thinking_delta":
+			thinking := stringValue(delta["thinking"])
+			if thinking == "" {
+				return nil
+			}
+			return t.emitChunk(map[string]interface{}{"reasoning_content": thinking}, nil, nil)
 		case "text_delta":
 			text := stringValue(delta["text"])
 			if text == "" {
@@ -1152,9 +1158,13 @@ func sendOpenAISSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType s
 
 func buildOpenAIChatCompletionResponse(responseID string, created int64, model string, anthResp *AnthropicResponse) OpenAIChatCompletionResponse {
 	text, toolCalls := extractAnthropicTextAndToolCalls(anthResp.Content)
+	reasoning := extractAnthropicThinking(anthResp.Content)
 	finishReason := mapAnthropicStopReasonToOpenAI(stringValueOrDefault(anthResp.StopReason, "end_turn"))
 	message := map[string]interface{}{
 		"role": "assistant",
+	}
+	if reasoning != "" {
+		message["reasoning_content"] = reasoning
 	}
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
@@ -1250,6 +1260,16 @@ func extractAnthropicTextAndToolCalls(blocks []AnthropicContentBlock) (string, [
 	return text.String(), toolCalls
 }
 
+func extractAnthropicThinking(blocks []AnthropicContentBlock) string {
+	parts := make([]string, 0)
+	for _, block := range blocks {
+		if block.Type == "thinking" && block.Thinking != "" {
+			parts = append(parts, block.Thinking)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 func convertOpenAIChatCompletionRequest(req *OpenAIChatCompletionRequest) (*AnthropicRequest, error) {
 	if req.N > 1 {
 		return nil, fmt.Errorf("n > 1 is not supported")
@@ -1279,6 +1299,7 @@ func convertOpenAIChatCompletionRequest(req *OpenAIChatCompletionRequest) (*Anth
 		TopP:         req.TopP,
 		Tools:        tools,
 		ToolChoice:   normalizeOpenAIToolChoice(req.ToolChoice, req.FunctionCall),
+		Thinking:     map[string]interface{}{"type": "enabled"},
 		OutputConfig: convertOpenAIResponseFormat(req.ResponseFormat),
 		Metadata:     req.Metadata,
 	}

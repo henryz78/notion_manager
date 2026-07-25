@@ -60,6 +60,9 @@ func TestConvertOpenAIChatCompletionRequest_WithFilesToolsAndJSONSchema(t *testi
 	if anthReq.OutputConfig == nil || anthReq.OutputConfig.Format == nil || anthReq.OutputConfig.Format.Type != "json_schema" {
 		t.Fatalf("output_config = %#v", anthReq.OutputConfig)
 	}
+	if anthReq.Thinking == nil {
+		t.Fatal("thinking bridge is not enabled")
+	}
 	if len(anthReq.Messages) != 1 {
 		t.Fatalf("messages len = %d, want 1", len(anthReq.Messages))
 	}
@@ -120,6 +123,7 @@ func TestBuildOpenAIChatCompletionResponse_FromAnthropicBlocks(t *testing.T) {
 	stopReason := "tool_use"
 	resp := buildOpenAIChatCompletionResponse("chatcmpl_test", 123, "gpt-5.4", &AnthropicResponse{
 		Content: []AnthropicContentBlock{
+			{Type: "thinking", Thinking: "先判断需要读取哪个文件。"},
 			{Type: "text", Text: "先读文件"},
 			{Type: "tool_use", ID: "call_1", Name: "Read", Input: json.RawMessage(`{"path":"README.md"}`)},
 		},
@@ -129,6 +133,9 @@ func TestBuildOpenAIChatCompletionResponse_FromAnthropicBlocks(t *testing.T) {
 
 	if got := resp.Choices[0].Message["content"]; got != "先读文件" {
 		t.Fatalf("content = %#v", got)
+	}
+	if got := resp.Choices[0].Message["reasoning_content"]; got != "先判断需要读取哪个文件。" {
+		t.Fatalf("reasoning_content = %#v", got)
 	}
 	toolCalls, ok := resp.Choices[0].Message["tool_calls"].([]OpenAIChatToolCall)
 	if !ok || len(toolCalls) != 1 {
@@ -147,8 +154,10 @@ func TestOpenAIChatStreamTranscoder_EmitsToolCallsAndDone(t *testing.T) {
 	transcoder := newOpenAIChatStreamTranscoder(rr, rr, "chatcmpl_test", "gpt-5.4", 123, true)
 	frames := []anthropicSSEFrame{
 		{Event: "message_start", Data: json.RawMessage(`{"message":{"usage":{"input_tokens":11}}}`)},
-		{Event: "content_block_start", Data: json.RawMessage(`{"index":0,"content_block":{"type":"tool_use","id":"call_1","name":"Read","input":{}}}`)},
-		{Event: "content_block_delta", Data: json.RawMessage(`{"index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"README.md\"}"}}`)},
+		{Event: "content_block_start", Data: json.RawMessage(`{"index":0,"content_block":{"type":"thinking","thinking":""}}`)},
+		{Event: "content_block_delta", Data: json.RawMessage(`{"index":0,"delta":{"type":"thinking_delta","thinking":"Need to inspect the file."}}`)},
+		{Event: "content_block_start", Data: json.RawMessage(`{"index":1,"content_block":{"type":"tool_use","id":"call_1","name":"Read","input":{}}}`)},
+		{Event: "content_block_delta", Data: json.RawMessage(`{"index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"README.md\"}"}}`)},
 		{Event: "message_delta", Data: json.RawMessage(`{"delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}`)},
 		{Event: "message_stop", Data: json.RawMessage(`{"type":"message_stop"}`)},
 	}
@@ -164,11 +173,25 @@ func TestOpenAIChatStreamTranscoder_EmitsToolCallsAndDone(t *testing.T) {
 	if !strings.Contains(body, `"tool_calls"`) || !strings.Contains(body, `README.md`) {
 		t.Fatalf("body missing tool call data: %s", body)
 	}
+	if !strings.Contains(body, `"reasoning_content":"Need to inspect the file."`) {
+		t.Fatalf("body missing reasoning content: %s", body)
+	}
 	if !strings.Contains(body, `"usage":{`) || !strings.Contains(body, `"prompt_tokens":11`) || !strings.Contains(body, `"completion_tokens":7`) || !strings.Contains(body, `"total_tokens":18`) {
 		t.Fatalf("body missing usage chunk: %s", body)
 	}
 	if !strings.Contains(body, "data: [DONE]") {
 		t.Fatalf("body missing DONE: %s", body)
+	}
+}
+
+func TestOpenAIChatOmitsReasoningContentWhenAnthropicHasNoThinking(t *testing.T) {
+	stopReason := "end_turn"
+	resp := buildOpenAIChatCompletionResponse("chatcmpl_plain", 123, "gpt-5.4", &AnthropicResponse{
+		Content:    []AnthropicContentBlock{{Type: "text", Text: "plain answer"}},
+		StopReason: &stopReason,
+	})
+	if _, exists := resp.Choices[0].Message["reasoning_content"]; exists {
+		t.Fatalf("reasoning_content should be omitted: %#v", resp.Choices[0].Message)
 	}
 }
 
