@@ -50,15 +50,16 @@ type ServerConfig struct {
 }
 
 type ProxyConfig struct {
-	NotionAPIBase                 string `yaml:"notion_api_base"`
-	ClientVersion                 string `yaml:"client_version"`
-	DefaultModel                  string `yaml:"default_model"`
-	DisableNotionPrompt           bool   `yaml:"disable_notion_prompt"`
-	UseClientSystemPrompt         bool   `yaml:"use_client_system_prompt"`
-	UseNotionPersonalInstructions bool   `yaml:"use_notion_personal_instructions"`
-	EnableToolBridge              bool   `yaml:"enable_tool_bridge"`
-	EnableWebSearch               *bool  `yaml:"enable_web_search"`
-	EnableWorkspaceSearch         *bool  `yaml:"enable_workspace_search"`
+	NotionAPIBase                     string `yaml:"notion_api_base"`
+	ClientVersion                     string `yaml:"client_version"`
+	DefaultModel                      string `yaml:"default_model"`
+	DisableNotionPrompt               bool   `yaml:"disable_notion_prompt"`
+	UseClientSystemPrompt             bool   `yaml:"use_client_system_prompt"`
+	UseNotionPersonalInstructions     bool   `yaml:"use_notion_personal_instructions"`
+	CheckPersonalInstructionsOnImport bool   `yaml:"check_personal_instructions_on_import"`
+	EnableToolBridge                  bool   `yaml:"enable_tool_bridge"`
+	EnableWebSearch                   *bool  `yaml:"enable_web_search"`
+	EnableWorkspaceSearch             *bool  `yaml:"enable_workspace_search"`
 	// AskModeDefault toggles Notion's ASK mode (frontend "Answers only,
 	// won't make edits" — config.useReadOnlyMode=true on the workflow
 	// thread). When true, all chat requests run in read-only mode by
@@ -175,15 +176,16 @@ func DefaultConfig() *Config {
 			NotionLogResp: false,
 		},
 		Proxy: ProxyConfig{
-			NotionAPIBase:                 "https://www.notion.so/api/v3",
-			ClientVersion:                 "23.13.20260313.1423",
-			DefaultModel:                  "claude-opus-4.6",
-			UseClientSystemPrompt:         true,
-			UseNotionPersonalInstructions: false,
-			EnableToolBridge:              true,
-			EnableWebSearch:               boolPtr(true),
-			EnableWorkspaceSearch:         boolPtr(false),
-			AskModeDefault:                boolPtr(false),
+			NotionAPIBase:                     "https://www.notion.so/api/v3",
+			ClientVersion:                     "23.13.20260313.1423",
+			DefaultModel:                      "claude-opus-4.6",
+			UseClientSystemPrompt:             true,
+			UseNotionPersonalInstructions:     false,
+			CheckPersonalInstructionsOnImport: false,
+			EnableToolBridge:                  true,
+			EnableWebSearch:                   boolPtr(true),
+			EnableWorkspaceSearch:             boolPtr(false),
+			AskModeDefault:                    boolPtr(false),
 		},
 		Timeouts: TimeoutConfig{
 			InferenceTimeout: 300,
@@ -301,6 +303,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if v := os.Getenv("USE_NOTION_PERSONAL_INSTRUCTIONS"); v != "" {
 		cfg.Proxy.UseNotionPersonalInstructions = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv("CHECK_PERSONAL_INSTRUCTIONS_ON_IMPORT"); v != "" {
+		cfg.Proxy.CheckPersonalInstructionsOnImport = strings.EqualFold(v, "true") || v == "1"
 	}
 	if v := os.Getenv("ENABLE_TOOL_BRIDGE"); v != "" {
 		cfg.Proxy.EnableToolBridge = strings.EqualFold(v, "true") || v == "1"
@@ -691,6 +696,12 @@ func (c *Config) ClientSystemPromptEnabled() bool {
 // independent of client system messages and defaults to false.
 func (c *Config) NotionPersonalInstructionsEnabled() bool {
 	return c != nil && c.Proxy.UseNotionPersonalInstructions
+}
+
+// PersonalInstructionsImportCheckEnabled reports whether token imports should
+// probe the selected account's default-Agent personal-instructions binding.
+func (c *Config) PersonalInstructionsImportCheckEnabled() bool {
+	return c != nil && c.Proxy.CheckPersonalInstructionsOnImport
 }
 
 // ToolBridgeEnabled reports whether client tool definitions should be

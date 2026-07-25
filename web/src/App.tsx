@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import type { DashboardData, AccountInfo, AccountSummary, RefreshStatus, TokenStats } from './types'
 import { fetchDashboardData, fetchAccountSelection, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats, startAccountBatchJob, getAccountBatchJob, listAccountBatchJobs, retryAccountBatchJob } from './api'
-import type { SearchSettings, AccountStatusFilter, AccountBatchJob, AccountBatchJobAction } from './api'
+import type { SearchSettings, AccountStatusFilter, AccountBatchJob, AccountBatchJobAction, AccountImportPersonalInstructionsPolicy } from './api'
 import { fmt, formatTokens, getQuotaStatusByUsage, getQuotaPct, avatarColor, avatarLetter, formatCheckedAt, formatTimestampMs, providerDisplay } from './utils'
 import { AccountMenu } from './components/AccountMenu'
 import { RegisterModal } from './components/RegisterModal'
@@ -71,13 +71,22 @@ type AccountImportRow = {
   detail: string
 }
 
-function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
+function AddAccountModal({
+  onClose,
+  onSuccess,
+  autoCheckPersonalInstructions,
+}: {
+  onClose: () => void
+  onSuccess: () => void
+  autoCheckPersonalInstructions: boolean
+}) {
   const [token, setToken] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [results, setResults] = useState<AccountImportRow[]>([])
   const [progress, setProgress] = useState({ done: 0, total: 0 })
   const [completed, setCompleted] = useState(false)
+  const [personalInstructionsPolicy, setPersonalInstructionsPolicy] = useState<AccountImportPersonalInstructionsPolicy>('all')
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
   const parsedLines = useMemo(
@@ -142,7 +151,7 @@ function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSucces
         const item = candidates[cursor++]
         let row: AccountImportRow
         try {
-          const res = await addAccount(item.token)
+          const res = await addAccount(item.token, personalInstructionsPolicy)
           if (res.error || !res.account) {
             row = {
               line: item.line,
@@ -150,13 +159,30 @@ function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSucces
               title: `第 ${item.line} 行导入失败`,
               detail: res.error || '账号信息为空',
             }
+          } else if (res.status === 'skipped' && res.reason === 'personal_instructions_missing') {
+            row = {
+              line: item.line,
+              status: 'skipped',
+              title: res.account.email || res.account.name || `第 ${item.line} 行已跳过`,
+              detail: '官网默认 Agent 尚未设置个人指令，未导入',
+            }
           } else {
             added++
+            let personalInstructionsDetail = ''
+            if (res.personal_instructions_checked) {
+              if (res.personal_instructions_check_error) {
+                personalInstructionsDetail = ' · 个人指令检测失败，已按“全部导入”保留'
+              } else {
+                personalInstructionsDetail = res.personal_instructions_configured
+                  ? ' · 官网个人指令已设置'
+                  : ' · 官网个人指令未设置'
+              }
+            }
             row = {
               line: item.line,
               status: 'success',
               title: res.account.email || res.account.name || `第 ${item.line} 行`,
-              detail: `${res.account.space || '未命名空间'} · ${res.account.plan_type || '未知套餐'}`,
+              detail: `${res.account.space || '未命名空间'} · ${res.account.plan_type || '未知套餐'}${personalInstructionsDetail}`,
             }
           }
         } catch (err) {
@@ -197,6 +223,33 @@ function AddAccountModal({ onClose, onSuccess }: { onClose: () => void; onSucces
           <p>每行粘贴一个 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">token_v2</code>，系统默认并行验证 5 个，单个 token 也照常支持。</p>
           <p className="text-text-muted">获取方式：打开 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">notion.so</code> → F12 → Application → Cookies → 复制 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">token_v2</code> 的值</p>
         </div>
+
+        {autoCheckPersonalInstructions && (
+          <div className="mb-4 rounded-lg border border-white/10 bg-white/[.025] p-3">
+            <div className="text-[12px] font-medium text-text-primary">已开启导入时检测官网个人指令</div>
+            <div className="text-[11px] text-text-muted mt-1 mb-2.5">只检查是否绑定，不读取或保存指令正文。检测失败时，“全部导入”会保留账号，“只导入已设置”不会导入。</div>
+            <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => setPersonalInstructionsPolicy('all')}
+                className={`rounded-md border px-3 py-2 text-left cursor-pointer disabled:opacity-50 ${personalInstructionsPolicy === 'all' ? 'border-notion-blue/60 bg-notion-blue/10' : 'border-border bg-bg-card hover:bg-bg-card-hover'}`}
+              >
+                <div className="text-[12px] font-medium text-text-primary">全部导入</div>
+                <div className="text-[10px] text-text-muted mt-0.5">检测并标记，但不筛掉账号</div>
+              </button>
+              <button
+                type="button"
+                disabled={loading}
+                onClick={() => setPersonalInstructionsPolicy('configured_only')}
+                className={`rounded-md border px-3 py-2 text-left cursor-pointer disabled:opacity-50 ${personalInstructionsPolicy === 'configured_only' ? 'border-notion-blue/60 bg-notion-blue/10' : 'border-border bg-bg-card hover:bg-bg-card-hover'}`}
+              >
+                <div className="text-[12px] font-medium text-text-primary">只导入已设置的</div>
+                <div className="text-[10px] text-text-muted mt-0.5">未设置个人指令的账号直接跳过</div>
+              </button>
+            </div>
+          </div>
+        )}
 
         <form onSubmit={handleSubmit}>
           <textarea
@@ -1176,7 +1229,7 @@ export default function App() {
     await launchAllPoolBatch('delete_exhausted')
   }
 
-  const toggleSetting = async (key: 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'debug_logging') => {
+  const toggleSetting = async (key: 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'check_personal_instructions_on_import' | 'debug_logging') => {
     if (!settings) return
     const newVal = !settings[key]
     try {
@@ -1586,6 +1639,25 @@ export default function App() {
                   </button>
                 </div>
               </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={settings.check_personal_instructions_on_import}
+                onClick={() => toggleSetting('check_personal_instructions_on_import')}
+                className={`w-full mb-5 text-left rounded-lg border p-3.5 cursor-pointer transition-colors ${settings.check_personal_instructions_on_import ? 'border-notion-blue/60 bg-notion-blue/10' : 'border-white/[.07] bg-white/[.025] hover:bg-white/[.04]'}`}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-[12px] font-semibold text-text-primary">导入账号时检测官网个人指令</div>
+                    <div className="text-[11px] text-text-muted mt-1 leading-relaxed">
+                      开启后，添加账号窗口可选择“全部导入”或“只导入已设置个人指令的账号”；只记录检测结果，不读取指令正文。
+                    </div>
+                  </div>
+                  <span className={`text-[10px] shrink-0 ${settings.check_personal_instructions_on_import ? 'text-ok' : 'text-text-muted'}`}>
+                    {settings.check_personal_instructions_on_import ? '开启' : '关闭'}
+                  </span>
+                </div>
+              </button>
               <div className="flex items-center gap-6 flex-wrap max-sm:flex-col max-sm:items-stretch max-sm:gap-4">
                 <div className="flex items-center gap-6 flex-wrap max-sm:flex-col max-sm:items-stretch max-sm:gap-3 max-sm:w-full">
                   <div className="flex items-center gap-1.5 max-sm:flex-wrap">
@@ -1844,7 +1916,13 @@ export default function App() {
         )}
         </>}
       </main>
-      {showAddModal && <AddAccountModal onClose={() => setShowAddModal(false)} onSuccess={loadData} />}
+      {showAddModal && (
+        <AddAccountModal
+          onClose={() => setShowAddModal(false)}
+          onSuccess={loadData}
+          autoCheckPersonalInstructions={settings?.check_personal_instructions_on_import ?? false}
+        />
+      )}
 
       <RegisterModal
         open={registerOpen}

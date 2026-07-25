@@ -49,6 +49,9 @@ proxy:
     # account's default Agent personal instructions may both be enabled.
     use_client_system_prompt: true
     use_notion_personal_instructions: false
+    # Probe the default Agent personal-instructions binding during token import.
+    # Does not read or store the instructions page contents.
+    check_personal_instructions_on_import: false
     # Convert external Tools/functions to the Notion-compatible bridge format.
     enable_tool_bridge: true
     # Enable web search (internet search) for AI responses.

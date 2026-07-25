@@ -103,6 +103,58 @@ func TestPersonalInstructionsCheckStatePersistsWithoutPageContent(t *testing.T) 
 	}
 }
 
+func TestImportedAccountPersonalInstructionsCheckPersistsOnlyResult(t *testing.T) {
+	acc := &Account{
+		TokenV2:   "token",
+		UserID:    "user",
+		UserEmail: "import@example.com",
+		SpaceID:   "space",
+	}
+	configured, checkError := checkPersonalInstructionsForImport(acc, func(*Account) (string, error) {
+		return "private-import-page-id", nil
+	})
+	if checkError != "" || configured == nil || !*configured {
+		t.Fatalf("unexpected import check result: configured=%v error=%q", configured, checkError)
+	}
+
+	dir := t.TempDir()
+	filename, err := SaveAccountToFile(acc, dir)
+	if err != nil {
+		t.Fatalf("SaveAccountToFile: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, filename))
+	if err != nil {
+		t.Fatalf("read imported account: %v", err)
+	}
+	var saved map[string]interface{}
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatalf("decode imported account: %v", err)
+	}
+	if saved["personal_instructions_configured"] != true {
+		t.Fatalf("configured flag not persisted: %#v", saved)
+	}
+	if _, ok := saved["personal_instructions_checked_at"]; !ok {
+		t.Fatalf("checked_at not persisted: %#v", saved)
+	}
+	if strings.Contains(string(data), "private-import-page-id") {
+		t.Fatalf("personal-instructions page ID leaked into account file: %s", data)
+	}
+}
+
+func TestImportedAccountPersonalInstructionsCheckRecordsFailure(t *testing.T) {
+	acc := &Account{UserEmail: "failed-import@example.com"}
+	configured, checkError := checkPersonalInstructionsForImport(acc, func(*Account) (string, error) {
+		return "", errors.New("probe failed")
+	})
+	if configured != nil || checkError == "" {
+		t.Fatalf("unexpected failed import check result: configured=%v error=%q", configured, checkError)
+	}
+	state := acc.personalInstructionsSnapshot()
+	if state.Configured != nil || state.CheckedAt == nil || state.Error == "" {
+		t.Fatalf("failed import state not recorded: %+v", state)
+	}
+}
+
 func valueString(value interface{}) string {
 	if value == nil {
 		return ""

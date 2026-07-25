@@ -294,6 +294,7 @@ func SaveAccountToFile(acc *Account, dir string) (string, error) {
 	if quota.CheckedAt != nil {
 		data["quota_checked_at"] = quota.CheckedAt.Format(time.RFC3339)
 	}
+	writePersonalInstructionsState(data, acc.personalInstructionsSnapshot())
 	data["extracted_at"] = time.Now().Format(time.RFC3339)
 
 	out, err := json.MarshalIndent(data, "", "  ")
@@ -378,7 +379,8 @@ func HandleAddAccount(pool *AccountPool, accountsDir string, auth *DashboardAuth
 		}
 
 		var body struct {
-			TokenV2 string `json:"token_v2"`
+			TokenV2                    string `json:"token_v2"`
+			PersonalInstructionsPolicy string `json:"personal_instructions_policy"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
@@ -387,6 +389,14 @@ func HandleAddAccount(pool *AccountPool, accountsDir string, auth *DashboardAuth
 		tokenV2 := strings.TrimSpace(body.TokenV2)
 		if tokenV2 == "" {
 			http.Error(w, `{"error":"token_v2 is required"}`, http.StatusBadRequest)
+			return
+		}
+		policy := strings.ToLower(strings.TrimSpace(body.PersonalInstructionsPolicy))
+		if policy == "" {
+			policy = "all"
+		}
+		if policy != "all" && policy != "configured_only" {
+			http.Error(w, `{"error":"personal_instructions_policy must be all or configured_only"}`, http.StatusBadRequest)
 			return
 		}
 
@@ -401,6 +411,41 @@ func HandleAddAccount(pool *AccountPool, accountsDir string, auth *DashboardAuth
 				"error": fmt.Sprintf("Failed to discover account: %v", err),
 			})
 			return
+		}
+
+		checkPersonalInstructions := AppConfig.PersonalInstructionsImportCheckEnabled() || policy == "configured_only"
+		var configured *bool
+		var checkError string
+		if checkPersonalInstructions {
+			configured, checkError = checkPersonalInstructionsForImport(acc, fetchNotionPersonalInstructionsPageID)
+		}
+
+		accountInfo := map[string]string{
+			"name":      acc.UserName,
+			"email":     acc.UserEmail,
+			"space":     acc.SpaceName,
+			"plan_type": acc.PlanType,
+		}
+		if policy == "configured_only" {
+			if checkError != "" {
+				log.Printf("[add-account] personal-instructions check failed for %s: %s", acc.UserEmail, checkError)
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "官网个人指令检测失败：" + checkError,
+					"account": accountInfo,
+				})
+				return
+			}
+			if configured == nil || !*configured {
+				log.Printf("[add-account] skipped %s: default-Agent personal instructions not configured", acc.UserEmail)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"status":                           "skipped",
+					"reason":                           "personal_instructions_missing",
+					"personal_instructions_configured": false,
+					"account":                          accountInfo,
+				})
+				return
+			}
 		}
 
 		// Save to file
@@ -419,16 +464,21 @@ func HandleAddAccount(pool *AccountPool, accountsDir string, auth *DashboardAuth
 
 		log.Printf("[add-account] success: %s (%s) → %s", acc.UserName, acc.UserEmail, filename)
 
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		response := map[string]interface{}{
 			"status":   "ok",
 			"filename": filename,
-			"account": map[string]string{
-				"name":      acc.UserName,
-				"email":     acc.UserEmail,
-				"space":     acc.SpaceName,
-				"plan_type": acc.PlanType,
-			},
-		})
+			"account":  accountInfo,
+		}
+		if checkPersonalInstructions {
+			response["personal_instructions_checked"] = true
+			if configured != nil {
+				response["personal_instructions_configured"] = *configured
+			}
+			if checkError != "" {
+				response["personal_instructions_check_error"] = checkError
+			}
+		}
+		_ = json.NewEncoder(w).Encode(response)
 	}
 }
 
@@ -449,6 +499,22 @@ type PersonalInstructionsCheckSummary struct {
 }
 
 type personalInstructionsPageIDFetcher func(*Account) (string, error)
+
+func checkPersonalInstructionsForImport(acc *Account, fetcher personalInstructionsPageIDFetcher) (*bool, string) {
+	if acc == nil || fetcher == nil {
+		return nil, ""
+	}
+	checkedAt := time.Now().UTC()
+	pageID, err := fetcher(acc)
+	if err != nil {
+		checkError := truncateForLog(err.Error(), 300)
+		acc.setPersonalInstructionsCheck(nil, checkedAt, checkError)
+		return nil, checkError
+	}
+	configured := strings.TrimSpace(pageID) != ""
+	acc.setPersonalInstructionsCheck(&configured, checkedAt, "")
+	return &configured, ""
+}
 
 func checkAllPersonalInstructions(pool *AccountPool, concurrency int, fetcher personalInstructionsPageIDFetcher) PersonalInstructionsCheckSummary {
 	if pool == nil {

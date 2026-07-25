@@ -281,8 +281,12 @@ export function openBestProxy() {
 
 export interface AddAccountResult {
   status?: string
+  reason?: string
   error?: string
   filename?: string
+  personal_instructions_checked?: boolean
+  personal_instructions_configured?: boolean
+  personal_instructions_check_error?: string
   account?: {
     name: string
     email: string
@@ -291,12 +295,20 @@ export interface AddAccountResult {
   }
 }
 
-export async function addAccount(tokenV2: string): Promise<AddAccountResult> {
+export type AccountImportPersonalInstructionsPolicy = 'all' | 'configured_only'
+
+export async function addAccount(
+  tokenV2: string,
+  personalInstructionsPolicy: AccountImportPersonalInstructionsPolicy = 'all',
+): Promise<AddAccountResult> {
   const resp = await fetch('/admin/accounts/add', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     credentials: 'same-origin',
-    body: JSON.stringify({ token_v2: tokenV2 }),
+    body: JSON.stringify({
+      token_v2: tokenV2,
+      personal_instructions_policy: personalInstructionsPolicy,
+    }),
   })
   const data = await readJson<AddAccountResult>(resp, '添加账号接口返回了无效响应')
   if (!resp.ok) return { error: data.error || `HTTP ${resp.status}` }
@@ -481,6 +493,9 @@ export interface SearchSettings {
   // These prompt sources are independent and may both be on or off.
   use_client_system_prompt: boolean
   use_notion_personal_instructions: boolean
+  // When enabled, token imports probe the default Agent binding without
+  // reading or storing the instructions page contents.
+  check_personal_instructions_on_import: boolean
   // Controls conversion of client Tools/functions into Notion-compatible
   // prompts and parsing the resulting calls back to the client.
   enable_tool_bridge: boolean
@@ -499,7 +514,7 @@ export async function fetchSettings(): Promise<SearchSettings> {
   return resp.json()
 }
 
-export async function updateSettings(settings: Partial<Pick<SearchSettings, 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'use_client_system_prompt' | 'use_notion_personal_instructions' | 'enable_tool_bridge' | 'debug_logging' | 'notion_proxy'>>): Promise<SearchSettings> {
+export async function updateSettings(settings: Partial<Pick<SearchSettings, 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'use_client_system_prompt' | 'use_notion_personal_instructions' | 'check_personal_instructions_on_import' | 'enable_tool_bridge' | 'debug_logging' | 'notion_proxy'>>): Promise<SearchSettings> {
   // Uses dashboard session cookie for auth (not API key)
   const resp = await fetch('/admin/settings', {
     method: 'PUT',
