@@ -196,10 +196,10 @@ HTTP 409 with `active_job`; the frontend must adopt that job and show its
 progress rather than starting a duplicate operation or showing a generic error.
 
 Add Account accepts one token per line and validates five accounts concurrently
-by default. When `check_personal_instructions_on_import` is enabled, the modal
-offers "import all" and "configured only"; the latter must be enforced by the
-server so missing or failed probes never enter the pool. Registration jobs and
-quota refresh retain their existing bounded worker pools.
+by default. The modal always offers "import all" and "configured only"; the
+latter must be enforced by the server so missing or failed probes never enter
+the pool. Registration jobs and quota refresh retain their existing bounded
+worker pools.
 
 ### Proxy Navigation
 

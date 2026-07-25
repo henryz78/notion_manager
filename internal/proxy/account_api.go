@@ -391,12 +391,22 @@ func HandleAddAccount(pool *AccountPool, accountsDir string, auth *DashboardAuth
 			http.Error(w, `{"error":"token_v2 is required"}`, http.StatusBadRequest)
 			return
 		}
+		policySpecified := strings.TrimSpace(body.PersonalInstructionsPolicy) != ""
 		policy := strings.ToLower(strings.TrimSpace(body.PersonalInstructionsPolicy))
 		if policy == "" {
 			policy = "all"
 		}
 		if policy != "all" && policy != "configured_only" {
 			http.Error(w, `{"error":"personal_instructions_policy must be all or configured_only"}`, http.StatusBadRequest)
+			return
+		}
+		if existing := findAccountByToken(pool, tokenV2); existing != nil {
+			log.Printf("[add-account] skipped duplicate token for %s", existing.UserEmail)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"status":  "skipped",
+				"reason":  "duplicate_account",
+				"account": accountImportInfo(existing),
+			})
 			return
 		}
 
@@ -413,19 +423,14 @@ func HandleAddAccount(pool *AccountPool, accountsDir string, auth *DashboardAuth
 			return
 		}
 
-		checkPersonalInstructions := AppConfig.PersonalInstructionsImportCheckEnabled() || policy == "configured_only"
+		checkPersonalInstructions := policySpecified || policy == "configured_only"
 		var configured *bool
 		var checkError string
 		if checkPersonalInstructions {
 			configured, checkError = checkPersonalInstructionsForImport(acc, fetchNotionPersonalInstructionsPageID)
 		}
 
-		accountInfo := map[string]string{
-			"name":      acc.UserName,
-			"email":     acc.UserEmail,
-			"space":     acc.SpaceName,
-			"plan_type": acc.PlanType,
-		}
+		accountInfo := accountImportInfo(acc)
 		if policy == "configured_only" {
 			if checkError != "" {
 				log.Printf("[add-account] personal-instructions check failed for %s: %s", acc.UserEmail, checkError)
@@ -479,6 +484,32 @@ func HandleAddAccount(pool *AccountPool, accountsDir string, auth *DashboardAuth
 			}
 		}
 		_ = json.NewEncoder(w).Encode(response)
+	}
+}
+
+func findAccountByToken(pool *AccountPool, tokenV2 string) *Account {
+	if pool == nil || tokenV2 == "" {
+		return nil
+	}
+	pool.mu.RLock()
+	defer pool.mu.RUnlock()
+	for _, acc := range pool.accounts {
+		if acc != nil && acc.TokenV2 == tokenV2 {
+			return acc
+		}
+	}
+	return nil
+}
+
+func accountImportInfo(acc *Account) map[string]string {
+	if acc == nil {
+		return map[string]string{}
+	}
+	return map[string]string{
+		"name":      acc.UserName,
+		"email":     acc.UserEmail,
+		"space":     acc.SpaceName,
+		"plan_type": acc.PlanType,
 	}
 }
 

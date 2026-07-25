@@ -53,7 +53,7 @@ Manual disable persists `disabled: true` in the matching account JSON. The
 account remains visible and can still be re-enabled, but every API/proxy
 account picker skips it while disabled.
 
-The latest 20 batch-job snapshots are stored in `accounts/.account_batch_jobs.json`. Completed history remains after a Railway restart. A task running at the instant of a service restart is marked interrupted, and its unfinished accounts can be retried. Add Account accepts one token per line and validates up to five concurrently. When import-time personal-instructions checking is enabled in Settings, the import modal can keep all accounts or only accounts with a configured default-Agent binding.
+The latest 20 batch-job snapshots are stored in `accounts/.account_batch_jobs.json`. Completed history remains after a Railway restart. A task running at the instant of a service restart is marked interrupted, and its unfinished accounts can be retried. Add Account accepts one token per line and validates up to five concurrently. The import modal can keep all accounts or only accounts with a configured default-Agent binding.
 
 The list is fetched from `GET /admin/accounts?q=&status=&page=&page_size=`. The Go server filters by query/status, sorts by health, then paginates, so big pools (1k+ accounts) stay responsive. The response includes a pool-wide `summary` block (premium count, total remaining, etc.) for the headline cards regardless of pagination.
 

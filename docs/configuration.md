@@ -50,7 +50,6 @@ files across container replacement. Environment variables such as
 | `proxy.disable_notion_prompt` | `true` | `false` | Removes Notion's ~33k system prompt for leaner API usage |
 | `proxy.use_client_system_prompt` | `true` | `true` | Include the client-supplied System Prompt; independent of Notion personal instructions |
 | `proxy.use_notion_personal_instructions` | `false` | `false` | Use the selected account's default Notion Agent instructions page; only the page ID is read, never its contents |
-| `proxy.check_personal_instructions_on_import` | `false` | `false` | Probe the default-Agent binding during token import; the Dashboard can then import all accounts or only configured accounts |
 | `proxy.enable_tool_bridge` | `true` | `true` | Translate external Tools/functions into the compatibility format used by Claude Code and other clients |
 | `proxy.enable_web_search` | `true` | `true` | Global web-search toggle (overridable per-request) |
 | `proxy.enable_workspace_search` | `false` | `false` | Global workspace-search toggle (overridable per-request) |
@@ -95,7 +94,6 @@ export ENABLE_WORKSPACE_SEARCH=false
 export ASK_MODE_DEFAULT=false
 export USE_CLIENT_SYSTEM_PROMPT=true
 export USE_NOTION_PERSONAL_INSTRUCTIONS=false
-export CHECK_PERSONAL_INSTRUCTIONS_ON_IMPORT=false
 export ENABLE_TOOL_BRIDGE=true
 export NOTION_PROXY=socks5h://127.0.0.1:1080
 export QUOTA_LIVE_CHECK_SECONDS=5
@@ -118,7 +116,7 @@ An invalid `NOTION_PROXY` is logged once at startup and dropped — runtime fall
 | `DELETE /admin/accounts/{email}` | Remove account file + pool entry | Dashboard session |
 | `GET /admin/models` | Model mapping + pool-discovered models | Dashboard session |
 | `GET/POST /admin/refresh` | Refresh status / trigger refresh | Dashboard session |
-| `GET/PUT /admin/settings` | Read / update runtime settings (`enable_web_search`, `enable_workspace_search`, `ask_mode_default`, `use_client_system_prompt`, `use_notion_personal_instructions`, `check_personal_instructions_on_import`, `enable_tool_bridge`, `debug_logging`, `notion_proxy`) | Dashboard session |
+| `GET/PUT /admin/settings` | Read / update runtime settings (`enable_web_search`, `enable_workspace_search`, `ask_mode_default`, `use_client_system_prompt`, `use_notion_personal_instructions`, `enable_tool_bridge`, `debug_logging`, `notion_proxy`) | Dashboard session |
 | `GET /admin/stats` | Token usage statistics (lifetime + today + 24h + 30-day series + top-N) | Dashboard session |
 | `POST /admin/register` | Legacy synchronous bulk register (kept for back-compat) | Dashboard session |
 | `GET /admin/register/providers` | List registered Providers | Dashboard session |

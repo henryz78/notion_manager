@@ -43,26 +43,6 @@ func TestNotionPersonalInstructionsConfigDefaultsAndEnv(t *testing.T) {
 	}
 }
 
-func TestPersonalInstructionsImportCheckDefaultsAndEnv(t *testing.T) {
-	t.Setenv("CHECK_PERSONAL_INSTRUCTIONS_ON_IMPORT", "")
-	if DefaultConfig().PersonalInstructionsImportCheckEnabled() {
-		t.Fatal("import-time personal-instructions check must default to false")
-	}
-
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(configPath, []byte("proxy:\n  check_personal_instructions_on_import: false\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	t.Setenv("CHECK_PERSONAL_INSTRUCTIONS_ON_IMPORT", "true")
-	cfg, err := LoadConfig(configPath)
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if !cfg.PersonalInstructionsImportCheckEnabled() {
-		t.Fatal("environment variable should enable import-time checking")
-	}
-}
-
 func TestIndependentPromptAndToolSettingsDefaultsAndEnv(t *testing.T) {
 	t.Setenv("USE_CLIENT_SYSTEM_PROMPT", "")
 	t.Setenv("ENABLE_TOOL_BRIDGE", "")
@@ -132,7 +112,7 @@ func TestAdminSettingsReadsUpdatesAndPersistsPersonalInstructions(t *testing.T) 
 	}
 
 	handler := HandleAdminSettings(configPath, NewDashboardAuth("", ""))
-	put := httptest.NewRequest(http.MethodPut, "/admin/settings", strings.NewReader(`{"use_client_system_prompt":false,"use_notion_personal_instructions":true,"check_personal_instructions_on_import":true,"enable_tool_bridge":false}`))
+	put := httptest.NewRequest(http.MethodPut, "/admin/settings", strings.NewReader(`{"use_client_system_prompt":false,"use_notion_personal_instructions":true,"enable_tool_bridge":false}`))
 	put.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, put)
@@ -150,9 +130,6 @@ func TestAdminSettingsReadsUpdatesAndPersistsPersonalInstructions(t *testing.T) 
 	if !AppConfig.NotionPersonalInstructionsEnabled() {
 		t.Fatal("runtime config was not updated")
 	}
-	if !AppConfig.PersonalInstructionsImportCheckEnabled() {
-		t.Fatal("import-time personal-instructions check was not updated")
-	}
 	if AppConfig.ClientSystemPromptEnabled() || AppConfig.ToolBridgeEnabled() {
 		t.Fatal("independent prompt/tool settings were not updated")
 	}
@@ -168,7 +145,6 @@ func TestAdminSettingsReadsUpdatesAndPersistsPersonalInstructions(t *testing.T) 
 		t.Fatalf("setting was not persisted:\n%s", persisted)
 	}
 	if !strings.Contains(string(persisted), "use_client_system_prompt: false") ||
-		!strings.Contains(string(persisted), "check_personal_instructions_on_import: true") ||
 		!strings.Contains(string(persisted), "enable_tool_bridge: false") {
 		t.Fatalf("independent settings were not persisted:\n%s", persisted)
 	}
@@ -185,9 +161,6 @@ func TestAdminSettingsReadsUpdatesAndPersistsPersonalInstructions(t *testing.T) 
 	}
 	if enabled, _ := current["use_notion_personal_instructions"].(bool); !enabled {
 		t.Fatalf("GET response did not expose setting: %#v", current)
-	}
-	if enabled, _ := current["check_personal_instructions_on_import"].(bool); !enabled {
-		t.Fatalf("GET response did not expose import-time check setting: %#v", current)
 	}
 	if enabled, _ := current["use_client_system_prompt"].(bool); enabled {
 		t.Fatalf("GET response did not expose disabled client prompt: %#v", current)

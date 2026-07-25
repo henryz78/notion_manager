@@ -49,7 +49,6 @@ Railway 需要同时满足两点：`ACCOUNTS_DIR=/app/accounts`，并且确实�
 | `proxy.disable_notion_prompt` | `true` | `false` | 关闭 Notion 内置 ~33k 系统提示，节省输入 token |
 | `proxy.use_client_system_prompt` | `true` | `true` | 是否带上客户端传来的 System Prompt；与官网个人指令互相独立 |
 | `proxy.use_notion_personal_instructions` | `false` | `false` | 使用所选账号官网默认 Notion Agent 的个人指令页面；项目只读取页面 ID、不读取正文 |
-| `proxy.check_personal_instructions_on_import` | `false` | `false` | 导入 token 时检测默认 Agent 是否已绑定个人指令；Dashboard 可选择全部导入或只导入已设置账号 |
 | `proxy.enable_tool_bridge` | `true` | `true` | 把外部 Tools / 函数调用转换成 Claude Code 等客户端所需的兼容格式 |
 | `proxy.enable_web_search` | `true` | `true` | 联网搜索全局开关（可被请求头覆盖） |
 | `proxy.enable_workspace_search` | `false` | `false` | 工作区搜索全局开关（可被请求头覆盖） |
@@ -94,7 +93,6 @@ export ENABLE_WORKSPACE_SEARCH=false
 export ASK_MODE_DEFAULT=false
 export USE_CLIENT_SYSTEM_PROMPT=true
 export USE_NOTION_PERSONAL_INSTRUCTIONS=false
-export CHECK_PERSONAL_INSTRUCTIONS_ON_IMPORT=false
 export ENABLE_TOOL_BRIDGE=true
 export NOTION_PROXY=socks5h://127.0.0.1:1080
 export QUOTA_LIVE_CHECK_SECONDS=5
@@ -117,7 +115,7 @@ export CONFIG_PATH=/app/accounts/.notion-manager-config.yaml # 可选；ACCOUNTS
 | `DELETE /admin/accounts/{email}` | 删除账号 JSON + 池中条目 | Dashboard 会话 |
 | `GET /admin/models` | 模型映射 + 池内可用模型 | Dashboard 会话 |
 | `GET/POST /admin/refresh` | 查询 / 触发刷新 | Dashboard 会话 |
-| `GET/PUT /admin/settings` | 读 / 写运行时设置（`enable_web_search` / `enable_workspace_search` / `ask_mode_default` / `use_client_system_prompt` / `use_notion_personal_instructions` / `check_personal_instructions_on_import` / `enable_tool_bridge` / `debug_logging` / `notion_proxy`） | Dashboard 会话 |
+| `GET/PUT /admin/settings` | 读 / 写运行时设置（`enable_web_search` / `enable_workspace_search` / `ask_mode_default` / `use_client_system_prompt` / `use_notion_personal_instructions` / `enable_tool_bridge` / `debug_logging` / `notion_proxy`） | Dashboard 会话 |
 | `GET /admin/stats` | Token 用量统计（累计 + 今日 + 24h + 30 天序列 + Top‑N） | Dashboard 会话 |
 | `POST /admin/register` | 兼容历史的同步批量注册 | Dashboard 会话 |
 | `GET /admin/register/providers` | Provider 列表 | Dashboard 会话 |

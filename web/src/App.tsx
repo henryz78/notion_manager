@@ -8,6 +8,8 @@ import { RegisterModal } from './components/RegisterModal'
 import { HistoryDrawer } from './components/HistoryDrawer'
 import { RequestHistoryDrawer } from './components/RequestHistoryDrawer'
 import { IconUserPlus, IconHistory } from './components/Icons'
+import { LanguageToggle } from './components/LanguageToggle'
+import { useTranslation } from 'react-i18next'
 
 // --- Icons ---
 const IconBarChart = () => (
@@ -74,12 +76,11 @@ type AccountImportRow = {
 function AddAccountModal({
   onClose,
   onSuccess,
-  autoCheckPersonalInstructions,
 }: {
   onClose: () => void
   onSuccess: () => void
-  autoCheckPersonalInstructions: boolean
 }) {
+  const { t } = useTranslation()
   const [token, setToken] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -127,8 +128,8 @@ function AddAccountModal({
         initialResults.push({
           line: item.line,
           status: 'skipped',
-          title: `第 ${item.line} 行已跳过`,
-          detail: `内容与第 ${firstLine} 行重复`,
+          title: t('modal.add.duplicate_title', { line: item.line }),
+          detail: t('modal.add.duplicate_detail', { first: firstLine }),
         })
         continue
       }
@@ -156,41 +157,48 @@ function AddAccountModal({
             row = {
               line: item.line,
               status: 'error',
-              title: `第 ${item.line} 行导入失败`,
-              detail: res.error || '账号信息为空',
+              title: t('modal.add.failed_title', { line: item.line }),
+              detail: res.error || t('modal.add.empty_account'),
+            }
+          } else if (res.status === 'skipped' && res.reason === 'duplicate_account') {
+            row = {
+              line: item.line,
+              status: 'skipped',
+              title: res.account.email || res.account.name || t('modal.add.duplicate_title', { line: item.line }),
+              detail: t('modal.add.duplicate_existing'),
             }
           } else if (res.status === 'skipped' && res.reason === 'personal_instructions_missing') {
             row = {
               line: item.line,
               status: 'skipped',
-              title: res.account.email || res.account.name || `第 ${item.line} 行已跳过`,
-              detail: '官网默认 Agent 尚未设置个人指令，未导入',
+              title: res.account.email || res.account.name || t('modal.add.duplicate_title', { line: item.line }),
+              detail: t('modal.add.missing_skipped'),
             }
           } else {
             added++
             let personalInstructionsDetail = ''
             if (res.personal_instructions_checked) {
               if (res.personal_instructions_check_error) {
-                personalInstructionsDetail = ' · 个人指令检测失败，已按“全部导入”保留'
+                personalInstructionsDetail = t('modal.add.check_failed_kept')
               } else {
                 personalInstructionsDetail = res.personal_instructions_configured
-                  ? ' · 官网个人指令已设置'
-                  : ' · 官网个人指令未设置'
+                  ? t('modal.add.configured_suffix')
+                  : t('modal.add.missing_suffix')
               }
             }
             row = {
               line: item.line,
               status: 'success',
-              title: res.account.email || res.account.name || `第 ${item.line} 行`,
-              detail: `${res.account.space || '未命名空间'} · ${res.account.plan_type || '未知套餐'}${personalInstructionsDetail}`,
+              title: res.account.email || res.account.name || t('modal.add.line', { line: item.line }),
+              detail: `${res.account.space || t('modal.add.unnamed_space')} · ${res.account.plan_type || t('modal.add.unknown_plan')}${personalInstructionsDetail}`,
             }
           }
         } catch (err) {
           row = {
             line: item.line,
             status: 'error',
-            title: `第 ${item.line} 行导入失败`,
-            detail: err instanceof Error ? err.message : '请求失败',
+            title: t('modal.add.failed_title', { line: item.line }),
+            detail: err instanceof Error ? err.message : t('modal.add.request_failed'),
           }
         }
         done++
@@ -213,21 +221,20 @@ function AddAccountModal({
       <div className="w-full max-w-xl max-h-[92vh] overflow-auto bg-[#1a1a1a] border border-white/10 rounded-xl shadow-2xl p-6 max-sm:max-h-[96vh] max-sm:rounded-b-none max-sm:p-4" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h2 className="text-[16px] font-semibold">批量添加 Notion 账号</h2>
-            <div className="text-[11px] text-text-muted mt-0.5">一行一个 token_v2，可同时导入多个账号</div>
+            <h2 className="text-[16px] font-semibold">{t('modal.add.title')}</h2>
+            <div className="text-[11px] text-text-muted mt-0.5">{t('modal.add.subtitle')}</div>
           </div>
           <button disabled={loading} onClick={onClose} className="text-text-muted hover:text-white bg-transparent border-none cursor-pointer text-lg px-1 disabled:opacity-30">×</button>
         </div>
 
         <div className="text-[12px] text-text-secondary mb-4 space-y-1.5">
-          <p>每行粘贴一个 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">token_v2</code>，系统默认并行验证 5 个，单个 token 也照常支持。</p>
-          <p className="text-text-muted">获取方式：打开 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">notion.so</code> → F12 → Application → Cookies → 复制 <code className="bg-white/[.08] px-1 py-0.5 rounded text-[11px]">token_v2</code> 的值</p>
+          <p>{t('modal.add.intro')}</p>
+          <p className="text-text-muted">{t('modal.add.how_to')}</p>
         </div>
 
-        {autoCheckPersonalInstructions && (
-          <div className="mb-4 rounded-lg border border-white/10 bg-white/[.025] p-3">
-            <div className="text-[12px] font-medium text-text-primary">已开启导入时检测官网个人指令</div>
-            <div className="text-[11px] text-text-muted mt-1 mb-2.5">只检查是否绑定，不读取或保存指令正文。检测失败时，“全部导入”会保留账号，“只导入已设置”不会导入。</div>
+        <div className="mb-4 rounded-lg border border-white/10 bg-white/[.025] p-3">
+            <div className="text-[12px] font-medium text-text-primary">{t('modal.add.check_enabled')}</div>
+            <div className="text-[11px] text-text-muted mt-1 mb-2.5">{t('modal.add.check_help')}</div>
             <div className="grid grid-cols-2 gap-2 max-sm:grid-cols-1">
               <button
                 type="button"
@@ -235,8 +242,8 @@ function AddAccountModal({
                 onClick={() => setPersonalInstructionsPolicy('all')}
                 className={`rounded-md border px-3 py-2 text-left cursor-pointer disabled:opacity-50 ${personalInstructionsPolicy === 'all' ? 'border-notion-blue/60 bg-notion-blue/10' : 'border-border bg-bg-card hover:bg-bg-card-hover'}`}
               >
-                <div className="text-[12px] font-medium text-text-primary">全部导入</div>
-                <div className="text-[10px] text-text-muted mt-0.5">检测并标记，但不筛掉账号</div>
+                <div className="text-[12px] font-medium text-text-primary">{t('modal.add.import_all')}</div>
+                <div className="text-[10px] text-text-muted mt-0.5">{t('modal.add.import_all_help')}</div>
               </button>
               <button
                 type="button"
@@ -244,12 +251,11 @@ function AddAccountModal({
                 onClick={() => setPersonalInstructionsPolicy('configured_only')}
                 className={`rounded-md border px-3 py-2 text-left cursor-pointer disabled:opacity-50 ${personalInstructionsPolicy === 'configured_only' ? 'border-notion-blue/60 bg-notion-blue/10' : 'border-border bg-bg-card hover:bg-bg-card-hover'}`}
               >
-                <div className="text-[12px] font-medium text-text-primary">只导入已设置的</div>
-                <div className="text-[10px] text-text-muted mt-0.5">未设置个人指令的账号直接跳过</div>
+                <div className="text-[12px] font-medium text-text-primary">{t('modal.add.configured_only')}</div>
+                <div className="text-[10px] text-text-muted mt-0.5">{t('modal.add.configured_only_help')}</div>
               </button>
             </div>
-          </div>
-        )}
+        </div>
 
         <form onSubmit={handleSubmit}>
           <textarea
@@ -263,14 +269,14 @@ function AddAccountModal({
                 setProgress({ done: 0, total: 0 })
               }
             }}
-            placeholder={'token_v2_账号1\ntoken_v2_账号2\ntoken_v2_账号3'}
+            placeholder={t('modal.add.placeholder')}
             rows={7}
             disabled={loading}
             className="w-full py-2.5 px-3 bg-transparent border border-white/10 rounded-lg text-[13px] text-text-primary outline-none focus:border-white/30 focus:ring-1 focus:ring-white/10 transition-all placeholder:text-white/25 resize-y font-mono disabled:opacity-60"
           />
           <div className="flex items-center justify-between gap-3 mt-1.5 text-[11px] text-text-muted">
-            <span>{parsedLines.length} 行有效内容 · {uniqueTokenCount} 个待导入账号</span>
-            {loading && <span className="text-notion-blue">正在处理 {progress.done} / {progress.total}</span>}
+            <span>{t('modal.add.valid_rows', { rows: parsedLines.length, count: uniqueTokenCount })}</span>
+            {loading && <span className="text-notion-blue">{t('modal.add.processing', { done: progress.done, total: progress.total })}</span>}
           </div>
           {error && (
             <div className="text-err text-[12px] mt-2 px-1">{error}</div>
@@ -279,12 +285,12 @@ function AddAccountModal({
           {results.length > 0 && (
             <div className="mt-3 border border-white/10 rounded-lg overflow-hidden">
               <div className="flex items-center justify-between gap-3 px-3 py-2 bg-white/[.035] text-[11px]">
-                <span className="text-text-secondary">导入结果</span>
+                <span className="text-text-secondary">{t('modal.add.results')}</span>
                 <span className="tabular-nums">
-                  <span className="text-ok">成功 {successCount}</span>
+                  <span className="text-ok">{t('modal.add.succeeded', { count: successCount })}</span>
                   <span className="text-text-muted"> · </span>
-                  <span className={failureCount > 0 ? 'text-err' : 'text-text-muted'}>失败 {failureCount}</span>
-                  {skippedCount > 0 && <span className="text-text-muted"> · 跳过 {skippedCount}</span>}
+                  <span className={failureCount > 0 ? 'text-err' : 'text-text-muted'}>{t('modal.add.failed', { count: failureCount })}</span>
+                  {skippedCount > 0 && <span className="text-text-muted"> · {t('modal.add.skipped', { count: skippedCount })}</span>}
                 </span>
               </div>
               <div className="max-h-48 overflow-auto divide-y divide-white/[.05]">
@@ -293,7 +299,7 @@ function AddAccountModal({
                     <div className="flex items-center gap-2">
                       <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${item.status === 'success' ? 'bg-ok' : item.status === 'error' ? 'bg-err' : 'bg-text-muted'}`} />
                       <span className={item.status === 'error' ? 'text-err' : 'text-text-primary'}>{item.title}</span>
-                      <span className="ml-auto text-text-muted tabular-nums">第 {item.line} 行</span>
+                      <span className="ml-auto text-text-muted tabular-nums">{t('modal.add.line', { line: item.line })}</span>
                     </div>
                     <div className="mt-0.5 ml-3.5 text-text-muted break-all">{item.detail}</div>
                   </div>
@@ -309,7 +315,7 @@ function AddAccountModal({
               disabled={loading}
               className="flex-1 py-2.5 bg-transparent hover:bg-white/5 text-text-secondary rounded-lg text-[13px] font-medium cursor-pointer transition-colors border border-white/10"
             >
-              {completed ? '关闭' : '取消'}
+              {completed ? t('common.close') : t('common.cancel')}
             </button>
             {completed ? (
               <button
@@ -323,7 +329,7 @@ function AddAccountModal({
                 }}
                 className="flex-1 py-2.5 bg-white hover:bg-white/90 text-black rounded-lg text-[13px] font-semibold cursor-pointer transition-colors border-none"
               >
-                继续添加
+                {t('modal.add.continue')}
               </button>
             ) : (
               <button
@@ -331,7 +337,9 @@ function AddAccountModal({
                 disabled={loading || uniqueTokenCount === 0}
                 className="flex-1 py-2.5 bg-white hover:bg-white/90 text-black rounded-lg text-[13px] font-semibold cursor-pointer transition-colors border-none disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                {loading ? `正在导入 ${progress.done}/${progress.total}` : `导入 ${uniqueTokenCount || ''} 个账号`}
+                {loading
+                  ? t('modal.add.importing', { done: progress.done, total: progress.total })
+                  : t('modal.add.import_count', { count: uniqueTokenCount || '' })}
               </button>
             )}
           </div>
@@ -344,6 +352,7 @@ function AddAccountModal({
 // --- Login Page ---
 
 function LoginPage({ onSuccess }: { onSuccess: () => void }) {
+  const { t } = useTranslation()
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -362,11 +371,11 @@ function LoginPage({ onSuccess }: { onSuccess: () => void }) {
         onSuccess()
         return
       }
-      setError(result.error || '密码错误')
+      setError(result.error || t('auth.wrong_password'))
       setPassword('')
       inputRef.current?.focus()
     } catch (err) {
-      setError(err instanceof Error ? err.message : '登录请求失败')
+      setError(err instanceof Error ? err.message : t('auth.login_failed'))
       setPassword('')
       inputRef.current?.focus()
     } finally {
@@ -380,7 +389,7 @@ function LoginPage({ onSuccess }: { onSuccess: () => void }) {
         <div className="flex flex-col items-center mb-8">
           <div className="w-12 h-12 bg-[#1a1a1a] border border-white/10 rounded-xl flex items-center justify-center text-xl font-extrabold text-white mb-4">N</div>
           <h1 className="text-xl font-semibold tracking-tight">notion-manager</h1>
-          <p className="text-[13px] text-text-muted mt-1">输入管理密钥以访问 Dashboard</p>
+          <p className="text-[13px] text-text-muted mt-1">{t('auth.prompt')}</p>
         </div>
         <form onSubmit={handleSubmit}>
           <div className="relative mb-4">
@@ -389,7 +398,7 @@ function LoginPage({ onSuccess }: { onSuccess: () => void }) {
               type="password"
               value={password}
               onChange={e => setPassword(e.target.value)}
-              placeholder="管理密钥"
+              placeholder={t('auth.placeholder')}
               autoComplete="current-password"
               className="w-full py-2.5 px-4 bg-transparent border border-white/10 rounded-lg text-[14px] text-text-primary outline-none focus:border-white/30 focus:ring-1 focus:ring-white/10 transition-all placeholder:text-white/25"
             />
@@ -402,7 +411,7 @@ function LoginPage({ onSuccess }: { onSuccess: () => void }) {
             disabled={loading || !password.trim()}
             className="w-full py-2.5 bg-white hover:bg-white/90 text-black rounded-lg text-[14px] font-semibold cursor-pointer transition-colors border-none disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            {loading ? '验证中...' : '登录'}
+            {loading ? t('auth.logging_in') : t('auth.login')}
           </button>
         </form>
       </div>
@@ -428,6 +437,7 @@ function Header({ query, onQuery, onLogout, authRequired, activePage, onPageChan
   onPageChange: (page: DashboardPage) => void
   version: string
 }) {
+  const { t } = useTranslation()
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -466,7 +476,7 @@ function Header({ query, onQuery, onLogout, authRequired, activePage, onPageChan
         </span>
         <span
           className="text-[10px] text-text-muted font-mono bg-white/[.04] border border-white/[.06] rounded px-1.5 py-0.5"
-          title={`当前运行版本：${version}`}
+          title={t('header.version', { version })}
         >
           {displayVersion(version)}
         </span>
@@ -476,13 +486,13 @@ function Header({ query, onQuery, onLogout, authRequired, activePage, onPageChan
           onClick={() => onPageChange('accounts')}
           className={`px-3 py-1.5 rounded-md text-[12px] font-medium cursor-pointer border-none transition-colors max-md:flex-1 ${activePage === 'accounts' ? 'bg-white/10 text-white shadow-sm' : 'bg-transparent text-text-muted hover:text-text-primary'}`}
         >
-          账号管理
+          {t('header.accounts')}
         </button>
         <button
           onClick={() => onPageChange('settings')}
           className={`px-3 py-1.5 rounded-md text-[12px] font-medium cursor-pointer border-none transition-colors max-md:flex-1 ${activePage === 'settings' ? 'bg-white/10 text-white shadow-sm' : 'bg-transparent text-text-muted hover:text-text-primary'}`}
         >
-          设置与记录
+          {t('header.settings')}
         </button>
       </nav>
       <div className="flex items-center gap-3 ml-auto max-md:order-3 max-md:ml-0 max-md:w-full">
@@ -494,7 +504,7 @@ function Header({ query, onQuery, onLogout, authRequired, activePage, onPageChan
             ref={inputRef}
             value={query}
             onChange={e => onQuery(e.target.value)}
-            placeholder="搜索账号、邮箱、计划..."
+            placeholder={t('header.search_placeholder')}
             className="w-full py-1.5 pl-8 pr-10 bg-bg-input border border-border rounded-md text-[13px] text-text-primary outline-none focus:border-white/20 transition-colors placeholder:text-text-muted"
           />
           <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] text-text-muted bg-bg-card border border-border rounded px-1.5 py-0.5">/</kbd>
@@ -503,11 +513,12 @@ function Header({ query, onQuery, onLogout, authRequired, activePage, onPageChan
           <button
             onClick={onLogout}
             className="text-[12px] text-text-secondary hover:text-text-primary cursor-pointer transition-colors bg-transparent border-none px-2 py-1"
-            title="退出登录"
+            title={t('header.logout_title')}
           >
-            退出
+            {t('header.logout')}
           </button>
         )}
+        <LanguageToggle />
       </div>
     </header>
   )
@@ -560,6 +571,7 @@ function mergeQuotaStatus(statuses: Array<'ok' | 'low' | 'exhausted'>): 'ok' | '
 }
 
 function OverviewBar({ label, usage, limit }: { label: string; usage: number; limit: number }) {
+  const { t } = useTranslation()
   const pct = getQuotaPct(usage, limit)
   const remaining = Math.max(limit - usage, 0)
   const status = getQuotaStatusByUsage(usage, limit)
@@ -573,7 +585,7 @@ function OverviewBar({ label, usage, limit }: { label: string; usage: number; li
       <div className="flex justify-between items-center mb-1.5">
         <span className="text-[10px] text-text-muted uppercase tracking-wider">{label}</span>
         <span className={`text-[11px] font-semibold tabular-nums ${numColor}`}>
-          {fmt(remaining)} <span className="text-text-muted font-normal">/ {fmt(limit)} 剩余</span>
+          {fmt(remaining)} <span className="text-text-muted font-normal">/ {fmt(limit)} {t('stats.remaining')}</span>
         </span>
       </div>
       <div className="h-[2px] bg-white/[.06] rounded-full overflow-hidden">
@@ -584,6 +596,7 @@ function OverviewBar({ label, usage, limit }: { label: string; usage: number; li
 }
 
 function TotalQuotaBar({ summary }: { summary?: AccountSummary | null }) {
+  const { t } = useTranslation()
   const totalSpaceUsage = summary?.total_space_usage ?? 0
   const totalSpaceLimit = summary?.total_space_limit ?? 0
   const totalUserUsage = summary?.total_user_usage ?? 0
@@ -598,7 +611,7 @@ function TotalQuotaBar({ summary }: { summary?: AccountSummary | null }) {
   return (
     <div className="mb-5 space-y-3">
       <div className="flex justify-between items-center">
-        <span className="text-[11px] text-text-secondary uppercase tracking-wider flex items-center gap-1.5"><IconBarChart /> Notion 私有接口计数（诊断）</span>
+        <span className="text-[11px] text-text-secondary uppercase tracking-wider flex items-center gap-1.5"><IconBarChart /> {t('stats.diagnostics')}</span>
         {totalPremiumLimit > 0 && (
           <span className="text-[12px] text-text-muted tabular-nums">
             Premium balance <span className="text-[#7eb8ff] font-semibold">{fmt(totalPremiumBalance)}</span> · monthly limit {fmt(totalPremiumLimit)}
@@ -614,7 +627,7 @@ function TotalQuotaBar({ summary }: { summary?: AccountSummary | null }) {
         </>
       )}
       <div className="text-[10px] text-text-muted leading-relaxed">
-        以上是 Notion 私有接口返回的诊断计数，官网未公开字段定义；Custom Agents 的 Notion credits 不在这里。
+        {t('stats.diagnostics_note')}
       </div>
     </div>
   )
@@ -670,6 +683,7 @@ function AccountCard({
   selected: boolean
   onToggleSelected: () => void
 }) {
+  const { t, i18n } = useTranslation()
   const [showModels, setShowModels] = useState(false)
   const spaceQuota = getSpaceQuota(account)
   const userQuota = getUserQuota(account)
@@ -699,21 +713,21 @@ function AccountCard({
 
   const handleClick = () => {
     if (manuallyDisabled) {
-      alert('该账号已被手动禁用。重新启用后才会参与网关请求和代理选号。')
+      alert(t('account.manual_disabled_alert'))
       return
     }
     if (authInvalid) {
-      alert('该账号 Cookie/token 已失效，请重新导入账号。')
+      alert(t('account.auth_invalid_alert'))
       return
     }
     if (noWorkspace) {
       // Use a native alert — we don't have a toast infra and openProxy
       // would otherwise pop a tab that displays raw JSON 409 to the user.
-      alert('该账号没有可访问的 Notion 工作区，无法打开 /ai 反代。请重新注册或选择其他账号。')
+      alert(t('account.no_workspace_alert'))
       return
     }
     if (temporarilyUnavailable) {
-      alert(`该账号刚刚请求失败，已临时跳过。原因：${account.last_failure_reason || 'temporary_failure'}`)
+      alert(t('account.temporary_alert', { reason: account.last_failure_reason || 'temporary_failure' }))
       return
     }
     openProxy(account.email)
@@ -723,7 +737,7 @@ function AccountCard({
     <div
       className={`rounded-lg p-4 border max-sm:p-3 ${manuallyDisabled || authInvalid || noWorkspace || temporarilyUnavailable ? 'cursor-not-allowed' : 'cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30'} transition-all duration-200 ${selected ? 'ring-1 ring-notion-blue border-notion-blue/60' : ''} ${cardBg}`}
       onClick={handleClick}
-      title={manuallyDisabled ? '账号已被手动禁用，不参与网关请求和代理选号' : authInvalid ? '账号 Cookie/token 已失效，请重新导入账号' : noWorkspace ? '账号无可访问工作区，已被排除出选号池' : temporarilyUnavailable ? `临时跳过：${account.last_failure_reason || 'temporary_failure'}` : undefined}
+      title={manuallyDisabled ? t('account.manual_disabled_tooltip') : authInvalid ? t('account.auth_invalid_tooltip') : noWorkspace ? t('account.no_workspace_tooltip') : temporarilyUnavailable ? t('account.temporary_tooltip', { reason: account.last_failure_reason || 'temporary_failure' }) : undefined}
     >
       {/* Header */}
       <div className="flex items-center gap-2.5 mb-2.5">
@@ -736,8 +750,8 @@ function AccountCard({
             onToggleSelected()
           }}
           className="w-4 h-4 shrink-0 accent-notion-blue cursor-pointer"
-          aria-label={`选择账号 ${account.email}`}
-          title="选择账号进行批量操作"
+          aria-label={t('account.select', { email: account.email })}
+          title={t('account.select_action')}
         />
         <div
           className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold text-white shrink-0"
@@ -762,7 +776,7 @@ function AccountCard({
       <div className="flex gap-3 flex-wrap mt-3 mb-2.5 items-center">
         <Badge variant="plan">{account.plan || 'unknown'}</Badge>
         <Badge variant={fullNotionAI ? 'premium' : 'plan'}>
-          {fullNotionAI ? 'Notion AI 已包含' : 'AI 有限试用'}
+          {fullNotionAI ? t('account.full_ai') : t('account.limited_trial')}
         </Badge>
         {account.registered_via && (
           <Badge variant="plan">via {providerDisplay(account.registered_via)}</Badge>
@@ -771,32 +785,32 @@ function AccountCard({
           account.personal_instructions_check_error
             ? account.personal_instructions_check_error
             : account.personal_instructions_checked_at
-              ? `检测于 ${new Date(account.personal_instructions_checked_at).toLocaleString('zh-CN', { hour12: false })}`
-              : '尚未批量检测'
+              ? t('account.instructions_checked', { date: new Date(account.personal_instructions_checked_at).toLocaleString(i18n.language === 'zh' ? 'zh-CN' : 'en-US', { hour12: false }) })
+              : t('account.instructions_unchecked')
         }>
           {account.personal_instructions_check_error ? (
-            <Badge variant="warning">个人指令检测失败</Badge>
+            <Badge variant="warning">{t('account.instructions_failed')}</Badge>
           ) : account.personal_instructions_configured === true ? (
-            <Badge variant="ok">官网个人指令已设置</Badge>
+            <Badge variant="ok">{t('account.instructions_configured')}</Badge>
           ) : account.personal_instructions_configured === false ? (
-            <Badge variant="plan">官网个人指令未设置</Badge>
+            <Badge variant="plan">{t('account.instructions_missing')}</Badge>
           ) : (
-            <Badge variant="plan">个人指令未检测</Badge>
+            <Badge variant="plan">{t('account.instructions_not_checked')}</Badge>
           )}
         </span>
-        {premium && <Badge variant="premium">Premium 接口信号</Badge>}
+        {premium && <Badge variant="premium">{t('account.premium_signal')}</Badge>}
         {(account.research_usage != null && account.research_usage > 0) && (
           <Badge variant="research">
-            <IconFlask /> Research 用量 {account.research_usage}（接口值）
+            <IconFlask /> {t('account.research_usage', { count: account.research_usage })}
           </Badge>
         )}
-        {account.exhausted && !account.permanent && <Badge variant="warning">AI 当前不可用</Badge>}
-        {account.permanent && <Badge variant="warning">AI 试用已用完</Badge>}
-        {manuallyDisabled && <Badge variant="warning">已手动禁用</Badge>}
-        {authInvalid && <Badge variant="warning">Cookie 失效</Badge>}
-        {noWorkspace && <Badge variant="warning">无工作区</Badge>}
+        {account.exhausted && !account.permanent && <Badge variant="warning">{t('account.ai_unavailable')}</Badge>}
+        {account.permanent && <Badge variant="warning">{t('account.trial_exhausted')}</Badge>}
+        {manuallyDisabled && <Badge variant="warning">{t('account.manually_disabled')}</Badge>}
+        {authInvalid && <Badge variant="warning">{t('account.cookie_invalid')}</Badge>}
+        {noWorkspace && <Badge variant="warning">{t('account.no_workspace')}</Badge>}
         {temporarilyUnavailable && (
-          <Badge variant="warning">临时跳过 {account.last_failure_reason || 'failure'}</Badge>
+          <Badge variant="warning">{t('account.temporarily_skipped', { reason: account.last_failure_reason || 'failure' })}</Badge>
         )}
         {modelCount > 0 && (
           <button
@@ -819,8 +833,8 @@ function AccountCard({
       )}
       {premium && <QuotaBar label="Premium monthlyAllocated raw" labelClass="text-[#7eb8ff]" usage={account.premium_usage} limit={account.premium_limit} />}
       <div className="flex flex-wrap gap-3 mt-2 text-[10px] text-text-muted">
-        <span>Basic 估算余量 {fmt(account.remaining || 0)}</span>
-        {premium && <span>Premium balance 原始值 {fmt(account.premium_balance || 0)}</span>}
+        <span>{t('account.basic_estimated', { count: fmt(account.remaining || 0) })}</span>
+        {premium && <span>{t('account.premium_raw', { count: fmt(account.premium_balance || 0) })}</span>}
       </div>
 
       {/* Models (expandable) */}
@@ -838,41 +852,41 @@ function AccountCard({
       <div className="flex justify-between items-center mt-2 pt-2 border-t border-border">
         <span className="text-[10px] text-text-muted flex items-center gap-1 min-w-0">
           <IconClock />
-          <span className="truncate">检查 {formatCheckedAt(account.checked_at)} · 最近 AI {formatTimestampMs(account.last_usage_at)}</span>
+          <span className="truncate">{t('account.last_checked', { date: formatCheckedAt(account.checked_at) })} · {t('account.recent_ai', { date: formatTimestampMs(account.last_usage_at) })}</span>
         </span>
         {manuallyDisabled ? (
-          <span className="text-[11px] text-err font-medium">已禁用</span>
+          <span className="text-[11px] text-err font-medium">{t('account.disabled')}</span>
         ) : noWorkspace ? (
-          <span className="text-[11px] text-err font-medium">不可用 ⚠</span>
+          <span className="text-[11px] text-err font-medium">{t('account.unavailable')}</span>
         ) : (
-          <span className="text-[11px] text-text-secondary hover:text-white font-medium transition-colors">打开代理 →</span>
+          <span className="text-[11px] text-text-secondary hover:text-white font-medium transition-colors">{t('account.open_proxy')}</span>
         )}
       </div>
     </div>
   )
 }
 
-const accountBatchActionLabels: Record<AccountBatchJobAction, string> = {
-  check_personal_instructions: '检测官网个人指令',
-  disable: '批量禁用账号',
-  enable: '批量启用账号',
-  delete: '批量删除账号',
-  delete_missing_personal_instructions: '检测并删除未设置个人指令账号',
-  delete_exhausted: '清理已用完试用额度账号',
+const accountBatchActionKeys: Record<AccountBatchJobAction, string> = {
+  check_personal_instructions: 'batch.check',
+  disable: 'batch.disable',
+  enable: 'batch.enable',
+  delete: 'batch.delete',
+  delete_missing_personal_instructions: 'batch.delete_missing',
+  delete_exhausted: 'batch.delete_exhausted',
 }
 
-const accountStatusFilterOptions: Array<{ value: AccountStatusFilter; label: string }> = [
-  { value: 'all', label: '全部账号' },
-  { value: 'available', label: '可用账号' },
-  { value: 'disabled', label: '手动禁用' },
-  { value: 'exhausted', label: '额度用完' },
-  { value: 'auth_invalid', label: 'Cookie 失效' },
-  { value: 'no_workspace', label: '无工作区' },
-  { value: 'temporarily_unavailable', label: '临时跳过' },
-  { value: 'personal_configured', label: '个人指令已设置' },
-  { value: 'personal_missing', label: '个人指令未设置' },
-  { value: 'personal_failed', label: '个人指令检测失败' },
-  { value: 'personal_unchecked', label: '个人指令未检测' },
+const accountStatusFilterOptions: Array<{ value: AccountStatusFilter; labelKey: string }> = [
+  { value: 'all', labelKey: 'common.all_accounts' },
+  { value: 'available', labelKey: 'common.available_accounts' },
+  { value: 'disabled', labelKey: 'common.manual_disabled' },
+  { value: 'exhausted', labelKey: 'common.quota_exhausted' },
+  { value: 'auth_invalid', labelKey: 'common.cookie_invalid' },
+  { value: 'no_workspace', labelKey: 'common.no_workspace' },
+  { value: 'temporarily_unavailable', labelKey: 'common.temporary' },
+  { value: 'personal_configured', labelKey: 'common.instructions_configured' },
+  { value: 'personal_missing', labelKey: 'common.instructions_missing' },
+  { value: 'personal_failed', labelKey: 'common.instructions_failed' },
+  { value: 'personal_unchecked', labelKey: 'common.instructions_unchecked' },
 ]
 
 function AccountBatchProgress({
@@ -886,6 +900,7 @@ function AccountBatchProgress({
   onRetry: () => void
   onClose: () => void
 }) {
+  const { t } = useTranslation()
   const pct = job.total > 0 ? Math.min(100, Math.round((job.done / job.total) * 100)) : 0
   const activeSteps = job.steps.filter(step => step.status === 'running').slice(0, 3)
   const failedSteps = job.steps.filter(step => step.status === 'failed').slice(0, 3)
@@ -895,43 +910,43 @@ function AccountBatchProgress({
       <div className="flex items-start gap-3 max-sm:flex-col">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[13px] font-semibold text-text-primary">{accountBatchActionLabels[job.action]}</span>
+            <span className="text-[13px] font-semibold text-text-primary">{t(accountBatchActionKeys[job.action])}</span>
             <span className={`text-[10px] px-1.5 py-0.5 rounded ${job.state === 'running' ? 'text-notion-blue bg-notion-blue/10' : job.failed > 0 ? 'text-warn bg-warn/10' : 'text-ok bg-ok/10'}`}>
-              {job.state === 'running' ? '并行处理中' : job.state === 'interrupted' ? '任务中断' : '已完成'}
+              {job.state === 'running' ? t('batch.running') : job.state === 'interrupted' ? t('batch.interrupted') : t('batch.completed')}
             </span>
-            <span className="text-[10px] text-text-muted">并发 {job.concurrency}</span>
+            <span className="text-[10px] text-text-muted">{t('batch.concurrency', { count: job.concurrency })}</span>
           </div>
           <div className="mt-2 flex items-center gap-3 text-[11px] text-text-secondary flex-wrap">
-            <span>进度 <strong className="text-text-primary tabular-nums">{job.done} / {job.total}</strong></span>
-            <span className="text-ok">成功 {job.succeeded}</span>
-            {job.skipped > 0 && <span className="text-text-muted">保留 {job.skipped}</span>}
-            {job.failed > 0 && <span className="text-err">失败 {job.failed}</span>}
-            {isPersonal && <><span>已设置 {job.configured}</span><span>未设置 {job.missing}</span></>}
+            <span>{t('batch.progress')} <strong className="text-text-primary tabular-nums">{job.done} / {job.total}</strong></span>
+            <span className="text-ok">{t('batch.succeeded', { count: job.succeeded })}</span>
+            {job.skipped > 0 && <span className="text-text-muted">{t('batch.kept', { count: job.skipped })}</span>}
+            {job.failed > 0 && <span className="text-err">{t('batch.failed', { count: job.failed })}</span>}
+            {isPersonal && <><span>{t('batch.configured', { count: job.configured })}</span><span>{t('batch.missing', { count: job.missing })}</span></>}
           </div>
           <div className="mt-2 h-1.5 bg-white/[.07] rounded-full overflow-hidden">
             <div className="h-full bg-notion-blue rounded-full transition-all duration-300" style={{ width: `${pct}%` }} />
           </div>
           {activeSteps.length > 0 && (
             <div className="mt-2 text-[10px] text-text-muted truncate">
-              正在处理：{activeSteps.map(step => step.email).join('、')}
+              {t('batch.processing', { accounts: activeSteps.map(step => step.email).join(', ') })}
             </div>
           )}
           {job.state !== 'running' && failedSteps.length > 0 && (
             <div className="mt-2 text-[10px] text-err space-y-0.5">
-              {failedSteps.map(step => <div key={step.email} className="truncate" title={step.message}>{step.email}：{step.message || '处理失败'}</div>)}
-              {job.failed > failedSteps.length && <div>另有 {job.failed - failedSteps.length} 个失败账号</div>}
+              {failedSteps.map(step => <div key={step.email} className="truncate" title={step.message}>{step.email}: {step.message || t('batch.step_failed')}</div>)}
+              {job.failed > failedSteps.length && <div>{t('batch.other_failed', { count: job.failed - failedSteps.length })}</div>}
             </div>
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0 max-sm:w-full max-sm:grid max-sm:grid-cols-2">
           {job.state !== 'running' && job.failed > 0 && (
             <button onClick={onRetry} disabled={retrying} className="px-3 py-1.5 bg-warn/10 hover:bg-warn/20 text-warn rounded-md text-[12px] cursor-pointer border border-warn/25 disabled:opacity-40">
-              {retrying ? '正在重试...' : `重试失败项（${job.failed}）`}
+              {retrying ? t('batch.retrying') : t('batch.retry_failed', { count: job.failed })}
             </button>
           )}
           {job.state !== 'running' && (
             <button onClick={onClose} className="px-3 py-1.5 bg-bg-card hover:bg-bg-card-hover text-text-secondary rounded-md text-[12px] cursor-pointer border border-border">
-              关闭
+              {t('common.close')}
             </button>
           )}
         </div>
@@ -941,6 +956,7 @@ function AccountBatchProgress({
 }
 
 export default function App() {
+  const { t, i18n } = useTranslation()
   const [authState, setAuthState] = useState<'checking' | 'login' | 'authenticated'>('checking')
   const [authRequired, setAuthRequired] = useState(false)
   const [data, setData] = useState<DashboardData | null>(null)
@@ -1133,7 +1149,7 @@ export default function App() {
       setActiveBatchJob(job)
       window.localStorage.setItem('notion-manager-active-account-batch-job', job.id)
     } catch (e: any) {
-      window.alert(`启动批量任务失败：${e?.message || '请求失败'}`)
+      window.alert(t('batch.start_failed', { error: e?.message || t('common.request_failed') }))
     } finally {
       setBatchStartingAction(null)
     }
@@ -1143,7 +1159,7 @@ export default function App() {
     try {
       await launchAccountBatch(action, await fetchAccountSelection('', 'all'))
     } catch (e: any) {
-      window.alert(`读取全部账号失败：${e?.message || '请求失败'}`)
+      window.alert(t('batch.fetch_all_failed', { error: e?.message || t('common.request_failed') }))
     }
   }
 
@@ -1156,7 +1172,7 @@ export default function App() {
     if ((data?.total ?? 0) === 0 || activeBatchJob?.state === 'running') return
     const knownMissing = data?.summary?.personal_instructions_missing ?? 0
     const confirmed = window.confirm(
-      `系统会先重新检测全部 ${data?.total ?? 0} 个账号，然后永久删除当前确实没有设置官网默认 Agent 个人指令的账号。\n\n上次检测显示未设置：${knownMissing} 个。\n检测失败的账号不会删除。\n\n确定继续吗？`,
+      t('batch.confirm_delete_missing', { total: data?.total ?? 0, missing: knownMissing }),
     )
     if (!confirmed) return
     await launchAllPoolBatch('delete_missing_personal_instructions')
@@ -1167,7 +1183,7 @@ export default function App() {
     if (emails.length === 0) return
     if (action === 'delete') {
       const confirmed = window.confirm(
-        `将永久删除选中的 ${emails.length} 个账号及其登录文件。\n\n此操作不可撤销，确定继续吗？`,
+        t('batch.confirm_delete_selected', { count: emails.length }),
       )
       if (!confirmed) return
     }
@@ -1181,7 +1197,7 @@ export default function App() {
       const emails = await fetchAccountSelection(debouncedQuery, statusFilter)
       setSelectedEmails(new Set(emails))
     } catch (e: any) {
-      window.alert(`选择全部结果失败：${e?.message || '请求失败'}`)
+      window.alert(t('common.select_all_failed', { error: e?.message || t('common.request_failed') }))
     } finally {
       setSelectingAllResults(false)
     }
@@ -1192,9 +1208,9 @@ export default function App() {
     if (emails.length === 0) return
     try {
       await navigator.clipboard.writeText(emails.join('\n'))
-      window.alert(`已复制 ${emails.length} 个账号邮箱。`)
+      window.alert(t('common.copy_emails_success', { count: emails.length }))
     } catch {
-      window.alert('复制失败，请检查浏览器剪贴板权限。')
+      window.alert(t('common.copy_failed'))
     }
   }
 
@@ -1207,7 +1223,7 @@ export default function App() {
       setActiveBatchJob(job)
       window.localStorage.setItem('notion-manager-active-account-batch-job', job.id)
     } catch (e: any) {
-      window.alert(`重试失败项失败：${e?.message || '请求失败'}`)
+      window.alert(t('batch.retry_action_failed', { error: e?.message || t('common.request_failed') }))
     } finally {
       setBatchStartingAction(null)
     }
@@ -1223,13 +1239,13 @@ export default function App() {
     const count = data?.summary?.exhausted_trials ?? 0
     if (count <= 0 || activeBatchJob?.state === 'running') return
     const confirmed = window.confirm(
-      `将永久删除 ${count} 个已用完 AI 试用额度的 Free/Plus 账号及其登录文件。\n\nBusiness、Enterprise、临时故障和 Cookie 失效账号不会删除。建议先刷新配额。\n\n确定继续吗？`,
+      t('batch.confirm_delete_exhausted', { count }),
     )
     if (!confirmed) return
     await launchAllPoolBatch('delete_exhausted')
   }
 
-  const toggleSetting = async (key: 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'check_personal_instructions_on_import' | 'debug_logging') => {
+  const toggleSetting = async (key: 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'debug_logging') => {
     if (!settings) return
     const newVal = !settings[key]
     try {
@@ -1269,7 +1285,7 @@ export default function App() {
       setSettings(updated)
       setProxyDraft(updated.notion_proxy ?? '')
     } catch (e: any) {
-      setProxyError(e?.message || '保存失败')
+      setProxyError(e?.message || t('api.save_failed'))
       setProxyDraft(settings.notion_proxy ?? '')
     } finally {
       setProxySaving(false)
@@ -1378,7 +1394,7 @@ export default function App() {
     return (
       <div className="flex items-center justify-center h-screen gap-3 text-text-secondary text-sm">
         <div className="w-4 h-4 border-2 border-border border-t-notion-blue rounded-full animate-spin" />
-        加载账号数据...
+        {t('common.loading_accounts')}
       </div>
     )
   }
@@ -1386,19 +1402,19 @@ export default function App() {
   if (error && !data) {
     return (
       <div className="flex items-center justify-center h-screen text-err text-sm">
-        加载失败: {error}
+        {t('common.load_failed', { error })}
       </div>
     )
   }
 
   const accountSummaryParts = summary
     ? [
-      `${data!.available} 可用`,
-      summary.exhaustedOnly > 0 ? `${summary.exhaustedOnly} 耗尽` : null,
-      summary.noWorkspace > 0 ? `${summary.noWorkspace} 无工作区` : null,
-      summary.authInvalid > 0 ? `${summary.authInvalid} Cookie 失效` : null,
-      summary.disabled > 0 ? `${summary.disabled} 手动禁用` : null,
-      summary.otherUnavailable > 0 ? `${summary.otherUnavailable} 临时跳过` : null,
+      t('stats.available_count', { count: data!.available }),
+      summary.exhaustedOnly > 0 ? t('stats.exhausted_count', { count: summary.exhaustedOnly }) : null,
+      summary.noWorkspace > 0 ? t('stats.no_workspace_count', { count: summary.noWorkspace }) : null,
+      summary.authInvalid > 0 ? t('stats.auth_invalid_count', { count: summary.authInvalid }) : null,
+      summary.disabled > 0 ? t('stats.disabled_count', { count: summary.disabled }) : null,
+      summary.otherUnavailable > 0 ? t('stats.temporary_count', { count: summary.otherUnavailable }) : null,
     ].filter(Boolean).join(' / ')
     : ''
 
@@ -1419,34 +1435,38 @@ export default function App() {
         {activePage === 'accounts' && summary && (
           <div className="grid grid-cols-5 divide-x divide-white/[.05] mb-6 max-lg:grid-cols-3 max-md:grid-cols-2 max-md:divide-x-0 max-sm:mb-4">
             <StatCard
-              label="总账号" value={data!.total}
+              label={t('stats.total_accounts')} value={data!.total}
               sub={accountSummaryParts}
             />
             <StatCard
-              label="可用" value={data!.available}
-              sub={`占比 ${summary.availableRate}%`}
+              label={t('stats.available')} value={data!.available}
+              sub={t('stats.ratio', { percent: summary.availableRate })}
               color="var(--color-ok)"
             />
             <StatCard
-              label="接口 Basic 估算余量" value={fmt(summary.totalRemaining)}
+              label={t('stats.basic_estimated')} value={fmt(summary.totalRemaining)}
               sub={summary.sameBasicQuota
-                ? 'Space / User 返回值一致 · 非官网承诺额度'
-                : `Space ${fmt(summary.totalSpaceRemaining)} · User ${fmt(summary.totalUserRemaining)}（接口值）`}
+                ? t('stats.basic_same')
+                : t('stats.basic_split', { space: fmt(summary.totalSpaceRemaining), user: fmt(summary.totalUserRemaining) })}
             />
             <StatCard
-              label="Premium balance 原始值" value={fmt(summary.totalPremiumBalance)}
+              label={t('stats.premium_raw')} value={fmt(summary.totalPremiumBalance)}
               sub={summary.totalPremiumLimit > 0
-                ? `${summary.premiumAccounts} 个接口信号 · Research 接口用量 ${summary.totalResearchUsage}`
-                : '接口未返回 Premium 数值 · 不代表 Custom Agents credits'}
+                ? t('stats.premium_signal', { count: summary.premiumAccounts, usage: summary.totalResearchUsage })
+                : t('stats.premium_empty')}
               color="var(--color-research, #9b51e0)"
             />
             <StatCard
               icon={<IconActivity />}
-              label="Token 用量"
+              label={t('stats.token_usage')}
               value={formatTokens(tokenStats?.total.total ?? 0)}
               sub={tokenStats
-                ? `今日 ${formatTokens(tokenStats.today.total)} · 输入 ${formatTokens(tokenStats.today.input)} · 输出 ${formatTokens(tokenStats.today.output)}`
-                : '尚未产生用量'}
+                ? t('stats.today_usage', {
+                    today: formatTokens(tokenStats.today.total),
+                    input: formatTokens(tokenStats.today.input),
+                    output: formatTokens(tokenStats.today.output),
+                  })
+                : t('stats.no_usage')}
               color="var(--color-notion-blue)"
             />
           </div>
@@ -1461,7 +1481,7 @@ export default function App() {
             <div className="w-4 h-4 border-2 border-notion-blue/30 border-t-notion-blue rounded-full animate-spin shrink-0" />
             <div className="flex-1 min-w-0">
               <div className="text-[13px] font-medium text-[#5c9ce6]">
-                正在刷新配额... {refreshStatus.done}/{refreshStatus.total}
+                {t('common.status_refreshing', { current: refreshStatus.done, total: refreshStatus.total })}
               </div>
               <div className="h-1.5 bg-white/[.06] rounded-full overflow-hidden mt-1.5">
                 <div
@@ -1479,65 +1499,65 @@ export default function App() {
             onClick={openBestProxy}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-white hover:bg-white/90 text-[#111] rounded-md text-[13px] font-medium cursor-pointer transition-colors border-none"
           >
-            <IconZap /> 打开最优账号
+            <IconZap /> {t('actions.open_best_account')}
           </button>
           <button
             onClick={handleQuotaRefresh}
             disabled={quotaRefreshing || refreshStatus?.refreshing}
             className={`inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border disabled:opacity-50 disabled:cursor-not-allowed ${refreshStatus?.refreshing ? 'animate-pulse' : ''}`}
           >
-            <IconRefresh /> 刷新配额
+            <IconRefresh /> {t('actions.refresh_quota')}
           </button>
           <button
             onClick={refresh}
             disabled={refreshing}
             className={`inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border disabled:opacity-50 disabled:cursor-not-allowed ${refreshing ? 'animate-pulse' : ''}`}
           >
-            <IconRefresh /> 刷新数据
+            <IconRefresh /> {t('actions.refresh_data')}
           </button>
           <button
             onClick={handleCheckPersonalInstructions}
             disabled={batchBusy || (data?.total ?? 0) === 0}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border disabled:opacity-50 disabled:cursor-not-allowed"
-            title="只检测默认 Notion Agent 是否绑定了官网个人指令页面，不读取或保存指令正文"
+            title={t('actions.check_instructions_help')}
           >
-            <IconActivity /> {batchStartingAction === 'check_personal_instructions' ? '正在启动...' : '检测官网个人指令'}
+            <IconActivity /> {batchStartingAction === 'check_personal_instructions' ? t('actions.starting') : t('actions.check_instructions')}
           </button>
           <button
             onClick={handleDeleteMissingPersonalInstructions}
             disabled={batchBusy || (data?.total ?? 0) === 0}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-err/10 hover:bg-err/20 text-err rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-err/25 disabled:opacity-40 disabled:cursor-not-allowed"
-            title="会先重新检测全部账号，只永久删除当前确实没有设置官网默认 Agent 个人指令的账号"
+            title={t('actions.delete_missing_help')}
           >
             <IconTrash /> {batchStartingAction === 'delete_missing_personal_instructions'
-              ? '正在启动...'
-              : `删除未设置个人指令（${data?.summary?.personal_instructions_missing ?? 0}）`}
+              ? t('actions.starting')
+              : t('actions.delete_missing', { count: data?.summary?.personal_instructions_missing ?? 0 })}
           </button>
           <button
             onClick={handleDeleteExhaustedTrials}
             disabled={batchBusy || (data?.summary?.exhausted_trials ?? 0) <= 0 || !!refreshStatus?.refreshing}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-err/10 hover:bg-err/20 text-err rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-err/25 disabled:opacity-40 disabled:cursor-not-allowed"
-            title="仅永久删除因 complimentary AI responses 用完而禁用的 Free/Plus 账号；不会删除其他故障账号"
+            title={t('actions.cleanup_trials_help')}
           >
-            <IconTrash /> {batchStartingAction === 'delete_exhausted' ? '正在启动...' : `清理已用完试用账号（${data?.summary?.exhausted_trials ?? 0}）`}
+            <IconTrash /> {batchStartingAction === 'delete_exhausted' ? t('actions.starting') : t('actions.cleanup_trials', { count: data?.summary?.exhausted_trials ?? 0 })}
           </button>
           <button
             onClick={() => setShowAddModal(true)}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border"
           >
-            <IconPlus /> 添加账号
+            <IconPlus /> {t('actions.add_account')}
           </button>
           <button
             onClick={() => setRegisterOpen(true)}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-border"
           >
-            <IconUserPlus size={13} /> 注册账号
+            <IconUserPlus size={13} /> {t('actions.register_account')}
           </button>
           {refreshTime && (
             <span className="text-[11px] text-text-muted max-sm:col-span-2">
-              更新于 {refreshTime}
+              {t('actions.updated_at', { time: refreshTime })}
               {refreshStatus?.last_refresh_at && !refreshStatus.refreshing && (
-                <> · 配额刷新于 {new Date(refreshStatus.last_refresh_at).toLocaleTimeString('zh-CN')}</>
+                <> · {t('actions.quota_refreshed_at', { time: new Date(refreshStatus.last_refresh_at).toLocaleTimeString(i18n.language === 'zh' ? 'zh-CN' : 'en-US') })}</>
               )}
             </span>
           )}
@@ -1546,28 +1566,28 @@ export default function App() {
         {activePage === 'settings' && (
           <div className="mb-6">
             <div className="mb-5">
-              <h2 className="text-[18px] font-semibold text-text-primary">设置与记录</h2>
-              <p className="text-[12px] text-text-muted mt-1">集中管理 API、代理、功能开关和运行记录。</p>
+              <h2 className="text-[18px] font-semibold text-text-primary">{t('api.settings_and_history')}</h2>
+              <p className="text-[12px] text-text-muted mt-1">{t('api.settings_description')}</p>
             </div>
             <div className="grid grid-cols-3 gap-3 max-md:grid-cols-1">
               <div className="bg-bg-card border border-border rounded-lg p-4">
-                <div className="text-[11px] text-text-muted uppercase tracking-wider">当前版本</div>
+                <div className="text-[11px] text-text-muted uppercase tracking-wider">{t('api.current_version')}</div>
                 <div className="text-[20px] font-semibold font-mono mt-1" title={appVersion}>{displayVersion(appVersion)}</div>
-                <div className="text-[11px] text-text-muted mt-1">用于确认 Railway 是否已经更新</div>
+                <div className="text-[11px] text-text-muted mt-1">{t('api.version_help')}</div>
               </div>
               <button
                 onClick={() => setRequestHistoryOpen(true)}
                 className="text-left bg-bg-card hover:bg-bg-card-hover border border-border rounded-lg p-4 cursor-pointer transition-colors"
               >
-                <div className="flex items-center gap-2 text-[13px] font-medium"><IconActivity /> 调用记录</div>
-                <div className="text-[11px] text-text-muted mt-2">查看最近 100 条模型、账号、耗时和错误记录</div>
+                <div className="flex items-center gap-2 text-[13px] font-medium"><IconActivity /> {t('api.request_history')}</div>
+                <div className="text-[11px] text-text-muted mt-2">{t('api.request_history_help')}</div>
               </button>
               <button
                 onClick={() => setHistoryOpen(true)}
                 className="text-left bg-bg-card hover:bg-bg-card-hover border border-border rounded-lg p-4 cursor-pointer transition-colors"
               >
-                <div className="flex items-center gap-2 text-[13px] font-medium"><IconHistory size={13} /> 注册任务</div>
-                <div className="text-[11px] text-text-muted mt-2">查看批量注册历史、结果和重试状态</div>
+                <div className="flex items-center gap-2 text-[13px] font-medium"><IconHistory size={13} /> {t('api.register_history')}</div>
+                <div className="text-[11px] text-text-muted mt-2">{t('api.register_history_help')}</div>
               </button>
             </div>
           </div>
@@ -1581,17 +1601,17 @@ export default function App() {
           return (
             <div className="mb-6 px-5 py-5 bg-[#171717] border border-white/5 rounded-lg shadow-inner max-sm:px-3 max-sm:py-4">
               <div className="mb-4">
-                <div className="text-[14px] text-text-primary font-semibold flex items-center gap-2"><IconSettings /> API 与功能设置</div>
-                <div className="text-[11px] text-text-muted mt-1">修改后立即保存；服务重启后继续生效。</div>
+                <div className="text-[14px] text-text-primary font-semibold flex items-center gap-2"><IconSettings /> {t('api.feature_settings')}</div>
+                <div className="text-[11px] text-text-muted mt-1">{t('api.persist_help')}</div>
               </div>
               <div className="mb-5 rounded-lg border border-white/[.07] bg-white/[.025] p-3.5">
                 <div className="flex items-center justify-between gap-3 mb-3 max-sm:items-start">
                   <div>
-                    <div className="text-[13px] font-medium text-text-primary">提示词与工具处理</div>
-                    <div className="text-[11px] text-text-muted mt-0.5">三个开关互相独立，可以任意组合；修改后会从新会话开始生效。</div>
+                    <div className="text-[13px] font-medium text-text-primary">{t('api.prompt_tools')}</div>
+                    <div className="text-[11px] text-text-muted mt-0.5">{t('api.prompt_tools_help')}</div>
                   </div>
                   <span className="text-[10px] text-ok bg-ok/10 border border-ok/20 rounded px-2 py-0.5 shrink-0">
-                    {promptModeSaving ? '保存中' : '已保存'}
+                    {promptModeSaving ? t('api.saving') : t('api.saved')}
                   </span>
                 </div>
                 <div className="grid grid-cols-3 gap-2 max-lg:grid-cols-1">
@@ -1604,10 +1624,10 @@ export default function App() {
                     className={`text-left rounded-lg border p-3 cursor-pointer transition-colors disabled:cursor-wait ${settings.use_client_system_prompt ? 'border-notion-blue/60 bg-notion-blue/10' : 'border-border bg-bg-card hover:bg-bg-card-hover'}`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-[12px] font-semibold text-text-primary">客户端 System Prompt</span>
-                      <span className={`text-[10px] ${settings.use_client_system_prompt ? 'text-ok' : 'text-text-muted'}`}>{settings.use_client_system_prompt ? '开启' : '关闭'}</span>
+                      <span className="text-[12px] font-semibold text-text-primary">{t('api.client_prompt')}</span>
+                      <span className={`text-[10px] ${settings.use_client_system_prompt ? 'text-ok' : 'text-text-muted'}`}>{settings.use_client_system_prompt ? t('api.enabled') : t('api.disabled')}</span>
                     </div>
-                    <div className="text-[11px] text-text-muted mt-1.5 leading-relaxed">开启：保留客户端传来的 system prompt。关闭：忽略这部分，但普通问题仍会发送。</div>
+                    <div className="text-[11px] text-text-muted mt-1.5 leading-relaxed">{t('api.client_prompt_help')}</div>
                   </button>
                   <button
                     type="button"
@@ -1618,10 +1638,10 @@ export default function App() {
                     className={`text-left rounded-lg border p-3 cursor-pointer transition-colors disabled:cursor-wait ${settings.use_notion_personal_instructions ? 'border-notion-blue/60 bg-notion-blue/10' : 'border-border bg-bg-card hover:bg-bg-card-hover'}`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-[12px] font-semibold text-text-primary">Notion 官网个人指令</span>
-                      <span className={`text-[10px] ${settings.use_notion_personal_instructions ? 'text-ok' : 'text-text-muted'}`}>{settings.use_notion_personal_instructions ? '开启' : '关闭'}</span>
+                      <span className="text-[12px] font-semibold text-text-primary">{t('api.notion_personal')}</span>
+                      <span className={`text-[10px] ${settings.use_notion_personal_instructions ? 'text-ok' : 'text-text-muted'}`}>{settings.use_notion_personal_instructions ? t('api.enabled') : t('api.disabled')}</span>
                     </div>
-                    <div className="text-[11px] text-text-muted mt-1.5 leading-relaxed">开启：由当前 Notion 账号的默认 Agent 加载官网保存的个人指令，可和左侧同时开启。</div>
+                    <div className="text-[11px] text-text-muted mt-1.5 leading-relaxed">{t('api.notion_personal_help')}</div>
                   </button>
                   <button
                     type="button"
@@ -1632,32 +1652,13 @@ export default function App() {
                     className={`text-left rounded-lg border p-3 cursor-pointer transition-colors disabled:cursor-wait ${settings.enable_tool_bridge ? 'border-notion-blue/60 bg-notion-blue/10' : 'border-border bg-bg-card hover:bg-bg-card-hover'}`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="text-[12px] font-semibold text-text-primary">外部工具兼容</span>
-                      <span className={`text-[10px] ${settings.enable_tool_bridge ? 'text-ok' : 'text-text-muted'}`}>{settings.enable_tool_bridge ? '开启' : '关闭'}</span>
+                      <span className="text-[12px] font-semibold text-text-primary">{t('api.tool_bridge')}</span>
+                      <span className={`text-[10px] ${settings.enable_tool_bridge ? 'text-ok' : 'text-text-muted'}`}>{settings.enable_tool_bridge ? t('api.enabled') : t('api.disabled')}</span>
                     </div>
-                    <div className="text-[11px] text-text-muted mt-1.5 leading-relaxed">开启：让 Claude Code、Tools 和函数调用正常工作。关闭：按普通聊天发送，外部工具调用停用。</div>
+                    <div className="text-[11px] text-text-muted mt-1.5 leading-relaxed">{t('api.tool_bridge_help')}</div>
                   </button>
                 </div>
               </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={settings.check_personal_instructions_on_import}
-                onClick={() => toggleSetting('check_personal_instructions_on_import')}
-                className={`w-full mb-5 text-left rounded-lg border p-3.5 cursor-pointer transition-colors ${settings.check_personal_instructions_on_import ? 'border-notion-blue/60 bg-notion-blue/10' : 'border-white/[.07] bg-white/[.025] hover:bg-white/[.04]'}`}
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-[12px] font-semibold text-text-primary">导入账号时检测官网个人指令</div>
-                    <div className="text-[11px] text-text-muted mt-1 leading-relaxed">
-                      开启后，添加账号窗口可选择“全部导入”或“只导入已设置个人指令的账号”；只记录检测结果，不读取指令正文。
-                    </div>
-                  </div>
-                  <span className={`text-[10px] shrink-0 ${settings.check_personal_instructions_on_import ? 'text-ok' : 'text-text-muted'}`}>
-                    {settings.check_personal_instructions_on_import ? '开启' : '关闭'}
-                  </span>
-                </div>
-              </button>
               <div className="flex items-center gap-6 flex-wrap max-sm:flex-col max-sm:items-stretch max-sm:gap-4">
                 <div className="flex items-center gap-6 flex-wrap max-sm:flex-col max-sm:items-stretch max-sm:gap-3 max-sm:w-full">
                   <div className="flex items-center gap-1.5 max-sm:flex-wrap">
@@ -1665,14 +1666,14 @@ export default function App() {
                     <code
                       className={`text-[11px] bg-white/[.05] px-1.5 py-0.5 rounded cursor-pointer hover:bg-white/[.1] transition-colors font-mono max-sm:max-w-[220px] max-sm:truncate ${copiedField === 'key' ? 'text-ok' : 'text-text-primary'}`}
                       onClick={() => copyToClipboard(apiKey, 'key')}
-                      title="点击复制"
+                      title={t('api.click_to_copy')}
                     >
-                      {copiedField === 'key' ? '✓ 已复制' : (apiKeyRevealed ? apiKey : maskedKey)}
+                      {copiedField === 'key' ? `✓ ${t('api.copied')}` : (apiKeyRevealed ? apiKey : maskedKey)}
                     </code>
                     <button
                       onClick={() => setApiKeyRevealed(!apiKeyRevealed)}
                       className="ml-3 text-text-muted hover:text-text-primary transition-colors bg-transparent border-none cursor-pointer px-0.5 flex items-center"
-                      title={apiKeyRevealed ? '隐藏' : '显示'}
+                      title={apiKeyRevealed ? t('api.hide') : t('api.show')}
                     >
                       {apiKeyRevealed ? (
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -1690,16 +1691,16 @@ export default function App() {
                     <code
                       className={`text-[11px] bg-white/[.05] px-1.5 py-0.5 rounded cursor-pointer hover:bg-white/[.1] transition-colors font-mono break-all ${copiedField === 'base' ? 'text-ok' : 'text-text-primary'}`}
                       onClick={() => copyToClipboard(apiBase, 'base')}
-                      title="点击复制"
+                      title={t('api.click_to_copy')}
                     >
-                      {copiedField === 'base' ? '✓ 已复制' : apiBase}
+                      {copiedField === 'base' ? `✓ ${t('api.copied')}` : apiBase}
                     </code>
                   </div>
                   <div className="flex items-center gap-1.5 max-sm:grid max-sm:grid-cols-[auto_8px_1fr]">
-                    <span className="text-[11px] text-text-muted">全局代理</span>
+                    <span className="text-[11px] text-text-muted">{t('api.global_proxy')}</span>
                     <span
                       className={`inline-block w-1.5 h-1.5 rounded-full ${proxyError ? 'bg-err' : settings.notion_proxy ? 'bg-ok' : 'bg-text-muted/60'}`}
-                      title={proxyError ? proxyError : settings.notion_proxy ? '已启用代理' : '直连'}
+                      title={proxyError ? proxyError : settings.notion_proxy ? t('api.proxy_enabled') : t('api.direct_connection')}
                     />
                     <input
                       type="text"
@@ -1714,10 +1715,10 @@ export default function App() {
                           ;(e.target as HTMLInputElement).blur()
                         }
                       }}
-                      placeholder="留空 = 直连"
+                      placeholder={t('api.direct_connection_tip')}
                       disabled={proxySaving}
                       className={`text-[11px] bg-white/[.05] px-1.5 py-0.5 rounded font-mono outline-none border w-[160px] focus:w-[280px] transition-[width,border-color] duration-150 max-sm:w-full max-sm:focus:w-full ${proxyError ? 'border-err text-err' : 'border-transparent focus:border-white/20 text-text-primary'} placeholder:text-text-muted/60`}
-                      title={proxyError || (settings.notion_proxy ? `当前: ${settings.notion_proxy}` : '当前: 直连')}
+                      title={proxyError || (settings.notion_proxy ? t('api.current_proxy', { proxy: settings.notion_proxy }) : t('api.current_direct'))}
                     />
                   </div>
                 </div>
@@ -1729,7 +1730,7 @@ export default function App() {
                     >
                       <span className={`absolute top-[2px] left-[2px] w-3 h-3 rounded-full transition-all duration-200 ${settings.enable_web_search ? 'bg-white shadow-sm translate-x-[12px]' : 'bg-white/40'}`} />
                     </button>
-                    <span className="text-[12px] text-white font-medium">联网搜索</span>
+                    <span className="text-[12px] text-white font-medium">{t('api.web_search')}</span>
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer select-none">
                     <button
@@ -1738,11 +1739,11 @@ export default function App() {
                     >
                       <span className={`absolute top-[2px] left-[2px] w-3 h-3 rounded-full transition-all duration-200 ${settings.enable_workspace_search ? 'bg-white shadow-sm translate-x-[12px]' : 'bg-white/40'}`} />
                     </button>
-                    <span className="text-[12px] text-text-primary">工作区搜索</span>
+                    <span className="text-[12px] text-text-primary">{t('api.workspace_search')}</span>
                   </label>
                   <label
                     className="flex items-center gap-2 cursor-pointer select-none"
-                    title="开启后所有请求默认进入 ASK 模式（仅回答、不写入页面）。单次覆盖：在模型名末尾追加 -ask，例如 claude-sonnet-4.6-ask"
+                    title={t('api.ask_help')}
                   >
                     <button
                       onClick={() => toggleSetting('ask_mode_default')}
@@ -1750,7 +1751,7 @@ export default function App() {
                     >
                       <span className={`absolute top-[2px] left-[2px] w-3 h-3 rounded-full transition-all duration-200 ${settings.ask_mode_default ? 'bg-white shadow-sm translate-x-[12px]' : 'bg-white/40'}`} />
                     </button>
-                    <span className="text-[12px] text-text-primary">ASK 模式</span>
+                    <span className="text-[12px] text-text-primary">{t('api.ask_mode')}</span>
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer select-none">
                     <button
@@ -1759,7 +1760,7 @@ export default function App() {
                     >
                       <span className={`absolute top-[2px] left-[2px] w-3 h-3 rounded-full transition-all duration-200 ${settings.debug_logging ? 'bg-white shadow-sm translate-x-[12px]' : 'bg-white/40'}`} />
                     </button>
-                    <span className="text-[12px] text-text-primary">调试日志</span>
+                    <span className="text-[12px] text-text-primary">{t('api.debug_log')}</span>
                   </label>
                 </div>
               </div>
@@ -1784,28 +1785,28 @@ export default function App() {
             onChange={event => setStatusFilter(event.target.value as AccountStatusFilter)}
             disabled={batchBusy}
             className="px-3 py-1.5 bg-bg-secondary text-text-primary rounded-md text-[12px] border border-border outline-none cursor-pointer disabled:opacity-40 max-sm:col-span-2"
-            title="按账号状态筛选"
+            title={t('common.filter_status')}
           >
-            {accountStatusFilterOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+            {accountStatusFilterOptions.map(option => <option key={option.value} value={option.value}>{t(option.labelKey)}</option>)}
           </select>
           <button
             onClick={toggleCurrentPageSelection}
             disabled={pageEmails.length === 0 || batchBusy}
             className="px-3 py-1.5 bg-bg-secondary hover:bg-bg-card-hover text-text-primary rounded-md text-[12px] font-medium cursor-pointer border border-border disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            {allPageSelected ? '取消本页' : '本页全选'}
+            {allPageSelected ? t('common.unselect_page') : t('common.select_page')}
           </button>
           <button
             onClick={handleSelectAllResults}
             disabled={filteredTotal === 0 || batchBusy || selectingAllResults}
             className="px-3 py-1.5 bg-notion-blue/10 hover:bg-notion-blue/20 text-notion-blue rounded-md text-[12px] font-medium cursor-pointer border border-notion-blue/25 disabled:opacity-40 disabled:cursor-not-allowed"
-            title="一次选择当前搜索文字和状态筛选下的全部账号，包括其他页面"
+            title={t('common.select_all_help')}
           >
-            {selectingAllResults ? '正在全选...' : `全选全部结果（${filteredTotal}）`}
+            {selectingAllResults ? t('common.selecting_all') : t('common.select_all', { count: filteredTotal })}
           </button>
           <span className="text-[12px] text-text-secondary mr-auto self-center">
-            已选 <strong className="text-text-primary tabular-nums">{selectedEmails.size}</strong> 个
-            {selectedOnPage > 0 && selectedEmails.size !== selectedOnPage ? `（本页 ${selectedOnPage} 个）` : ''}
+            {t('common.selected', { count: selectedEmails.size })}
+            {selectedOnPage > 0 && selectedEmails.size !== selectedOnPage ? t('common.selected_page', { count: selectedOnPage }) : ''}
           </span>
           <div className="flex items-center gap-2 flex-wrap max-sm:grid max-sm:grid-cols-2 max-sm:w-full">
             <button
@@ -1813,56 +1814,56 @@ export default function App() {
               disabled={selectedEmails.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-bg-secondary hover:bg-bg-card-hover text-text-secondary hover:text-text-primary rounded-md text-[12px] cursor-pointer border border-border disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              复制邮箱
+              {t('common.copy_emails')}
             </button>
             <button
               onClick={() => handleBulkSelected('check_personal_instructions')}
               disabled={selectedEmails.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-bg-secondary hover:bg-bg-card-hover text-text-secondary hover:text-text-primary rounded-md text-[12px] cursor-pointer border border-border disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {batchStartingAction === 'check_personal_instructions' ? '正在启动...' : '检测所选'}
+              {batchStartingAction === 'check_personal_instructions' ? t('actions.starting') : t('common.check_selected')}
             </button>
             <button
               onClick={() => handleBulkSelected('disable')}
               disabled={selectedEmails.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-warn/10 hover:bg-warn/20 text-warn rounded-md text-[12px] cursor-pointer border border-warn/25 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {batchStartingAction === 'disable' ? '正在启动...' : '禁用所选'}
+              {batchStartingAction === 'disable' ? t('actions.starting') : t('common.disable_selected')}
             </button>
             <button
               onClick={() => handleBulkSelected('enable')}
               disabled={selectedEmails.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-ok/10 hover:bg-ok/20 text-ok rounded-md text-[12px] cursor-pointer border border-ok/25 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {batchStartingAction === 'enable' ? '正在启动...' : '启用所选'}
+              {batchStartingAction === 'enable' ? t('actions.starting') : t('common.enable_selected')}
             </button>
             <button
               onClick={() => handleBulkSelected('delete')}
               disabled={selectedEmails.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-err/10 hover:bg-err/20 text-err rounded-md text-[12px] cursor-pointer border border-err/25 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {batchStartingAction === 'delete' ? '正在启动...' : '删除所选'}
+              {batchStartingAction === 'delete' ? t('actions.starting') : t('common.delete_selected')}
             </button>
             <button
               onClick={() => setSelectedEmails(new Set())}
               disabled={selectedEmails.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-transparent hover:bg-white/[.05] text-text-muted hover:text-text-primary rounded-md text-[12px] cursor-pointer border border-transparent disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              清空选择
+              {t('common.clear_selection')}
             </button>
           </div>
         </div>
 
         {/* Section Title */}
         <div className="text-[12px] font-semibold text-text-secondary uppercase tracking-wider mb-3.5 flex items-center gap-1.5">
-          <span>账号池</span>
+          <span>{t('common.accounts_pool')}</span>
           <span className="font-normal text-text-muted">({filteredTotal})</span>
         </div>
 
         {/* Grid */}
         {filteredTotal === 0 ? (
           <div className="text-center py-16 text-text-secondary text-sm">
-            没有找到匹配的账号
+            {t('common.no_matching_accounts')}
           </div>
         ) : (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(340px,1fr))] gap-2.5 mb-4 max-sm:grid-cols-1">
@@ -1893,7 +1894,7 @@ export default function App() {
               disabled={page === 0}
               className="px-2.5 py-1.5 bg-bg-card hover:bg-bg-card-hover text-text-secondary rounded-md text-[12px] cursor-pointer transition-colors border border-border disabled:opacity-30 disabled:cursor-not-allowed"
             >
-              ‹ 上一页
+              ‹ {t('common.prev_page')}
             </button>
             <span className="text-[12px] text-text-secondary tabular-nums px-3">
               {page + 1} / {totalPages}
@@ -1903,7 +1904,7 @@ export default function App() {
               disabled={page >= totalPages - 1}
               className="px-2.5 py-1.5 bg-bg-card hover:bg-bg-card-hover text-text-secondary rounded-md text-[12px] cursor-pointer transition-colors border border-border disabled:opacity-30 disabled:cursor-not-allowed"
             >
-              下一页 ›
+              {t('common.next_page')} ›
             </button>
             <button
               onClick={() => setPage(totalPages - 1)}
@@ -1920,7 +1921,6 @@ export default function App() {
         <AddAccountModal
           onClose={() => setShowAddModal(false)}
           onSuccess={loadData}
-          autoCheckPersonalInstructions={settings?.check_personal_instructions_on_import ?? false}
         />
       )}
 
