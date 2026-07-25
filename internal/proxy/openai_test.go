@@ -172,16 +172,38 @@ func TestOpenAIChatStreamTranscoder_EmitsToolCallsAndDone(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatStreamTranscoder_UsesInputTokensFromFinalUsage(t *testing.T) {
+	rr := httptest.NewRecorder()
+	transcoder := newOpenAIChatStreamTranscoder(rr, rr, "chatcmpl_usage", "claude-opus-5", 123, true)
+	frames := []anthropicSSEFrame{
+		{Event: "message_start", Data: json.RawMessage(`{"message":{"usage":{"input_tokens":0}}}`)},
+		{Event: "content_block_delta", Data: json.RawMessage(`{"index":0,"delta":{"type":"text_delta","text":"ok"}}`)},
+		{Event: "message_delta", Data: json.RawMessage(`{"delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":30600,"output_tokens":127}}`)},
+		{Event: "message_stop", Data: json.RawMessage(`{"type":"message_stop"}`)},
+	}
+	for _, frame := range frames {
+		if err := transcoder.HandleFrame(frame); err != nil {
+			t.Fatalf("HandleFrame(%s) error = %v", frame.Event, err)
+		}
+	}
+	body := rr.Body.String()
+	for _, want := range []string{`"prompt_tokens":30600`, `"completion_tokens":127`, `"total_tokens":30727`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing final usage %s:\n%s", want, body)
+		}
+	}
+}
+
 func TestOpenAIResponsesStreamTranscoder_EmitsCompletedResponse(t *testing.T) {
 	rr := httptest.NewRecorder()
 	transcoder := newOpenAIResponsesStreamTranscoder(rr, rr, "resp_test", "gpt-5.4", 456)
 	frames := []anthropicSSEFrame{
-		{Event: "message_start", Data: json.RawMessage(`{"message":{"usage":{"input_tokens":9}}}`)},
+		{Event: "message_start", Data: json.RawMessage(`{"message":{"usage":{"input_tokens":0}}}`)},
 		{Event: "content_block_delta", Data: json.RawMessage(`{"index":0,"delta":{"type":"text_delta","text":"你好"}}`)},
 		{Event: "content_block_start", Data: json.RawMessage(`{"index":1,"content_block":{"type":"tool_use","id":"call_2","name":"Read","input":{}}}`)},
 		{Event: "content_block_delta", Data: json.RawMessage(`{"index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a.txt\"}"}}`)},
 		{Event: "content_block_stop", Data: json.RawMessage(`{"index":1}`)},
-		{Event: "message_delta", Data: json.RawMessage(`{"delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":6}}`)},
+		{Event: "message_delta", Data: json.RawMessage(`{"delta":{"stop_reason":"tool_use"},"usage":{"input_tokens":9,"output_tokens":6}}`)},
 	}
 	for _, frame := range frames {
 		if err := transcoder.HandleFrame(frame); err != nil {
@@ -210,6 +232,11 @@ func TestOpenAIResponsesStreamTranscoder_EmitsCompletedResponse(t *testing.T) {
 	}
 	if !strings.Contains(body, `a.txt`) {
 		t.Fatalf("missing function call arguments: %s", body)
+	}
+	for _, want := range []string{`"input_tokens":9`, `"output_tokens":6`, `"total_tokens":15`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing final usage %s:\n%s", want, body)
+		}
 	}
 }
 

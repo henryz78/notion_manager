@@ -371,6 +371,9 @@ func (t *openAIChatStreamTranscoder) HandleFrame(frame anthropicSSEFrame) error 
 		delta, _ := payload["delta"].(map[string]interface{})
 		stop := mapAnthropicStopReasonToOpenAI(stringValue(delta["stop_reason"]))
 		if usage, ok := payload["usage"].(map[string]interface{}); ok {
+			if inputTokens, exists := usage["input_tokens"]; exists {
+				t.inputTokens = intValue(inputTokens)
+			}
 			t.outputTokens = intValue(usage["output_tokens"])
 		}
 		if err := t.emitChunk(map[string]interface{}{}, &stop, nil); err != nil {
@@ -797,6 +800,9 @@ func (t *openAIResponsesStreamTranscoder) HandleFrame(frame anthropicSSEFrame) e
 		return t.finalizeToolItem(index)
 	case "message_delta":
 		if usage, ok := payload["usage"].(map[string]interface{}); ok {
+			if inputTokens, exists := usage["input_tokens"]; exists {
+				t.inputTokens = intValue(inputTokens)
+			}
 			t.outputTokens = intValue(usage["output_tokens"])
 		}
 		if err := t.finalizeMessageItem(); err != nil {
