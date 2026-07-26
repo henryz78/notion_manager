@@ -137,7 +137,7 @@ func TestInjectToolsIntoMessages_DropsWrapperOnlyUserMessage(t *testing.T) {
 	if strings.Contains(content, "<available-deferred-tools>") {
 		t.Fatalf("wrapper-only message leaked into bridged content: %q", content)
 	}
-	if !strings.Contains(content, `Text to classify: "修复登录校验"`) {
+	if !strings.Contains(content, `TEST INPUT: "修复登录校验"`) {
 		t.Fatalf("expected actual user query in bridged content, got %q", content)
 	}
 }
@@ -407,6 +407,7 @@ func TestDetectToolBridgeNoToolResponse_MatchesIdentityDriftHandOff(t *testing.T
 
 func TestDetectToolBridgeNoToolResponse_MatchesMissingProjectAccess(t *testing.T) {
 	responses := []string{
+		`I can’t comply with that classify-this-text request because these external action labels are not tools available here.`,
 		`No action needed.`,
 		`No file operation is needed here. The quoted text asks for a search, but there is no actual project file system or paths provided to search.`,
 		`I do not have access to your project’s file system in this chat. If you share the files here, I can search them.`,

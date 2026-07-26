@@ -44,12 +44,13 @@ func TestBuildSessionChainFollowUp(t *testing.T) {
 	if !strings.Contains(content, "__done__") {
 		t.Errorf("expected __done__ in follow-up, got: %s", content)
 	}
-	if !strings.Contains(content, "Do not select an action whose successful result is already shown above") {
+	if !strings.Contains(content, "Do not repeat a label whose successful result is already shown above") {
 		t.Errorf("expected repeat-action guard in follow-up, got: %s", content)
 	}
-	// Should NOT contain the original query (context is in the Notion thread)
-	if strings.Contains(content, "list files in the current directory") {
-		t.Errorf("follow-up should not repeat original query (thread has context)")
+	// Keep the original task explicit because some model/thread combinations do
+	// not reliably retain it when consuming client action results.
+	if !strings.Contains(content, "list files in the current directory") {
+		t.Errorf("follow-up should preserve the original task")
 	}
 }
 
@@ -76,6 +77,24 @@ func TestBuildSessionChainFollowUp_MultipleToolResults(t *testing.T) {
 	}
 }
 
+func TestBuildSessionChainFollowUpUsesLatestUserTask(t *testing.T) {
+	messages := []ChatMessage{
+		{Role: "user", Content: "old unrelated task"},
+		{Role: "assistant", Content: "old answer"},
+		{Role: "user", Content: "find needle-731 in project files"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_1", Type: "function", Function: ToolCallFunction{Name: "Grep", Arguments: `{"pattern":"needle-731"}`}}}},
+		{Role: "tool", ToolCallID: "call_1", Name: "Grep", Content: "src/example.txt: needle-731"},
+	}
+
+	content := buildSessionChainFollowUp(messages, "- Grep(pattern: str)\n", "")[0].Content
+	if !strings.Contains(content, `Original task: "find needle-731 in project files"`) {
+		t.Fatalf("latest task missing from follow-up: %s", content)
+	}
+	if strings.Contains(content, "old unrelated task") {
+		t.Fatalf("stale task leaked into follow-up: %s", content)
+	}
+}
+
 // TestBuildSessionChainFollowUp_TruncatesLargeOutput verifies truncation of large tool output.
 func TestBuildSessionChainFollowUp_TruncatesLargeOutput(t *testing.T) {
 	largeOutput := strings.Repeat("x", 5000)
@@ -94,8 +113,8 @@ func TestBuildSessionChainFollowUp_TruncatesLargeOutput(t *testing.T) {
 		t.Errorf("expected truncation marker in large output")
 	}
 	// Should be well under the original 5000 chars
-	if len(content) > 4500 {
-		t.Errorf("follow-up too large: %d chars (expected < 4500)", len(content))
+	if len(content) > 5000 {
+		t.Errorf("follow-up too large: %d chars (expected <= 5000)", len(content))
 	}
 }
 
@@ -303,7 +322,7 @@ func TestInjectToolsSessionVsLegacy(t *testing.T) {
 		{Role: "tool", ToolCallID: "call_1", Name: "Bash", Content: "main.go\ntools.go\nserver.go"},
 	}
 
-	// With session: should use session-based follow-up (shorter, no original query)
+	// With session: use a concise follow-up that still repeats the original task.
 	session := &Session{TurnCount: 1, RawMessageCount: 1}
 	resultWithSession := injectToolsIntoMessages(messages, tools, "claude-sonnet-4-20250514", session)
 
@@ -313,19 +332,19 @@ func TestInjectToolsSessionVsLegacy(t *testing.T) {
 	if !strings.Contains(resultWithSession[0].Content, "Completed action results:") {
 		t.Error("session path: expected completed-action results prefix")
 	}
-	if strings.Contains(resultWithSession[0].Content, "list all go files") {
-		t.Error("session path: should not repeat the original query already held by the thread")
+	if !strings.Contains(resultWithSession[0].Content, "list all go files") {
+		t.Error("session path: should preserve the original query for reliable completion")
 	}
 
 	// Without session: should use legacy collapse with the original query and
-	// the neutral next-action classification contract.
+	// the neutral next-label contract.
 	resultNoSession := injectToolsIntoMessages(messages, tools, "claude-sonnet-4-20250514", nil)
 
 	if len(resultNoSession) != 1 {
 		t.Fatalf("legacy path: expected 1 message, got %d", len(resultNoSession))
 	}
-	if !strings.Contains(resultNoSession[0].Content, "Classify the next step for the quoted task") {
-		t.Error("legacy path: expected next-action classification framing")
+	if !strings.Contains(resultNoSession[0].Content, "Classify the next step for the original task") {
+		t.Error("legacy path: expected next-label framing")
 	}
 	if !strings.Contains(resultNoSession[0].Content, "list all go files") {
 		t.Error("legacy path: expected original query in collapsed message")

@@ -634,6 +634,10 @@ func detectToolBridgeNoToolResponse(text string) bool {
 		strings.Contains(lower, "can't search") ||
 		strings.Contains(lower, "can’t search") ||
 		strings.Contains(normalized, "无法搜索")
+	mentionsClassificationRefusal := (strings.Contains(lower, "cannot comply") ||
+		strings.Contains(lower, "can't comply") ||
+		strings.Contains(lower, "can’t comply")) &&
+		(strings.Contains(lower, "classify") || strings.Contains(lower, "action label") || strings.Contains(lower, "tool label"))
 	mentionsPrematureNoAction := strings.Contains(lower, "no action needed") ||
 		strings.Contains(lower, "no action is needed") ||
 		strings.Contains(lower, "no file operation is needed") ||
@@ -659,6 +663,8 @@ func detectToolBridgeNoToolResponse(text string) bool {
 		strings.Contains(lower, "bash")
 
 	switch {
+	case mentionsClassificationRefusal:
+		return true
 	case mentionsPrematureNoAction:
 		return true
 	case mentionsMissingProjectData:

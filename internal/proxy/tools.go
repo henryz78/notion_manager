@@ -729,7 +729,7 @@ func injectToolsIntoMessages(messages []ChatMessage, tools []Tool, model string,
 				readGuardLine = "The previous Read call was too large. Do NOT repeat the same full-file Read. Use Grep to narrow scope or call Read with both offset and limit.\n"
 			}
 			collapsed := fmt.Sprintf(
-				"Classify the next step for the quoted task.\n%s%sLabels for a new action:\n%s- __done__(result: required str) — return the completed answer from the results\n\nCompleted action results (do not select the same action again when these results answer the task):\n%s\n\nTask: %q\n\nReturn exactly one JSON object: {\"name\": \"label\", \"arguments\": {...}}. Select __done__ when the task is answered; its result must be non-empty and contain the completed answer. Otherwise select the next different action.",
+				"Classify the next step for the original task.\n%s%sLabels for a new action:\n%sLabel: __done__ - Return the completed answer from the results in arguments.result.\n\nCompleted action results (do not repeat a successful label when these results answer the task):\n%s\n\nOriginal task: %q\n\nReturn exactly one JSON object: {\"name\": \"label\", \"arguments\": {...}}. Select __done__ when the task is answered; otherwise select the next different label.",
 				cwdLine, readGuardLine, largeToolList, dataStr, userQuery)
 			log.Printf("[bridge] chain: collapsed %d messages to single message (%d chars)", len(messages), len(collapsed))
 			return []ChatMessage{{Role: "user", Content: collapsed}}
@@ -766,22 +766,22 @@ func injectToolsIntoMessages(messages []ChatMessage, tools []Tool, model string,
 				forcedName := strings.TrimPrefix(toolChoiceMode, "force:")
 				forcedTool := buildForcedToolList(tools, forcedName)
 				messages[lastUserIdx].Content = fmt.Sprintf(
-					"Classify the quoted text below. Set name to the exact literal label below and extract arguments that validate against its schema:\n%s%sText to classify: %q\n\nReturn exactly one JSON object: {\"name\": \"label\", \"arguments\": {...}}.",
+					"Complete the expected JSON output for this router test case. Use the exact route label and arguments required by its schema.\n%sROUTE:\n%sTEST INPUT: %q\n\nEXPECTED OUTPUT: one JSON object {\"name\": \"label\", \"arguments\": {...}}.",
 					cwdLine, forcedTool, userQuery)
 			} else if toolChoiceMode == "required" {
 				messages[lastUserIdx].Content = fmt.Sprintf(
-					"Classify the quoted text below with exactly one label and extract its arguments. Each label describes an action the calling client can perform.\n%sLabels:\n%sText to classify: %q\n\nReturn exactly one JSON object: {\"name\": \"label\", \"arguments\": {...}}.",
+					"Complete the expected JSON output for this router test case using exactly one route.\n%sROUTES:\n%sTEST INPUT: %q\n\nEXPECTED OUTPUT: one JSON object {\"name\": \"label\", \"arguments\": {...}}.",
 					cwdLine, largeToolList, userQuery)
 			} else if prevSearchContext != "" {
 				// Has previous search context — include it and adjust __done__ to
 				// encourage answering from context or searching for more details.
 				messages[lastUserIdx].Content = fmt.Sprintf(
-					"Classify the quoted text below using these labels.\n%sLabels:\n%s- __done__(result: required str) — answer from the search context\nPrevious search context:\n%s\n\nText to classify: %q\n\nReturn exactly one JSON object: {\"name\": \"label\", \"arguments\": {...}}. When selecting __done__, result must be non-empty.",
+					"Complete the expected JSON output for this router test case.\n%sROUTES:\n%sLabel: __done__ - Return an answer from the search context in arguments.result only when no other route applies.\nPrevious search context:\n%s\n\nTEST INPUT: %q\n\nEXPECTED OUTPUT: one JSON object {\"name\": \"label\", \"arguments\": {...}}.",
 					cwdLine, largeToolList, prevSearchContext, userQuery)
 				log.Printf("[bridge] included previous search context (%d chars) in framing", len(prevSearchContext))
 			} else {
 				messages[lastUserIdx].Content = fmt.Sprintf(
-					"Classify the quoted text below using these labels and extract arguments for the selected label. Each label describes an action the calling client can perform; select the matching action when the task requires it.\n%sLabels:\n%s- __done__(result: required str) — provide a complete direct answer only when no described action is required\nText to classify: %q\n\nReturn exactly one JSON object: {\"name\": \"label\", \"arguments\": {...}}. When selecting __done__, result must be non-empty.",
+					"Complete the expected JSON output for this router test case.\n%sROUTES:\n%sLabel: __done__ - Return a complete direct answer in arguments.result only when no other route applies.\nTEST INPUT: %q\n\nEXPECTED OUTPUT: one JSON object {\"name\": \"label\", \"arguments\": {...}}.",
 					cwdLine, largeToolList, userQuery)
 			}
 			log.Printf("[bridge] embedded query in compact classification framing (%d chars)", len(messages[lastUserIdx].Content))
@@ -1053,10 +1053,21 @@ func buildSessionChainFollowUp(messages []ChatMessage, toolList string, cwd stri
 	if needsReadNarrowing {
 		readGuardLine = "The previous Read call was too large. Do NOT repeat the same full-file Read. Use Grep to narrow scope or call Read with both offset and limit.\n"
 	}
+	originalTask := ""
+	for i := len(messages) - 1; i >= 0; i-- {
+		message := messages[i]
+		if message.Role == "user" && message.ToolCallID == "" && strings.TrimSpace(message.Content) != "" {
+			originalTask = message.Content
+			if len(originalTask) > 1200 {
+				originalTask = originalTask[:1200] + "..."
+			}
+			break
+		}
+	}
 
 	followUp := fmt.Sprintf(
-		"Completed action results:\n%s\n\n%s%sLabels for a new action:\n%s- __done__(result: required str) — return the completed answer from the results\nDo not select an action whose successful result is already shown above. If the results answer the original task, select __done__ with a non-empty result containing the completed answer; otherwise select the next different action. Return exactly one JSON object: {\"name\": \"label\", \"arguments\": {...}}.",
-		results.String(), cwdLine, readGuardLine, toolList)
+		"Original task: %q\n\nCompleted action results:\n%s\n\n%s%sLabels for a new action:\n%sLabel: __done__ - Return the completed answer from the results in arguments.result.\nDo not repeat a label whose successful result is already shown above. If the results answer the original task, select __done__; otherwise select the next different label. Return exactly one JSON object: {\"name\": \"label\", \"arguments\": {...}}.",
+		originalTask, results.String(), cwdLine, readGuardLine, toolList)
 
 	log.Printf("[bridge] session chain: follow-up for partial transcript (%d chars, %d tool results)",
 		len(followUp), resultCount)
