@@ -6,6 +6,23 @@ import (
 	"testing"
 )
 
+func TestParseNDJSONStreamAcceptsLargeUpstreamEvent(t *testing.T) {
+	largeEvent := `{"type":"ignored","padding":"` + strings.Repeat("x", 2*1024*1024) + `"}`
+	answerEvent := `{"type":"agent-inference","id":"step1","value":[{"type":"text","content":"ok"}],"finishedAt":1,"inputTokens":1,"outputTokens":1}`
+	stream := largeEvent + "\n" + answerEvent
+
+	var got strings.Builder
+	err := parseNDJSONStream(bytes.NewBufferString(stream), "", func(delta string, done bool, usage *UsageInfo) {
+		got.WriteString(delta)
+	}, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("parseNDJSONStream returned error for event above the old 1 MiB limit: %v", err)
+	}
+	if got.String() != "ok" {
+		t.Fatalf("unexpected parser output: %q", got.String())
+	}
+}
+
 func TestParseNDJSONStreamEmitsWorkflowProcessThinking(t *testing.T) {
 	stream := strings.Join([]string{
 		`{"type":"agent-inference","id":"step1","value":[{"type":"thinking","content":"Let me search"}]}`,

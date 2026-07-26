@@ -2522,9 +2522,16 @@ func collectSearchResultCitationDocs(evt searchToolResultEvent) []CitationCandid
 	return docs
 }
 
-func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, nativeToolUses *[]AgentValueEntry, thinkingBlocks *[]ThinkingBlock, thinkingCb ThinkingDeltaCallback, knownCitationURLs *[]string, knownCitationDocs *[]CitationCandidate, knownToolCallURLs *map[string][]string) error {
+const maxNotionNDJSONEventBytes = 16 * 1024 * 1024
+
+func newNotionNDJSONScanner(reader io.Reader) *bufio.Scanner {
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), maxNotionNDJSONEventBytes)
+	return scanner
+}
+
+func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, nativeToolUses *[]AgentValueEntry, thinkingBlocks *[]ThinkingBlock, thinkingCb ThinkingDeltaCallback, knownCitationURLs *[]string, knownCitationDocs *[]CitationCandidate, knownToolCallURLs *map[string][]string) error {
+	scanner := newNotionNDJSONScanner(reader)
 	responseLogger := newNotionResponseLogDeduper(requestID, "runInferenceTranscript ndjson deduped")
 
 	var rawText string   // raw accumulated text from Notion
@@ -3507,8 +3514,7 @@ func buildResearcherTranscript(acc *Account, messages []ChatMessage) []interface
 // Thinking deltas are emitted incrementally via thinkingCb so the client sees
 // research progress in real-time instead of waiting for the report to start.
 func parseResearcherStream(reader io.Reader, requestID string, cb StreamCallback, thinkingBlocks *[]ThinkingBlock, thinkingCb ThinkingDeltaCallback) error {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scanner := newNotionNDJSONScanner(reader)
 	responseLogger := newNotionResponseLogDeduper(requestID, "runInferenceTranscript researcher ndjson deduped")
 
 	var reportEventCount int   // count of report events received
