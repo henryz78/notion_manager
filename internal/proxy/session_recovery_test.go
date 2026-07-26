@@ -17,6 +17,41 @@ func TestNeedsFreshThreadRecoveryDetectsPriorTurns(t *testing.T) {
 	}
 }
 
+func TestShouldCollapseFreshThreadHistoryPreservesPlainCrossProviderHistory(t *testing.T) {
+	messages := []ChatMessage{
+		{Role: "user", Content: "large context from another provider"},
+		{Role: "assistant", Content: "context received"},
+		{Role: "user", Content: "continue on Notion"},
+	}
+
+	if shouldCollapseFreshThreadHistory(messages) {
+		t.Fatal("plain cross-provider history must be replayed without lossy recovery collapse")
+	}
+}
+
+func TestShouldCollapseFreshThreadHistoryCollapsesToolProtocolState(t *testing.T) {
+	messages := []ChatMessage{
+		{Role: "user", Content: "read the file"},
+		{
+			Role: "assistant",
+			ToolCalls: []ToolCall{{
+				ID:   "call-1",
+				Type: "function",
+				Function: ToolCallFunction{
+					Name:      "Read",
+					Arguments: `{"file_path":"README.md"}`,
+				},
+			}},
+		},
+		{Role: "tool", ToolCallID: "call-1", Name: "Read", Content: "file contents"},
+		{Role: "user", Content: "continue on Notion"},
+	}
+
+	if !shouldCollapseFreshThreadHistory(messages) {
+		t.Fatal("tool protocol history should still use fresh-thread recovery collapse")
+	}
+}
+
 func TestNeedsFreshThreadRecoverySkipsSingleTurn(t *testing.T) {
 	messages := []ChatMessage{
 		{Role: "system", Content: "Be concise."},

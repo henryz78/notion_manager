@@ -1146,13 +1146,18 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				switch {
 				case len(toolRecoveryMessages) > 0:
 					requestMessages = cloneChatMessages(toolRecoveryMessages)
-				case needsFreshThreadRecovery(attemptMessages):
+				case shouldCollapseFreshThreadHistory(attemptMessages):
 					collapsed := buildFreshThreadRecoveryMessages(attemptMessages)
 					if len(collapsed) == 1 {
 						log.Printf("[session] collapsed history to self-contained fresh-thread prompt (%d msgs → %d chars) for account %s",
 							len(attemptMessages), len(collapsed[0].Content), acc.UserEmail)
 					}
 					requestMessages = collapsed
+				default:
+					if needsFreshThreadRecovery(attemptMessages) {
+						log.Printf("[session] replaying %d plain client-history messages into fresh Notion thread for account %s",
+							len(attemptMessages), acc.UserEmail)
+					}
 				}
 			}
 

@@ -297,6 +297,29 @@ func needsFreshThreadRecovery(messages []ChatMessage) bool {
 	return false
 }
 
+// shouldCollapseFreshThreadHistory limits lossy recovery prompts to histories
+// that contain client tool protocol state. Plain user/assistant history from a
+// different upstream can be replayed verbatim into a new Notion thread.
+func shouldCollapseFreshThreadHistory(messages []ChatMessage) bool {
+	if !needsFreshThreadRecovery(messages) {
+		return false
+	}
+	lastUserIdx := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if isMeaningfulUserMessage(messages[i]) {
+			lastUserIdx = i
+			break
+		}
+	}
+	for i := 0; i < lastUserIdx; i++ {
+		message := messages[i]
+		if message.Role == "tool" || message.ToolCallID != "" || len(message.ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // buildFreshThreadRecoveryMessages collapses prior conversation state into a
 // single self-contained user prompt for use when we must recover onto a brand
 // new Notion thread (for example after session loss or account failover).
