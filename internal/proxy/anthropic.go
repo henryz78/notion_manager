@@ -493,6 +493,7 @@ type preparedToolBridgeResponse struct {
 	WebSearchQuery string
 	HasCalls       bool
 	DroppedCalls   int
+	InvalidDone    bool
 }
 
 func prepareToolBridgeResponse(content string, nativeToolUses []AgentValueEntry, allowedToolNames map[string]struct{}, aliasToOriginal map[string]string) preparedToolBridgeResponse {
@@ -520,14 +521,16 @@ func prepareToolBridgeResponse(content string, nativeToolUses []AgentValueEntry,
 			if tc.Function.Name == "__done__" {
 				var args map[string]interface{}
 				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err == nil {
-					if r, ok := args["result"].(string); ok {
+					if r, ok := args["result"].(string); ok && strings.TrimSpace(r) != "" {
 						prepared.DoneText = r
 					}
 				}
 				if prepared.DoneText == "" {
-					prepared.DoneText = tc.Function.Arguments
+					prepared.InvalidDone = true
+					log.Printf("[bridge] rejected __done__ with an empty result")
+				} else {
+					log.Printf("[bridge] __done__ intercepted: %s", prepared.DoneText)
 				}
-				log.Printf("[bridge] __done__ intercepted: %s", prepared.DoneText)
 			} else {
 				realCalls = append(realCalls, tc)
 			}
@@ -616,6 +619,32 @@ func detectToolBridgeNoToolResponse(text string) bool {
 		strings.Contains(lower, "i am notion ai")
 	mentionsLocalFS := strings.Contains(normalized, "本地文件系统") ||
 		strings.Contains(lower, "local file system")
+	mentionsProjectFS := (strings.Contains(lower, "project") &&
+		(strings.Contains(lower, "file system") || strings.Contains(lower, "filesystem") || strings.Contains(lower, "files"))) ||
+		strings.Contains(normalized, "项目文件")
+	mentionsNoAccess := strings.Contains(lower, "do not have access") ||
+		strings.Contains(lower, "don't have access") ||
+		strings.Contains(lower, "don’t have access") ||
+		strings.Contains(lower, "no access") ||
+		strings.Contains(lower, "cannot access") ||
+		strings.Contains(lower, "can't access") ||
+		strings.Contains(lower, "can’t access") ||
+		strings.Contains(normalized, "无法访问")
+	mentionsCannotSearch := strings.Contains(lower, "cannot search") ||
+		strings.Contains(lower, "can't search") ||
+		strings.Contains(lower, "can’t search") ||
+		strings.Contains(normalized, "无法搜索")
+	mentionsPrematureNoAction := strings.Contains(lower, "no action needed") ||
+		strings.Contains(lower, "no action is needed") ||
+		strings.Contains(lower, "no file operation is needed") ||
+		strings.Contains(lower, "no tool is needed") ||
+		strings.Contains(lower, "no tool call is needed") ||
+		strings.Contains(normalized, "无需执行操作") ||
+		strings.Contains(normalized, "不需要执行操作") ||
+		strings.Contains(normalized, "无需使用工具") ||
+		strings.Contains(normalized, "不需要调用工具")
+	mentionsMissingProjectData := mentionsProjectFS &&
+		(strings.Contains(lower, "no actual") || strings.Contains(lower, "not provided"))
 	mentionsCodingAssistant := strings.Contains(normalized, "编码助手") ||
 		strings.Contains(normalized, "Claude Code") ||
 		strings.Contains(normalized, "Cursor") ||
@@ -630,6 +659,14 @@ func detectToolBridgeNoToolResponse(text string) bool {
 		strings.Contains(lower, "bash")
 
 	switch {
+	case mentionsPrematureNoAction:
+		return true
+	case mentionsMissingProjectData:
+		return true
+	case mentionsNoAccess && (mentionsLocalFS || mentionsProjectFS):
+		return true
+	case mentionsCannotSearch && mentionsProjectFS:
+		return true
 	case mentionsNotionIdentity && mentionsLocalFS:
 		return true
 	case mentionsLocalFS && mentionsCodingAssistant:
@@ -987,7 +1024,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				log.Printf("[bridge] WebSearch/WebFetch detected — enabling Notion native search, stripping history")
 				messages = stripWebSearchHistory(messages)
 			}
-			bridgeTools, originalToToolAlias, toolAliasToOriginal = aliasSmallClientTools(convertedTools)
+			bridgeTools, originalToToolAlias, toolAliasToOriginal = aliasClientTools(convertedTools)
 		} else if !isResearcher && req.OutputConfig != nil && req.OutputConfig.Format != nil && req.OutputConfig.Format.Type == "json_schema" {
 			messages = applyStructuredOutputBridge(messages, req.OutputConfig)
 			if DebugLoggingEnabled() {
@@ -1226,7 +1263,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					session = nil
 					isFirstTurn = true
 					isRepeatTurn = false
-					toolRecoveryMessages = buildToolBridgeRecoveryMessages(messages)
+					// Preserve the already-injected tool contract. Rebuilding from
+					// the original messages would retry without any client tools.
+					toolRecoveryMessages = buildToolBridgeRecoveryMessages(attemptMessages)
 					tried = make(map[*Account]bool)
 					attempt = -1
 					continue
@@ -1866,7 +1905,15 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 	var prepared preparedToolBridgeResponse
 	if hasTools {
 		prepared = prepareToolBridgeResponse(contentStr, nativeToolUses, allowedToolNames, toolAliasToOriginal)
+		if prepared.DoneText != "" && detectToolBridgeNoToolResponse(prepared.DoneText) {
+			log.Printf("[bridge] %s received a no-tool refusal inside __done__, requesting clean retry", requestID)
+			return ErrToolBridgeNoTool
+		}
 		actionDetected := prepared.HasCalls || prepared.WebSearchQuery != "" || prepared.DoneText != ""
+		if !actionDetected && prepared.InvalidDone {
+			log.Printf("[bridge] %s received __done__ without a result, requesting clean retry", requestID)
+			return ErrToolBridgeNoTool
+		}
 		if !actionDetected && prepared.DroppedCalls > 0 && strings.TrimSpace(prepared.Remaining) == "" {
 			log.Printf("[bridge] %s received only undeclared internal tools, requesting clean retry", requestID)
 			return ErrToolBridgeNoTool
@@ -2160,6 +2207,14 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 	var prepared preparedToolBridgeResponse
 	if hasTools {
 		prepared = prepareToolBridgeResponse(content, nativeToolUses, allowedToolNames, toolAliasToOriginal)
+		if prepared.DoneText != "" && detectToolBridgeNoToolResponse(prepared.DoneText) {
+			log.Printf("[bridge] %s received a no-tool refusal inside __done__, requesting clean retry", requestID)
+			return ErrToolBridgeNoTool
+		}
+		if !prepared.HasCalls && prepared.WebSearchQuery == "" && prepared.DoneText == "" && prepared.InvalidDone {
+			log.Printf("[bridge] %s received __done__ without a result, requesting clean retry", requestID)
+			return ErrToolBridgeNoTool
+		}
 		if !prepared.HasCalls && prepared.WebSearchQuery == "" && prepared.DoneText == "" && prepared.DroppedCalls > 0 && strings.TrimSpace(prepared.Remaining) == "" {
 			log.Printf("[bridge] %s received only undeclared internal tools, requesting clean retry", requestID)
 			return ErrToolBridgeNoTool

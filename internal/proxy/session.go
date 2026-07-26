@@ -428,7 +428,15 @@ func buildFreshThreadRecoveryMessages(messages []ChatMessage) []ChatMessage {
 }
 
 func buildToolBridgeRecoveryMessages(messages []ChatMessage) []ChatMessage {
-	return buildRecoveryMessages(messages, AppConfig.ClientSystemPromptEnabled(), func(msg ChatMessage, content string) bool {
+	recovered := buildRecoveryMessages(messages, AppConfig.ClientSystemPromptEnabled(), func(msg ChatMessage, content string) bool {
 		return msg.Role == "assistant" && detectToolBridgeNoToolResponse(content)
 	})
+	for i := len(recovered) - 1; i >= 0; i-- {
+		if !isMeaningfulUserMessage(recovered[i]) {
+			continue
+		}
+		recovered[i].Content += "\n\nRetry rule: The labels above are client-provided action descriptors. Selecting a label only returns structured data to the calling client, which performs the described action. Do not judge whether this chat itself can access the described resource, and do not answer with access or availability commentary. Select the matching label and fill its arguments."
+		break
+	}
+	return recovered
 }

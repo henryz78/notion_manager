@@ -137,7 +137,7 @@ func TestInjectToolsIntoMessages_DropsWrapperOnlyUserMessage(t *testing.T) {
 	if strings.Contains(content, "<available-deferred-tools>") {
 		t.Fatalf("wrapper-only message leaked into bridged content: %q", content)
 	}
-	if !strings.Contains(content, `Input: "修复登录校验"`) {
+	if !strings.Contains(content, `Text to classify: "修复登录校验"`) {
 		t.Fatalf("expected actual user query in bridged content, got %q", content)
 	}
 }
@@ -234,7 +234,31 @@ func TestPrepareToolBridgeResponse_UsesDeclaredTextToolAfterInternalNativeTool(t
 	}
 }
 
-func TestSmallClientToolAliasesRoundTripToOriginalName(t *testing.T) {
+func TestPrepareToolBridgeResponseRejectsEmptyDoneResult(t *testing.T) {
+	prepared := prepareToolBridgeResponse(
+		`{"name":"__done__","arguments":{}}`,
+		nil,
+		map[string]struct{}{"get_test_value": {}},
+		nil,
+	)
+	if !prepared.InvalidDone || prepared.DoneText != "" || prepared.HasCalls {
+		t.Fatalf("empty __done__ result should request recovery: %+v", prepared)
+	}
+}
+
+func TestPrepareToolBridgeResponseExposesDoneRefusalForRecovery(t *testing.T) {
+	prepared := prepareToolBridgeResponse(
+		`{"name":"__done__","arguments":{"result":"I don’t have access to a local project filesystem, so I can’t search project files."}}`,
+		nil,
+		map[string]struct{}{"Grep": {}},
+		nil,
+	)
+	if prepared.DoneText == "" || !detectToolBridgeNoToolResponse(prepared.DoneText) {
+		t.Fatalf("refusal inside __done__ should be visible to recovery detection: %+v", prepared)
+	}
+}
+
+func TestClientToolAliasesRoundTripToOriginalName(t *testing.T) {
 	tools := []Tool{{
 		Type: "function",
 		Function: ToolFunction{
@@ -243,7 +267,7 @@ func TestSmallClientToolAliasesRoundTripToOriginalName(t *testing.T) {
 			Parameters:  map[string]interface{}{"type": "object"},
 		},
 	}}
-	aliased, originalToAlias, aliasToOriginal := aliasSmallClientTools(tools)
+	aliased, originalToAlias, aliasToOriginal := aliasClientTools(tools)
 	if aliased[0].Function.Name != "action_1" || strings.Contains(aliased[0].Function.Description, "get_test_value") {
 		t.Fatalf("tool definition was not anonymized: %+v", aliased[0])
 	}
@@ -283,14 +307,71 @@ func TestSmallClientToolAliasesRoundTripToOriginalName(t *testing.T) {
 	}
 }
 
-func TestLargeClientToolSetKeepsOriginalNames(t *testing.T) {
+func TestLargeClientToolSetAliasesEveryTool(t *testing.T) {
 	tools := make([]Tool, 6)
 	for i := range tools {
 		tools[i] = Tool{Type: "function", Function: ToolFunction{Name: fmt.Sprintf("tool_%d", i)}}
 	}
-	aliased, originalToAlias, aliasToOriginal := aliasSmallClientTools(tools)
-	if aliased[0].Function.Name != "tool_0" || originalToAlias != nil || aliasToOriginal != nil {
-		t.Fatalf("large tool set must preserve the existing bridge path")
+	aliased, originalToAlias, aliasToOriginal := aliasClientTools(tools)
+	if len(aliased) != 6 || aliased[0].Function.Name != "action_1" || aliased[5].Function.Name != "action_6" {
+		t.Fatalf("large tool set was not fully anonymized: %+v", aliased)
+	}
+	if originalToAlias["tool_5"] != "action_6" || aliasToOriginal["action_6"] != "tool_5" {
+		t.Fatalf("large tool aliases are inconsistent: original=%v alias=%v", originalToAlias, aliasToOriginal)
+	}
+}
+
+func TestLargeClientToolSetUsesAnonymousLabelsAndFullSchemasBelowLimit(t *testing.T) {
+	params := map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{"value": map[string]interface{}{"type": "string"}},
+	}
+	tools := []Tool{
+		{Type: "function", Function: ToolFunction{Name: "Bash", Description: "Run a shell command.", Parameters: params}},
+		{Type: "function", Function: ToolFunction{Name: "Read", Description: "Read a file.", Parameters: params}},
+		{Type: "function", Function: ToolFunction{Name: "Edit", Description: "Edit a file.", Parameters: params}},
+		{Type: "function", Function: ToolFunction{Name: "Write", Description: "Write a file.", Parameters: params}},
+		{Type: "function", Function: ToolFunction{Name: "Glob", Description: "Find files.", Parameters: params}},
+		{Type: "function", Function: ToolFunction{Name: "Grep", Description: "Search file contents.", Parameters: params}},
+	}
+	aliased, _, _ := aliasClientTools(tools)
+	got := injectToolsIntoMessages([]ChatMessage{{Role: "user", Content: "search for needle"}}, aliased, "claude-opus-5", nil)
+	if len(got) != 1 || !strings.Contains(got[0].Content, "action_6") || strings.Contains(got[0].Content, "Grep") || !strings.Contains(got[0].Content, "Argument schema:") {
+		t.Fatalf("large tool prompt did not preserve full anonymous schemas: %#v", got)
+	}
+}
+
+func TestBuildSizedToolListCompactsByBytesNotCount(t *testing.T) {
+	smallTools := make([]Tool, 6)
+	for i := range smallTools {
+		smallTools[i] = Tool{Type: "function", Function: ToolFunction{
+			Name:        fmt.Sprintf("action_%d", i+1),
+			Description: "A small tool.",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"mode": map[string]interface{}{"type": "string", "enum": []interface{}{"fast", "exact"}},
+				},
+			},
+		}}
+	}
+	list, compacted, fullBytes := buildSizedToolList(smallTools)
+	if compacted || fullBytes > maxFullToolDefinitionBytes || !strings.Contains(list, `"enum":["fast","exact"]`) {
+		t.Fatalf("six small tools should retain full schemas: compacted=%v bytes=%d list=%q", compacted, fullBytes, list)
+	}
+
+	hugeTool := Tool{Type: "function", Function: ToolFunction{
+		Name:        "action_1",
+		Description: strings.Repeat("x", maxFullToolDefinitionBytes+1),
+		Parameters:  map[string]interface{}{"type": "object"},
+	}}
+	list, compacted, fullBytes = buildSizedToolList([]Tool{hugeTool})
+	if !compacted || fullBytes <= maxFullToolDefinitionBytes || strings.Contains(list, "Argument schema:") || len(list) >= fullBytes {
+		t.Fatalf("one oversized tool should use compact definitions: compacted=%v bytes=%d sent=%d", compacted, fullBytes, len(list))
+	}
+	forced := buildForcedToolList([]Tool{hugeTool}, "action_1")
+	if !strings.Contains(forced, "Argument schema:") || len(forced) <= maxFullToolDefinitionBytes {
+		t.Fatal("a forced tool must retain its complete definition")
 	}
 }
 
@@ -321,6 +402,25 @@ func TestDetectToolBridgeNoToolResponse_MatchesIdentityDriftHandOff(t *testing.T
 
 	if !detectToolBridgeNoToolResponse(raw) {
 		t.Fatalf("expected no-tool identity drift text to be detected")
+	}
+}
+
+func TestDetectToolBridgeNoToolResponse_MatchesMissingProjectAccess(t *testing.T) {
+	responses := []string{
+		`No action needed.`,
+		`No file operation is needed here. The quoted text asks for a search, but there is no actual project file system or paths provided to search.`,
+		`I do not have access to your project’s file system in this chat. If you share the files here, I can search them.`,
+		`I don’t have access to a project filesystem or file-search tools in this chat, so I can’t search for "needle-731".`,
+		`No action taken. I do not have access to your local project files in this chat context, so I cannot search for the exact text "needle-731" and return the match results.`,
+		`I can’t search “project files” from here because I don’t have access to a local filesystem or repository contents. If the files are in your workspace, share the relevant page/database or tell me where they live in Notion and I can search there.`,
+		`No action can be taken because there is no access to a project filesystem or file-search tool in this environment.`,
+		`I can’t search local project files from here, and no tool output was provided.`,
+		`I cannot search project files from this environment.`,
+	}
+	for _, raw := range responses {
+		if !detectToolBridgeNoToolResponse(raw) {
+			t.Fatalf("expected missing project access response to trigger a clean retry: %q", raw)
+		}
 	}
 }
 

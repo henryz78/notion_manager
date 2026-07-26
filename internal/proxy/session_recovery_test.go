@@ -122,3 +122,18 @@ func TestBuildToolBridgeRecoveryMessagesSkipsIdentityDriftAssistantText(t *testi
 		}
 	}
 }
+
+func TestBuildToolBridgeRecoveryMessagesPreservesInjectedContract(t *testing.T) {
+	messages := []ChatMessage{{
+		Role:    "user",
+		Content: "Labels:\n- action_1(pattern: str) — Search files\nText to classify: \"find needle\"",
+	}}
+
+	got := buildToolBridgeRecoveryMessages(messages)
+	if len(got) != 1 || !strings.Contains(got[0].Content, "action_1(pattern: str)") || !strings.Contains(got[0].Content, "find needle") {
+		t.Fatalf("tool recovery dropped the injected contract: %#v", got)
+	}
+	if !strings.Contains(got[0].Content, "client-provided action descriptors") || !strings.Contains(got[0].Content, "calling client") {
+		t.Fatalf("tool recovery did not clarify client-side action execution: %#v", got)
+	}
+}

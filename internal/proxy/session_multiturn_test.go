@@ -36,13 +36,16 @@ func TestBuildSessionChainFollowUp(t *testing.T) {
 	if !strings.Contains(content, "Working directory: /home/user/project") {
 		t.Errorf("expected CWD in follow-up, got: %s", content)
 	}
-	// Should contain available functions
-	if !strings.Contains(content, "Available functions:") {
-		t.Errorf("expected function list in follow-up, got: %s", content)
+	// Should contain available action labels
+	if !strings.Contains(content, "Labels for a new action:") {
+		t.Errorf("expected action label list in follow-up, got: %s", content)
 	}
 	// Should contain __done__
 	if !strings.Contains(content, "__done__") {
 		t.Errorf("expected __done__ in follow-up, got: %s", content)
+	}
+	if !strings.Contains(content, "Do not select an action whose successful result is already shown above") {
+		t.Errorf("expected repeat-action guard in follow-up, got: %s", content)
 	}
 	// Should NOT contain the original query (context is in the Notion thread)
 	if strings.Contains(content, "list files in the current directory") {
@@ -307,21 +310,22 @@ func TestInjectToolsSessionVsLegacy(t *testing.T) {
 	if len(resultWithSession) != 1 {
 		t.Fatalf("session path: expected 1 message, got %d", len(resultWithSession))
 	}
-	if !strings.Contains(resultWithSession[0].Content, "Results from executed function") {
-		t.Error("session path: expected 'Results from executed function' prefix")
+	if !strings.Contains(resultWithSession[0].Content, "Completed action results:") {
+		t.Error("session path: expected completed-action results prefix")
 	}
-	if strings.Contains(resultWithSession[0].Content, "I'm writing a unit test") {
-		t.Error("session path: should NOT contain unit test framing (context is in thread)")
+	if strings.Contains(resultWithSession[0].Content, "list all go files") {
+		t.Error("session path: should not repeat the original query already held by the thread")
 	}
 
-	// Without session: should use legacy collapse (includes original query + unit test framing)
+	// Without session: should use legacy collapse with the original query and
+	// the neutral next-action classification contract.
 	resultNoSession := injectToolsIntoMessages(messages, tools, "claude-sonnet-4-20250514", nil)
 
 	if len(resultNoSession) != 1 {
 		t.Fatalf("legacy path: expected 1 message, got %d", len(resultNoSession))
 	}
-	if !strings.Contains(resultNoSession[0].Content, "I'm writing a unit test") {
-		t.Error("legacy path: expected 'unit test' framing")
+	if !strings.Contains(resultNoSession[0].Content, "Classify the next step for the quoted task") {
+		t.Error("legacy path: expected next-action classification framing")
 	}
 	if !strings.Contains(resultNoSession[0].Content, "list all go files") {
 		t.Error("legacy path: expected original query in collapsed message")
