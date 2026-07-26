@@ -1145,6 +1145,10 @@ func parseToolCalls(content string) ([]ToolCall, string, bool) {
 	// Method 2: direct JSON or {"tool_call": {...}} format
 	remaining = content
 	stripped := strings.TrimSpace(content)
+	if strings.HasPrefix(stripped, "<|") {
+		stripped = strings.TrimSpace(strings.TrimPrefix(stripped, "<|"))
+		stripped = strings.TrimSpace(strings.TrimSuffix(stripped, "|>"))
+	}
 
 	// Try direct {"name": "...", "arguments": {...}} format
 	var direct struct {

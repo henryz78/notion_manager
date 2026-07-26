@@ -258,6 +258,18 @@ func TestPrepareToolBridgeResponseAcceptsDoneAlias(t *testing.T) {
 	}
 }
 
+func TestPrepareToolBridgeResponseAcceptsSentinelWrappedDoneAlias(t *testing.T) {
+	for _, content := range []string{
+		`<|{"name":"done","arguments":{"result":"I can see the earlier context."}}`,
+		`<|{"name":"done","arguments":{"result":"I can see the earlier context."}}|>`,
+	} {
+		prepared := prepareToolBridgeResponse(content, nil, map[string]struct{}{"clipboard_tool": {}}, nil)
+		if prepared.DoneText != "I can see the earlier context." || prepared.HasCalls || prepared.DroppedCalls != 0 || prepared.Remaining != "" {
+			t.Fatalf("sentinel-wrapped done alias should be intercepted: %+v", prepared)
+		}
+	}
+}
+
 func TestPrepareToolBridgeResponsePreservesDeclaredDoneTool(t *testing.T) {
 	prepared := prepareToolBridgeResponse(
 		`{"name":"done","arguments":{"value":"client action"}}`,
