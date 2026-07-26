@@ -579,6 +579,10 @@ func filterDeclaredToolCalls(calls []ToolCall, allowedToolNames map[string]struc
 			tc.Function.Name = original
 		}
 		_, allowed := allowedToolNames[name]
+		if name == "done" && !allowed {
+			name = "__done__"
+			tc.Function.Name = name
+		}
 		if allowed || name == "__done__" {
 			filtered = append(filtered, tc)
 			continue

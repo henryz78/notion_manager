@@ -246,6 +246,30 @@ func TestPrepareToolBridgeResponseRejectsEmptyDoneResult(t *testing.T) {
 	}
 }
 
+func TestPrepareToolBridgeResponseAcceptsDoneAlias(t *testing.T) {
+	prepared := prepareToolBridgeResponse(
+		`{"name":"done","arguments":{"result":"Clipboard contents: https://example.com"}}`,
+		nil,
+		map[string]struct{}{"clipboard_tool": {}},
+		nil,
+	)
+	if prepared.DoneText != "Clipboard contents: https://example.com" || prepared.HasCalls || prepared.DroppedCalls != 0 {
+		t.Fatalf("done alias should be intercepted as __done__: %+v", prepared)
+	}
+}
+
+func TestPrepareToolBridgeResponsePreservesDeclaredDoneTool(t *testing.T) {
+	prepared := prepareToolBridgeResponse(
+		`{"name":"done","arguments":{"value":"client action"}}`,
+		nil,
+		map[string]struct{}{"done": {}},
+		nil,
+	)
+	if !prepared.HasCalls || len(prepared.ToolCalls) != 1 || prepared.ToolCalls[0].Function.Name != "done" || prepared.DoneText != "" {
+		t.Fatalf("declared client tool named done should remain a real tool call: %+v", prepared)
+	}
+}
+
 func TestPrepareToolBridgeResponseExposesDoneRefusalForRecovery(t *testing.T) {
 	prepared := prepareToolBridgeResponse(
 		`{"name":"__done__","arguments":{"result":"I don’t have access to a local project filesystem, so I can’t search project files."}}`,
