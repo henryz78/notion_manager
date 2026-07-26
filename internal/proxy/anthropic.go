@@ -492,18 +492,26 @@ type preparedToolBridgeResponse struct {
 	DoneText       string
 	WebSearchQuery string
 	HasCalls       bool
+	DroppedCalls   int
 }
 
-func prepareToolBridgeResponse(content string, nativeToolUses []AgentValueEntry) preparedToolBridgeResponse {
-	prepared := preparedToolBridgeResponse{}
+func prepareToolBridgeResponse(content string, nativeToolUses []AgentValueEntry, allowedToolNames map[string]struct{}, aliasToOriginal map[string]string) preparedToolBridgeResponse {
+	prepared := preparedToolBridgeResponse{Remaining: content}
 
 	if len(nativeToolUses) > 0 {
-		prepared.ToolCalls = nativeToolUseToOpenAI(nativeToolUses)
+		nativeCalls := nativeToolUseToOpenAI(nativeToolUses)
+		prepared.ToolCalls, prepared.DroppedCalls = filterDeclaredToolCalls(nativeCalls, allowedToolNames, aliasToOriginal)
 		prepared.HasCalls = len(prepared.ToolCalls) > 0
-		prepared.Remaining = content
 	}
 	if !prepared.HasCalls {
-		prepared.ToolCalls, prepared.Remaining, prepared.HasCalls = parseToolCalls(content)
+		parsedCalls, remaining, hasParsedCalls := parseToolCalls(content)
+		if hasParsedCalls {
+			var dropped int
+			prepared.ToolCalls, dropped = filterDeclaredToolCalls(parsedCalls, allowedToolNames, aliasToOriginal)
+			prepared.DroppedCalls += dropped
+			prepared.HasCalls = len(prepared.ToolCalls) > 0
+			prepared.Remaining = remaining
+		}
 	}
 
 	if prepared.HasCalls {
@@ -556,6 +564,36 @@ func prepareToolBridgeResponse(content string, nativeToolUses []AgentValueEntry)
 	}
 
 	return prepared
+}
+
+func filterDeclaredToolCalls(calls []ToolCall, allowedToolNames map[string]struct{}, aliasToOriginal map[string]string) ([]ToolCall, int) {
+	filtered := make([]ToolCall, 0, len(calls))
+	dropped := 0
+	for _, tc := range calls {
+		name := tc.Function.Name
+		if original, ok := aliasToOriginal[name]; ok {
+			name = original
+			tc.Function.Name = original
+		}
+		_, allowed := allowedToolNames[name]
+		if allowed || name == "__done__" {
+			filtered = append(filtered, tc)
+			continue
+		}
+		dropped++
+		log.Printf("[bridge] filtered undeclared tool call %q", name)
+	}
+	return filtered, dropped
+}
+
+func declaredToolNames(tools []AnthropicTool) map[string]struct{} {
+	names := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		if tool.Name != "" {
+			names[tool.Name] = struct{}{}
+		}
+	}
+	return names
 }
 
 func normalizeToolBridgeResidualText(text string) string {
@@ -877,6 +915,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		// bridge is enabled. When disabled, client tool definitions are ignored
 		// and the request continues as a normal chat request.
 		hasTools := toolBridgeActive(isResearcher, len(req.Tools))
+		allowedToolNames := declaredToolNames(req.Tools)
 		enableWebSearch := effectiveWebSearch
 
 		// ── Multi-turn session management ──
@@ -924,6 +963,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 
 		// Convert Anthropic tools to internal Tool format (done once, immutable).
 		var convertedTools []Tool
+		var bridgeTools []Tool
+		var originalToToolAlias map[string]string
+		var toolAliasToOriginal map[string]string
 		if hasTools {
 			for _, t := range req.Tools {
 				convertedTools = append(convertedTools, Tool{
@@ -945,6 +987,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				log.Printf("[bridge] WebSearch/WebFetch detected — enabling Notion native search, stripping history")
 				messages = stripWebSearchHistory(messages)
 			}
+			bridgeTools, originalToToolAlias, toolAliasToOriginal = aliasSmallClientTools(convertedTools)
 		} else if !isResearcher && req.OutputConfig != nil && req.OutputConfig.Format != nil && req.OutputConfig.Format.Type == "json_schema" {
 			messages = applyStructuredOutputBridge(messages, req.OutputConfig)
 			if DebugLoggingEnabled() {
@@ -1039,7 +1082,8 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			// account.
 			attemptMessages := cloneChatMessages(originalMessages)
 			if hasTools {
-				attemptMessages = injectToolsIntoMessages(attemptMessages, convertedTools, model, session, req.ToolChoice)
+				attemptMessages = aliasToolNamesInMessages(attemptMessages, originalToToolAlias)
+				attemptMessages = injectToolsIntoMessages(attemptMessages, bridgeTools, model, session, aliasToolChoice(req.ToolChoice, originalToToolAlias))
 				if DebugLoggingEnabled() && attempt == 0 {
 					log.Printf("[debug] === After tool injection (%d messages) ===", len(attemptMessages))
 					for i, m := range attemptMessages {
@@ -1121,9 +1165,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					reqErr = handleResearcherNonStream(w, acc, requestMessages, model, requestID, hasThinking, requestDiagnostic)
 				}
 			} else if req.Stream {
-				reqErr = handleAnthropicStream(w, acc, requestMessages, model, requestID, hasTools, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic)
+				reqErr = handleAnthropicStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic)
 			} else {
-				reqErr = handleAnthropicNonStream(w, acc, requestMessages, model, requestID, hasTools, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic)
+				reqErr = handleAnthropicNonStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic)
 			}
 
 			// Trigger an async live quota refresh after every call so the next
@@ -1754,7 +1798,7 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 }
 
 // handleAnthropicStream handles streaming Anthropic response
-func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools bool, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic) error {
+func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic) error {
 	var fullContent strings.Builder
 	var finalUsage *UsageInfo
 	defer func() {
@@ -1770,6 +1814,7 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 
 	callOpts := CallOptions{
 		ThinkingBlocks:        &thinkingBlocks,
+		HasClientTools:        hasBridgedClientTools,
 		EnableWebSearch:       enableWebSearch,
 		EnableWorkspaceSearch: enableWorkspaceSearch,
 		UseReadOnlyMode:       useReadOnlyMode,
@@ -1820,8 +1865,12 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 
 	var prepared preparedToolBridgeResponse
 	if hasTools {
-		prepared = prepareToolBridgeResponse(contentStr, nativeToolUses)
+		prepared = prepareToolBridgeResponse(contentStr, nativeToolUses, allowedToolNames, toolAliasToOriginal)
 		actionDetected := prepared.HasCalls || prepared.WebSearchQuery != "" || prepared.DoneText != ""
+		if !actionDetected && prepared.DroppedCalls > 0 && strings.TrimSpace(prepared.Remaining) == "" {
+			log.Printf("[bridge] %s received only undeclared internal tools, requesting clean retry", requestID)
+			return ErrToolBridgeNoTool
+		}
 		if !actionDetected && detectToolBridgeNoToolResponse(prepared.Remaining) {
 			log.Printf("[bridge] %s detected no-tool identity-drift text (%d chars), requesting clean retry", requestID, len(prepared.Remaining))
 			return ErrToolBridgeNoTool
@@ -2030,7 +2079,7 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 }
 
 // handleAnthropicNonStream handles non-streaming Anthropic response
-func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools bool, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic) error {
+func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic) error {
 	var fullContent strings.Builder
 	var finalUsage *UsageInfo
 	defer func() {
@@ -2046,6 +2095,7 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 
 	callOpts := CallOptions{
 		ThinkingBlocks:        &thinkingBlocks,
+		HasClientTools:        hasBridgedClientTools,
 		EnableWebSearch:       enableWebSearch,
 		EnableWorkspaceSearch: enableWorkspaceSearch,
 		UseReadOnlyMode:       useReadOnlyMode,
@@ -2109,7 +2159,11 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 
 	var prepared preparedToolBridgeResponse
 	if hasTools {
-		prepared = prepareToolBridgeResponse(content, nativeToolUses)
+		prepared = prepareToolBridgeResponse(content, nativeToolUses, allowedToolNames, toolAliasToOriginal)
+		if !prepared.HasCalls && prepared.WebSearchQuery == "" && prepared.DoneText == "" && prepared.DroppedCalls > 0 && strings.TrimSpace(prepared.Remaining) == "" {
+			log.Printf("[bridge] %s received only undeclared internal tools, requesting clean retry", requestID)
+			return ErrToolBridgeNoTool
+		}
 		actionDetected := prepared.HasCalls || prepared.WebSearchQuery != "" || prepared.DoneText != ""
 		if !actionDetected && detectToolBridgeNoToolResponse(prepared.Remaining) {
 			log.Printf("[bridge] %s detected no-tool identity-drift text (%d chars), requesting clean retry", requestID, len(prepared.Remaining))

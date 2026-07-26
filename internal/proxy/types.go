@@ -259,6 +259,7 @@ type CitationCandidate struct {
 // CallOptions holds optional parameters for CallInference
 type CallOptions struct {
 	NativeToolUses        *[]AgentValueEntry
+	HasClientTools        bool // client tools are bridged; keep Notion's internal tools out of this request
 	ThinkingBlocks        *[]ThinkingBlock
 	EnableWebSearch       bool                  // force useWebSearch=true in Notion config
 	EnableWorkspaceSearch *bool                 // override workspace search (nil = use config default)

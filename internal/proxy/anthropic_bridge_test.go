@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -137,6 +139,158 @@ func TestInjectToolsIntoMessages_DropsWrapperOnlyUserMessage(t *testing.T) {
 	}
 	if !strings.Contains(content, `Input: "修复登录校验"`) {
 		t.Fatalf("expected actual user query in bridged content, got %q", content)
+	}
+}
+
+func TestInjectToolsIntoMessages_AllModelFamiliesReceiveToolSchema(t *testing.T) {
+	tools := []Tool{{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "get_test_value",
+			Description: "Return a test value",
+			Parameters: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"key": map[string]interface{}{"type": "string"},
+				},
+				"required": []interface{}{"key"},
+			},
+		},
+	}}
+
+	for _, model := range []string{"claude-opus-5", "gpt-5.6-sol", "gemini-3.1-pro", "grok-4.5", "deepseek-v4-pro"} {
+		t.Run(model, func(t *testing.T) {
+			got := injectToolsIntoMessages([]ChatMessage{{Role: "user", Content: "read alpha"}}, tools, model, nil)
+			if len(got) != 1 || !strings.Contains(got[0].Content, "get_test_value") || !strings.Contains(got[0].Content, `"required":["key"]`) {
+				t.Fatalf("model %s did not receive the complete tool schema: %#v", model, got)
+			}
+		})
+	}
+}
+
+func TestInjectToolsIntoMessages_ForcedToolIncludesSchema(t *testing.T) {
+	tools := []Tool{{
+		Type: "function",
+		Function: ToolFunction{
+			Name: "get_test_value",
+			Parameters: map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{"key": map[string]interface{}{"type": "string"}},
+				"required":   []interface{}{"key"},
+			},
+		},
+	}}
+	choice := map[string]interface{}{"type": "tool", "name": "get_test_value"}
+
+	for _, model := range []string{"claude-opus-5", "gpt-5.6-sol", "gemini-3.1-pro"} {
+		got := injectToolsIntoMessages([]ChatMessage{{Role: "user", Content: "read alpha"}}, tools, model, nil, choice)
+		if len(got) != 1 || !strings.Contains(got[0].Content, `"required":["key"]`) {
+			t.Fatalf("forced tool schema missing for %s: %#v", model, got)
+		}
+	}
+}
+
+func TestPrepareToolBridgeResponse_FiltersUndeclaredNotionTools(t *testing.T) {
+	native := []AgentValueEntry{
+		{Type: "tool_use", ID: "internal-1", Name: "callFunction", Input: json.RawMessage(`{"function":"connections.search.search"}`)},
+		{Type: "tool_use", ID: "client-1", Name: "get_test_value", Input: json.RawMessage(`{"key":"alpha"}`)},
+	}
+	prepared := prepareToolBridgeResponse("", native, map[string]struct{}{"get_test_value": {}}, nil)
+
+	if prepared.DroppedCalls != 1 || !prepared.HasCalls || len(prepared.ToolCalls) != 1 {
+		t.Fatalf("unexpected filtered response: %+v", prepared)
+	}
+	if prepared.ToolCalls[0].Function.Name != "get_test_value" || prepared.ToolCalls[0].Function.Arguments != `{"key":"alpha"}` {
+		t.Fatalf("declared tool call changed: %+v", prepared.ToolCalls[0])
+	}
+}
+
+func TestPrepareToolBridgeResponse_FiltersUndeclaredTextTool(t *testing.T) {
+	prepared := prepareToolBridgeResponse(
+		`{"name":"callFunction","arguments":{"function":"connections.fs.readFiles"}}`,
+		nil,
+		map[string]struct{}{"get_test_value": {}},
+		nil,
+	)
+
+	if prepared.HasCalls || len(prepared.ToolCalls) != 0 || prepared.DroppedCalls != 1 {
+		t.Fatalf("undeclared text tool leaked through: %+v", prepared)
+	}
+}
+
+func TestPrepareToolBridgeResponse_UsesDeclaredTextToolAfterInternalNativeTool(t *testing.T) {
+	prepared := prepareToolBridgeResponse(
+		`{"name":"get_test_value","arguments":{"key":"alpha"}}`,
+		[]AgentValueEntry{{Type: "tool_use", ID: "internal-1", Name: "callFunction"}},
+		map[string]struct{}{"get_test_value": {}},
+		nil,
+	)
+
+	if !prepared.HasCalls || len(prepared.ToolCalls) != 1 || prepared.DroppedCalls != 1 {
+		t.Fatalf("declared text tool was not recovered: %+v", prepared)
+	}
+	if prepared.ToolCalls[0].Function.Name != "get_test_value" {
+		t.Fatalf("wrong recovered tool: %+v", prepared.ToolCalls[0])
+	}
+}
+
+func TestSmallClientToolAliasesRoundTripToOriginalName(t *testing.T) {
+	tools := []Tool{{
+		Type: "function",
+		Function: ToolFunction{
+			Name:        "get_test_value",
+			Description: "Call get_test_value for a key",
+			Parameters:  map[string]interface{}{"type": "object"},
+		},
+	}}
+	aliased, originalToAlias, aliasToOriginal := aliasSmallClientTools(tools)
+	if aliased[0].Function.Name != "action_1" || strings.Contains(aliased[0].Function.Description, "get_test_value") {
+		t.Fatalf("tool definition was not anonymized: %+v", aliased[0])
+	}
+	if originalToAlias["get_test_value"] != "action_1" || aliasToOriginal["action_1"] != "get_test_value" {
+		t.Fatalf("alias maps are inconsistent: original=%v alias=%v", originalToAlias, aliasToOriginal)
+	}
+	choice := aliasToolChoice(map[string]interface{}{"type": "tool", "name": "get_test_value"}, originalToAlias)
+	choiceMap := choice.(map[string]interface{})
+	if choiceMap["name"] != "action_1" {
+		t.Fatalf("Anthropic forced tool choice was not aliased: %v", choiceMap)
+	}
+	openAIChoice := aliasToolChoice(map[string]interface{}{
+		"type":     "function",
+		"function": map[string]interface{}{"name": "get_test_value"},
+	}, originalToAlias).(map[string]interface{})
+	if openAIChoice["function"].(map[string]interface{})["name"] != "action_1" {
+		t.Fatalf("OpenAI forced tool choice was not aliased: %v", openAIChoice)
+	}
+	aliasedMessages := aliasToolNamesInMessages([]ChatMessage{{
+		Role: "assistant",
+		ToolCalls: []ToolCall{{
+			ID: "call-1", Function: ToolCallFunction{Name: "get_test_value", Arguments: `{}`},
+		}},
+	}}, originalToAlias)
+	if aliasedMessages[0].ToolCalls[0].Function.Name != "action_1" {
+		t.Fatalf("assistant tool history was not aliased: %+v", aliasedMessages)
+	}
+
+	prepared := prepareToolBridgeResponse(
+		`{"name":"action_1","arguments":{"key":"alpha"}}`,
+		nil,
+		map[string]struct{}{"get_test_value": {}},
+		aliasToOriginal,
+	)
+	if !prepared.HasCalls || len(prepared.ToolCalls) != 1 || prepared.ToolCalls[0].Function.Name != "get_test_value" {
+		t.Fatalf("alias was not restored before returning to the client: %+v", prepared)
+	}
+}
+
+func TestLargeClientToolSetKeepsOriginalNames(t *testing.T) {
+	tools := make([]Tool, 6)
+	for i := range tools {
+		tools[i] = Tool{Type: "function", Function: ToolFunction{Name: fmt.Sprintf("tool_%d", i)}}
+	}
+	aliased, originalToAlias, aliasToOriginal := aliasSmallClientTools(tools)
+	if aliased[0].Function.Name != "tool_0" || originalToAlias != nil || aliasToOriginal != nil {
+		t.Fatalf("large tool set must preserve the existing bridge path")
 	}
 }
 

@@ -1331,7 +1331,7 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 			return fmt.Errorf("load Notion personal instructions setting: %w", err)
 		}
 	}
-	disableBuiltinTools = effectiveDisableBuiltinTools(disableBuiltinTools, usePersonalInstructions)
+	disableBuiltinTools = effectiveDisableBuiltinTools(disableBuiltinTools, usePersonalInstructions, opt.HasClientTools)
 
 	notionModel, ok := ResolveModel(model)
 	if !ok {
@@ -1504,7 +1504,13 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 	return parseNDJSONStream(reader, requestID, cb, opt.NativeToolUses, opt.ThinkingBlocks, opt.ThinkingCallback, opt.KnownCitationURLs, opt.KnownCitationDocs, opt.KnownToolCallURLs)
 }
 
-func effectiveDisableBuiltinTools(configuredDisable, usePersonalInstructions bool) bool {
+func effectiveDisableBuiltinTools(configuredDisable, usePersonalInstructions, hasClientTools bool) bool {
+	// Client tools are represented in the transcript by the compatibility
+	// bridge. Keep Notion's own tools out of these requests so an internal
+	// callFunction cannot take the place of a client-declared tool.
+	if hasClientTools {
+		return true
+	}
 	// The official default Agent path uses Notion's workflow prompt chain
 	// with isCustomAgent=false and supplies the instructions page via the
 	// transcript context. Do not let disable_notion_prompt turn that chain

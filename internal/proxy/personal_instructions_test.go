@@ -351,17 +351,20 @@ func TestPersonalInstructionsModePreservesInjectedToolBridge(t *testing.T) {
 	if strings.Contains(userText, "client behavioral prompt") {
 		t.Fatalf("client system prompt leaked after tool injection: %q", userText)
 	}
-	if !strings.Contains(userText, "Read") || !strings.Contains(userText, `"name": "function_name"`) {
+	if !strings.Contains(userText, "Read") || !strings.Contains(userText, `"name": "label"`) {
 		t.Fatalf("tool bridge instructions were not preserved: %q", userText)
 	}
 }
 
 func TestPersonalInstructionsOverrideDisableNotionPrompt(t *testing.T) {
-	if !effectiveDisableBuiltinTools(true, false) {
+	if !effectiveDisableBuiltinTools(true, false, false) {
 		t.Fatal("existing mode must preserve disable_notion_prompt=true")
 	}
-	if effectiveDisableBuiltinTools(true, true) {
+	if effectiveDisableBuiltinTools(true, true, false) {
 		t.Fatal("personal instructions mode must keep the default Agent prompt chain enabled")
+	}
+	if !effectiveDisableBuiltinTools(false, true, true) {
+		t.Fatal("client tools must disable Notion built-in tools without disabling personal-instructions context")
 	}
 }
 
