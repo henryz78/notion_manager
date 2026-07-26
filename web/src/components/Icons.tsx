@@ -112,6 +112,30 @@ export const IconExternalLink = ({ size, className }: IconProps) => (
   </svg>
 )
 
+export const IconDownload = ({ size, className }: IconProps) => (
+  <svg {...baseProps(size)} className={className}>
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+    <polyline points="7 10 12 15 17 10" />
+    <line x1="12" y1="15" x2="12" y2="3" />
+  </svg>
+)
+
+export const IconUpload = ({ size, className }: IconProps) => (
+  <svg {...baseProps(size)} className={className}>
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+    <polyline points="17 8 12 3 7 8" />
+    <line x1="12" y1="3" x2="12" y2="15" />
+  </svg>
+)
+
+export const IconDatabase = ({ size, className }: IconProps) => (
+  <svg {...baseProps(size)} className={className}>
+    <ellipse cx="12" cy="5" rx="9" ry="3" />
+    <path d="M3 5v6c0 1.66 4.03 3 9 3s9-1.34 9-3V5" />
+    <path d="M3 11v6c0 1.66 4.03 3 9 3s9-1.34 9-3v-6" />
+  </svg>
+)
+
 export const IconChevronRight = ({ size, className }: IconProps) => (
   <svg {...baseProps(size)} className={className}>
     <polyline points="9 18 15 12 9 6" />

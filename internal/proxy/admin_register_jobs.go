@@ -46,7 +46,13 @@ func triggerPostRegisterRefresh(deps *RegisterJobsDeps, email string) {
 	if deps == nil || deps.Pool == nil {
 		return
 	}
+	releaseMutation, ok := deps.Pool.beginAccountMutation()
+	if !ok {
+		log.Printf("[admin] post-register quota refresh %s skipped: %s", email, accountRestoreConflictMessage)
+		return
+	}
 	go func(em string) {
+		defer releaseMutation()
 		// A panic in the quota path (e.g. nil AppConfig in odd test
 		// setups, or a future regression) must not bring the server
 		// down. Log and move on; the next /admin/refresh tick will
@@ -208,6 +214,14 @@ func HandleAdminRegisterStart(deps *RegisterJobsDeps) http.HandlerFunc {
 		for i, c := range creds {
 			emails[i] = c.Email
 		}
+		if err := os.MkdirAll(deps.AccountsDir, 0o755); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"mkdir: %s"}`, err), http.StatusInternalServerError)
+			return
+		}
+		releaseMutation, ok := beginAccountMutationRequest(w, deps.Pool)
+		if !ok {
+			return
+		}
 		job := deps.Store.Create(prov.ID(), proxyURL, len(creds), concurrency, emails)
 
 		// Persist the raw inputs side-by-side so the user can retry failed
@@ -217,23 +231,21 @@ func HandleAdminRegisterStart(deps *RegisterJobsDeps) http.HandlerFunc {
 			log.Printf("[admin] save register inputs sidecar (%s): %v", job.ID, err)
 		}
 
-		if err := os.MkdirAll(deps.AccountsDir, 0o755); err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"mkdir: %s"}`, err), http.StatusInternalServerError)
-			return
-		}
-
 		// Detach from the request context so cancelled HTTP clients don't
 		// kill the background run.
 		runCtx := context.Background()
-		go regjob.Run(runCtx, deps.Store, job.ID, prov, creds, regjob.RunOpts{
-			Concurrency: concurrency,
-			AccountsDir: deps.AccountsDir,
-			Proxy:       proxyURL,
-			OnSuccess: func(email string) {
-				deps.Pool.ReloadFromDir(deps.AccountsDir)
-				triggerPostRegisterRefresh(deps, email)
-			},
-		})
+		go func() {
+			defer releaseMutation()
+			regjob.Run(runCtx, deps.Store, job.ID, prov, creds, regjob.RunOpts{
+				Concurrency: concurrency,
+				AccountsDir: deps.AccountsDir,
+				Proxy:       proxyURL,
+				OnSuccess: func(email string) {
+					deps.Pool.ReloadFromDir(deps.AccountsDir)
+					triggerPostRegisterRefresh(deps, email)
+				},
+			})
+		}()
 
 		resp := map[string]interface{}{
 			"job_id":      job.ID,
@@ -465,27 +477,33 @@ func serveJobRetry(deps *RegisterJobsDeps, id string, w http.ResponseWriter, r *
 	for i, c := range creds {
 		emails[i] = c.Email
 	}
+	if err := os.MkdirAll(deps.AccountsDir, 0o755); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"mkdir: %s"}`, err), http.StatusInternalServerError)
+		return
+	}
+	releaseMutation, ok := beginAccountMutationRequest(w, deps.Pool)
+	if !ok {
+		return
+	}
 	newJob := deps.Store.Create(prov.ID(), sc.Proxy, len(creds), concurrency, emails)
 	// Persist a sidecar for the *new* job so a chained retry stays safe.
 	if err := saveRegisterInputs(deps.Store, newJob.ID, prov.ID(), sc.Proxy, creds); err != nil {
 		log.Printf("[admin] save retry sidecar (%s): %v", newJob.ID, err)
 	}
 
-	if err := os.MkdirAll(deps.AccountsDir, 0o755); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"mkdir: %s"}`, err), http.StatusInternalServerError)
-		return
-	}
-
 	runCtx := context.Background()
-	go regjob.Run(runCtx, deps.Store, newJob.ID, prov, creds, regjob.RunOpts{
-		Concurrency: concurrency,
-		AccountsDir: deps.AccountsDir,
-		Proxy:       sc.Proxy,
-		OnSuccess: func(email string) {
-			deps.Pool.ReloadFromDir(deps.AccountsDir)
-			triggerPostRegisterRefresh(deps, email)
-		},
-	})
+	go func() {
+		defer releaseMutation()
+		regjob.Run(runCtx, deps.Store, newJob.ID, prov, creds, regjob.RunOpts{
+			Concurrency: concurrency,
+			AccountsDir: deps.AccountsDir,
+			Proxy:       sc.Proxy,
+			OnSuccess: func(email string) {
+				deps.Pool.ReloadFromDir(deps.AccountsDir)
+				triggerPostRegisterRefresh(deps, email)
+			},
+		})
+	}()
 
 	resp := map[string]interface{}{
 		"job_id":      newJob.ID,
@@ -609,6 +627,11 @@ func HandleAdminDeleteAccount(deps *RegisterJobsDeps) http.HandlerFunc {
 			http.Error(w, `{"error":"missing email"}`, http.StatusBadRequest)
 			return
 		}
+		releaseMutation, ok := beginAccountMutationRequest(w, deps.Pool)
+		if !ok {
+			return
+		}
+		defer releaseMutation()
 
 		if err := deleteAccountByEmail(deps.Pool, deps.AccountsDir, email); err != nil {
 			if os.IsNotExist(err) {

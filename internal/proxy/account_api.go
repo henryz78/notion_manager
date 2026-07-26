@@ -363,6 +363,15 @@ func DeleteAccountFile(email, dir string) error {
 
 // HandleAddAccount accepts a token_v2, discovers account info via Notion APIs,
 // saves it to disk, and hot-loads it into the pool.
+func beginAccountMutationRequest(w http.ResponseWriter, pool *AccountPool) (func(), bool) {
+	release, ok := pool.beginAccountMutation()
+	if !ok {
+		http.Error(w, fmt.Sprintf(`{"error":%q}`, accountRestoreConflictMessage), http.StatusConflict)
+		return nil, false
+	}
+	return release, true
+}
+
 func HandleAddAccount(pool *AccountPool, accountsDir string, auth *DashboardAuth) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -377,6 +386,11 @@ func HandleAddAccount(pool *AccountPool, accountsDir string, auth *DashboardAuth
 			http.Error(w, `{"error":"unauthorized, dashboard login required"}`, http.StatusUnauthorized)
 			return
 		}
+		releaseMutation, ok := beginAccountMutationRequest(w, pool)
+		if !ok {
+			return
+		}
+		defer releaseMutation()
 
 		var body struct {
 			TokenV2                    string `json:"token_v2"`
@@ -642,6 +656,11 @@ func HandleCheckPersonalInstructions(pool *AccountPool, accountsDir string, auth
 			http.Error(w, `{"error":"unauthorized, dashboard login required"}`, http.StatusUnauthorized)
 			return
 		}
+		releaseMutation, ok := beginAccountMutationRequest(w, pool)
+		if !ok {
+			return
+		}
+		defer releaseMutation()
 
 		summary := checkAllPersonalInstructions(pool, 10, fetchNotionPersonalInstructionsPageID)
 		if accountsDir != "" {
@@ -767,6 +786,11 @@ func HandleBulkAccountAction(pool *AccountPool, accountsDir string, auth *Dashbo
 			http.Error(w, `{"error":"unauthorized, dashboard login required"}`, http.StatusUnauthorized)
 			return
 		}
+		releaseMutation, ok := beginAccountMutationRequest(w, pool)
+		if !ok {
+			return
+		}
+		defer releaseMutation()
 
 		var body BulkAccountActionRequest
 		r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
@@ -912,6 +936,11 @@ func HandleDeleteMissingPersonalInstructions(pool *AccountPool, accountsDir stri
 			http.Error(w, `{"error":"unauthorized, dashboard login required"}`, http.StatusUnauthorized)
 			return
 		}
+		releaseMutation, ok := beginAccountMutationRequest(w, pool)
+		if !ok {
+			return
+		}
+		defer releaseMutation()
 
 		result := deleteMissingPersonalInstructions(pool, accountsDir, fetchNotionPersonalInstructionsPageID)
 		log.Printf("[delete-missing-personal-instructions] checked=%d missing=%d deleted=%d failed=%d",
@@ -935,6 +964,11 @@ func HandleDeleteAccount(pool *AccountPool, accountsDir string, auth *DashboardA
 			http.Error(w, `{"error":"unauthorized, dashboard login required"}`, http.StatusUnauthorized)
 			return
 		}
+		releaseMutation, ok := beginAccountMutationRequest(w, pool)
+		if !ok {
+			return
+		}
+		defer releaseMutation()
 
 		var body struct {
 			Email string `json:"email"`
@@ -1033,6 +1067,11 @@ func HandleDeleteExhaustedComplimentaryAccounts(pool *AccountPool, accountsDir s
 			http.Error(w, `{"error":"unauthorized, dashboard login required"}`, http.StatusUnauthorized)
 			return
 		}
+		releaseMutation, ok := beginAccountMutationRequest(w, pool)
+		if !ok {
+			return
+		}
+		defer releaseMutation()
 
 		emails := exhaustedComplimentaryEmails(pool)
 		deleted := make([]string, 0, len(emails))

@@ -121,6 +121,7 @@ func newMux(pool *proxy.AccountPool, accountsDir string, configPath string, apiK
 	mux.HandleFunc("/admin/models", proxy.HandleAdminModels(pool, dashAuth))
 	mux.HandleFunc("/admin/refresh", proxy.HandleAdminRefresh(pool, accountsDir, dashAuth))
 	mux.HandleFunc("/admin/settings", proxy.HandleAdminSettings(configPath, dashAuth))
+	mux.HandleFunc("/admin/backup", proxy.HandleAdminBackup(pool, accountsDir, configPath, dashAuth))
 	mux.HandleFunc("/admin/stats", proxy.HandleAdminStats(usageStats, dashAuth))
 	mux.HandleFunc("/admin/request-history", proxy.HandleAdminRequestHistory(requestHistory, dashAuth))
 

@@ -142,7 +142,19 @@
     "tool_bridge_help": "开启：让 Claude Code、Tools 和函数调用正常工作。关闭：按普通聊天发送，外部工具调用停用。",
     "import_check": "导入账号时检测官网个人指令",
     "import_check_help": "开启后，添加账号窗口可选择“全部导入”或“只导入已设置个人指令的账号”；只记录检测结果，不读取指令正文。",
-    "ask_help": "开启后所有请求默认进入 ASK 模式（仅回答、不写入页面）。单次覆盖：在模型名末尾追加 -ask。"
+    "ask_help": "开启后所有请求默认进入 ASK 模式（仅回答、不写入页面）。单次覆盖：在模型名末尾追加 -ask。",
+    "data_backup": "数据备份与还原",
+    "data_backup_help": "备份全部账号和本页功能设置；还原会替换现有账号并立即生效。",
+    "data_backup_warning": "备份含账号登录信息；代理地址如带密码也会保存，请妥善保管。不会包含 API Key、管理密码、调用记录和 Token 统计。",
+    "download_backup": "下载备份",
+    "restore_backup": "还原备份",
+    "backup_downloading": "下载中...",
+    "backup_restoring": "还原中...",
+    "backup_downloaded": "备份已下载。",
+    "backup_failed": "备份下载失败。",
+    "restore_confirm": "还原会删除当前全部账号并替换为备份中的账号，同时恢复功能设置。调用记录和 Token 统计会保留。\n\n确定继续吗？",
+    "restore_success": "还原成功，共载入 {{count}} 个账号。",
+    "restore_failed": "备份还原失败。"
   },
   "modal": {
     "add": {

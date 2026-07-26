@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 
@@ -24,6 +25,8 @@ const (
 )
 
 const publicModelCreatedAt = int64(1735689600)
+
+var dashboardSettingsMu sync.Mutex
 
 type publicModelResponse struct {
 	Object string        `json:"object"`
@@ -292,6 +295,8 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 			http.Error(w, `{"error":"unauthorized, dashboard login required"}`, http.StatusUnauthorized)
 			return
 		}
+		dashboardSettingsMu.Lock()
+		defer dashboardSettingsMu.Unlock()
 
 		switch r.Method {
 		case "GET":

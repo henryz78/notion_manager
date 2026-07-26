@@ -142,7 +142,19 @@
     "tool_bridge_help": "On: enable Claude Code, Tools, and function calling. Off: send requests as ordinary chat.",
     "import_check": "Check Personal Instructions on Import",
     "import_check_help": "When enabled, Add Account can import all accounts or only accounts with personal instructions. Only the result is stored, never the instruction text.",
-    "ask_help": "When enabled, requests default to ASK mode (answers only, no page edits). Append -ask to a model name for a per-request override."
+    "ask_help": "When enabled, requests default to ASK mode (answers only, no page edits). Append -ask to a model name for a per-request override.",
+    "data_backup": "Backup & Restore",
+    "data_backup_help": "Back up all accounts and the feature settings on this page. Restoring replaces the current accounts and takes effect immediately.",
+    "data_backup_warning": "The backup contains account login data and any credentials embedded in the proxy URL. Store it securely. API keys, admin passwords, request history, and token statistics are excluded.",
+    "download_backup": "Download",
+    "restore_backup": "Restore",
+    "backup_downloading": "Downloading...",
+    "backup_restoring": "Restoring...",
+    "backup_downloaded": "Backup downloaded.",
+    "backup_failed": "Backup download failed.",
+    "restore_confirm": "Restoring deletes all current accounts and replaces them with the accounts in this backup. Feature settings will also be restored. Request history and token statistics are kept.\n\nContinue?",
+    "restore_success": "Restore complete. {{count}} accounts loaded.",
+    "restore_failed": "Backup restore failed."
   },
   "modal": {
     "add": {

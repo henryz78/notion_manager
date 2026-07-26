@@ -535,6 +535,40 @@ export async function updateSettings(settings: Partial<Pick<SearchSettings, 'ena
   return resp.json()
 }
 
+export interface BackupRestoreResult {
+  status: 'ok'
+  accounts: number
+  settings: SearchSettings
+}
+
+export async function downloadBackup(): Promise<{ blob: Blob; filename: string }> {
+  const resp = await fetch('/admin/backup', {
+    method: 'GET',
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json' },
+  })
+  if (!resp.ok) {
+    const data = await jsonOrError(resp)
+    throw new Error(data?.error || `HTTP ${resp.status}`)
+  }
+  const disposition = resp.headers.get('Content-Disposition') || ''
+  const match = disposition.match(/filename="?([^";]+)"?/i)
+  return {
+    blob: await resp.blob(),
+    filename: match?.[1] || `notion-manager-backup-${new Date().toISOString().slice(0, 10)}.json`,
+  }
+}
+
+export async function restoreBackup(file: File): Promise<BackupRestoreResult> {
+  const resp = await fetch('/admin/backup', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: file,
+  })
+  return jsonOrError(resp) as Promise<BackupRestoreResult>
+}
+
 // --- Bulk Register Jobs API ---
 
 async function jsonOrError(resp: Response): Promise<any> {

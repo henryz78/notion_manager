@@ -17,19 +17,19 @@ import (
 
 // HandleAdminRegister returns the /admin/register HTTP handler. It accepts:
 //
-//   POST /admin/register
-//   Content-Type: application/json
-//   { "input": "<bulk credentials text>" }
+//	POST /admin/register
+//	Content-Type: application/json
+//	{ "input": "<bulk credentials text>" }
 //
 // or
 //
-//   POST /admin/register
-//   Content-Type: text/plain
-//   <bulk credentials text>
+//	POST /admin/register
+//	Content-Type: text/plain
+//	<bulk credentials text>
 //
 // Each non-blank line must follow the format
 //
-//   <email>----<password>----<client_id>----<refresh_token>
+//	<email>----<password>----<client_id>----<refresh_token>
 //
 // The handler walks the list, drives the Microsoft SSO + Notion onboarding
 // flow per account using the N → N+1 backup strategy for MS proofs, writes
@@ -69,6 +69,11 @@ func HandleAdminRegister(pool *AccountPool, accountsDir string, auth *DashboardA
 			http.Error(w, fmt.Sprintf(`{"error":"mkdir: %s"}`, err), http.StatusInternalServerError)
 			return
 		}
+		releaseMutation, ok := beginAccountMutationRequest(w, pool)
+		if !ok {
+			return
+		}
+		defer releaseMutation()
 
 		results := runRegister(tokens, accountsDir)
 
@@ -77,16 +82,16 @@ func HandleAdminRegister(pool *AccountPool, accountsDir string, auth *DashboardA
 		// LoadFromDir; any accounts already loaded keep their pointer.
 		pool.ReloadFromDir(accountsDir)
 
-		ok := 0
+		succeeded := 0
 		for _, r := range results {
 			if r.Status == "ok" {
-				ok++
+				succeeded++
 			}
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"total":   len(results),
-			"ok":      ok,
-			"failed":  len(results) - ok,
+			"ok":      succeeded,
+			"failed":  len(results) - succeeded,
 			"results": results,
 		})
 	}

@@ -215,6 +215,10 @@ func (m *AccountBatchManager) Start(action string, emails []string, concurrency 
 	if len(emails) > accountBatchMaxAccounts {
 		return nil, fmt.Errorf("too many accounts selected")
 	}
+	releaseMutation, ok := m.pool.beginAccountMutation()
+	if !ok {
+		return nil, errors.New(accountRestoreConflictMessage)
+	}
 	concurrency = clampAccountBatchConcurrency(concurrency)
 	accounts, missing := accountsMatchingEmails(m.pool, emails)
 	targets := make(map[string]*Account, len(accounts))
@@ -251,6 +255,7 @@ func (m *AccountBatchManager) Start(action string, emails []string, concurrency 
 	if active := m.activeLocked(); active != nil {
 		snapshot := cloneAccountBatchJob(active)
 		m.mu.Unlock()
+		releaseMutation()
 		return snapshot, ErrAccountBatchJobRunning
 	}
 	m.jobs[job.ID] = job
@@ -260,7 +265,10 @@ func (m *AccountBatchManager) Start(action string, emails []string, concurrency 
 	snapshot := cloneAccountBatchJob(job)
 	m.mu.Unlock()
 
-	go m.run(job.ID, targets)
+	go func() {
+		defer releaseMutation()
+		m.run(job.ID, targets)
+	}()
 	return snapshot, nil
 }
 

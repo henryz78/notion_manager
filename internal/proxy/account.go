@@ -29,12 +29,20 @@ var (
 const (
 	defaultAccountFailureCooldown = 2 * time.Minute
 	authInvalidFailureThreshold   = 2
+	accountRestoreConflictMessage = "account restore is in progress; retry after it finishes"
 )
 
 type AccountPool struct {
 	mu       sync.RWMutex
 	accounts []*Account
 	index    atomic.Uint64
+
+	// Account file mutations and backup restore share this state. A restore
+	// starts only while no mutation is active; new mutations cannot start
+	// until that restore finishes.
+	maintenanceMu        sync.Mutex
+	maintenanceMutations int
+	maintenanceRestoring bool
 
 	// Refresh state (protected by refreshMu)
 	refreshMu      sync.RWMutex
@@ -54,6 +62,48 @@ func NewAccountPool() *AccountPool {
 	return &AccountPool{
 		liveQuotaInflight: make(map[*Account]bool),
 	}
+}
+
+func (p *AccountPool) beginAccountMutation() (func(), bool) {
+	if p == nil {
+		return func() {}, true
+	}
+	p.maintenanceMu.Lock()
+	if p.maintenanceRestoring {
+		p.maintenanceMu.Unlock()
+		return nil, false
+	}
+	p.maintenanceMutations++
+	p.maintenanceMu.Unlock()
+	return p.endAccountMutation, true
+}
+
+func (p *AccountPool) endAccountMutation() {
+	p.maintenanceMu.Lock()
+	if p.maintenanceMutations > 0 {
+		p.maintenanceMutations--
+	}
+	p.maintenanceMu.Unlock()
+}
+
+func (p *AccountPool) beginAccountRestore() (func(), bool) {
+	if p == nil {
+		return nil, false
+	}
+	p.maintenanceMu.Lock()
+	if p.maintenanceRestoring || p.maintenanceMutations > 0 {
+		p.maintenanceMu.Unlock()
+		return nil, false
+	}
+	p.maintenanceRestoring = true
+	p.maintenanceMu.Unlock()
+	return p.endAccountRestore, true
+}
+
+func (p *AccountPool) endAccountRestore() {
+	p.maintenanceMu.Lock()
+	p.maintenanceRestoring = false
+	p.maintenanceMu.Unlock()
 }
 
 type accountQuotaSnapshot struct {
@@ -951,29 +1001,45 @@ func (p *AccountPool) GetRefreshStatus() map[string]interface{} {
 // TriggerRefresh starts RefreshAll in a background goroutine if not already running.
 // Returns true if a new refresh was started, false if one is already in progress.
 func (p *AccountPool) TriggerRefresh(accountsDir string) bool {
-	p.refreshMu.Lock()
-	if p.refreshing {
-		p.refreshMu.Unlock()
+	releaseMutation, ok := p.beginRefresh()
+	if !ok {
 		return false
 	}
-	p.refreshMu.Unlock()
-	go p.RefreshAll(accountsDir)
+	go p.refreshAll(accountsDir, releaseMutation)
 	return true
 }
 
 // RefreshAll proactively checks AI quota and fetches models for all accounts via Notion API.
 // It also persists updated info back to account JSON files.
 func (p *AccountPool) RefreshAll(accountsDir string) {
+	releaseMutation, ok := p.beginRefresh()
+	if !ok {
+		return
+	}
+	p.refreshAll(accountsDir, releaseMutation)
+}
+
+func (p *AccountPool) beginRefresh() (func(), bool) {
+	releaseMutation, ok := p.beginAccountMutation()
+	if !ok {
+		log.Printf("[refresh] skipped: %s", accountRestoreConflictMessage)
+		return nil, false
+	}
 	p.refreshMu.Lock()
 	if p.refreshing {
 		p.refreshMu.Unlock()
-		return // already running
+		releaseMutation()
+		return nil, false
 	}
 	p.refreshing = true
 	p.refreshDone = 0
 	p.lastRefreshErr = ""
 	p.refreshMu.Unlock()
+	return releaseMutation, true
+}
 
+func (p *AccountPool) refreshAll(accountsDir string, releaseMutation func()) {
+	defer releaseMutation()
 	defer func() {
 		p.refreshMu.Lock()
 		p.refreshing = false
@@ -1396,6 +1462,12 @@ func saveAccountFile(dir string, acc *Account) error {
 // A models-fetch failure is logged but not returned, since quota is the
 // higher-value half of the snapshot.
 func (p *AccountPool) RefreshAndPersistAccount(ctx context.Context, accountsDir, email string) error {
+	releaseMutation, ok := p.beginAccountMutation()
+	if !ok {
+		return fmt.Errorf("%s", accountRestoreConflictMessage)
+	}
+	defer releaseMutation()
+
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
 			return err

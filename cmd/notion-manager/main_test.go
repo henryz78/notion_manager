@@ -149,3 +149,29 @@ func TestNewMux_RegistersOpenAIRoutes(t *testing.T) {
 		}
 	}
 }
+
+func TestNewMux_RegistersBackupRoute(t *testing.T) {
+	originalConfig := proxy.AppConfig
+	proxy.AppConfig = proxy.DefaultConfig()
+	t.Cleanup(func() {
+		proxy.AppConfig = originalConfig
+	})
+
+	pool := proxy.NewAccountPool()
+	dashAuth := proxy.NewDashboardAuth("", "sk-test")
+	usageStats := proxy.InitUsageStats("")
+	requestHistory, _ := proxy.NewRequestHistoryStore("", 100)
+	accountsDir := t.TempDir()
+	regDeps := &proxy.RegisterJobsDeps{Pool: pool, AccountsDir: accountsDir, Auth: dashAuth}
+	batchManager, _ := proxy.NewAccountBatchManager(pool, accountsDir, "")
+	mux := newMux(pool, accountsDir, "config.yaml", "sk-test", dashAuth, usageStats, requestHistory, regDeps, batchManager)
+
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/admin/backup", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("backup route: expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if contentType := recorder.Header().Get("Content-Type"); !strings.Contains(contentType, "application/json") {
+		t.Fatalf("backup route: unexpected content type %q", contentType)
+	}
+}

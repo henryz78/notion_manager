@@ -1,13 +1,13 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import type { DashboardData, AccountInfo, AccountSummary, RefreshStatus, TokenStats } from './types'
-import { fetchDashboardData, fetchAccountSelection, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats, startAccountBatchJob, getAccountBatchJob, listAccountBatchJobs, retryAccountBatchJob } from './api'
+import { fetchDashboardData, fetchAccountSelection, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats, startAccountBatchJob, getAccountBatchJob, listAccountBatchJobs, retryAccountBatchJob, downloadBackup, restoreBackup } from './api'
 import type { SearchSettings, AccountStatusFilter, AccountBatchJob, AccountBatchJobAction, AccountImportPersonalInstructionsPolicy } from './api'
 import { fmt, formatTokens, getQuotaStatusByUsage, getQuotaPct, avatarColor, avatarLetter, formatCheckedAt, formatTimestampMs, providerDisplay } from './utils'
 import { AccountMenu } from './components/AccountMenu'
 import { RegisterModal } from './components/RegisterModal'
 import { HistoryDrawer } from './components/HistoryDrawer'
 import { RequestHistoryDrawer } from './components/RequestHistoryDrawer'
-import { IconUserPlus, IconHistory } from './components/Icons'
+import { IconUserPlus, IconHistory, IconDatabase, IconDownload, IconUpload } from './components/Icons'
 import { LanguageToggle } from './components/LanguageToggle'
 import { useTranslation } from 'react-i18next'
 
@@ -995,6 +995,9 @@ export default function App() {
   const [proxyError, setProxyError] = useState<string | null>(null)
   const [proxySaving, setProxySaving] = useState(false)
   const [promptModeSaving, setPromptModeSaving] = useState(false)
+  const [backupBusy, setBackupBusy] = useState<'download' | 'restore' | null>(null)
+  const [backupNotice, setBackupNotice] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const backupFileInputRef = useRef<HTMLInputElement>(null)
   const PAGE_SIZE = 20
   const completedBatchJobsRef = useRef<Set<string>>(new Set())
 
@@ -1292,6 +1295,49 @@ export default function App() {
     }
   }
 
+  const handleDownloadBackup = async () => {
+    if (backupBusy) return
+    setBackupBusy('download')
+    setBackupNotice(null)
+    try {
+      const { blob, filename } = await downloadBackup()
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      setBackupNotice({ type: 'success', text: t('api.backup_downloaded') })
+    } catch (e: any) {
+      setBackupNotice({ type: 'error', text: e?.message || t('api.backup_failed') })
+    } finally {
+      setBackupBusy(null)
+    }
+  }
+
+  const handleRestoreBackup = async (file: File) => {
+    if (backupBusy) return
+    const confirmed = window.confirm(t('api.restore_confirm'))
+    if (!confirmed) return
+    setBackupBusy('restore')
+    setBackupNotice(null)
+    try {
+      const result = await restoreBackup(file)
+      setSettings(result.settings)
+      setProxyDraft(result.settings.notion_proxy ?? '')
+      setSelectedEmails(new Set())
+      setPage(0)
+      await loadData()
+      setBackupNotice({ type: 'success', text: t('api.restore_success', { count: result.accounts }) })
+    } catch (e: any) {
+      setBackupNotice({ type: 'error', text: e?.message || t('api.restore_failed') })
+    } finally {
+      setBackupBusy(null)
+    }
+  }
+
   // Auto-poll when backend is refreshing quotas
   useEffect(() => {
     if (!refreshStatus?.refreshing) return
@@ -1569,7 +1615,7 @@ export default function App() {
               <h2 className="text-[18px] font-semibold text-text-primary">{t('api.settings_and_history')}</h2>
               <p className="text-[12px] text-text-muted mt-1">{t('api.settings_description')}</p>
             </div>
-            <div className="grid grid-cols-3 gap-3 max-md:grid-cols-1">
+            <div className="grid grid-cols-4 gap-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
               <div className="bg-bg-card border border-border rounded-lg p-4">
                 <div className="text-[11px] text-text-muted uppercase tracking-wider">{t('api.current_version')}</div>
                 <div className="text-[20px] font-semibold font-mono mt-1" title={appVersion}>{displayVersion(appVersion)}</div>
@@ -1589,6 +1635,45 @@ export default function App() {
                 <div className="flex items-center gap-2 text-[13px] font-medium"><IconHistory size={13} /> {t('api.register_history')}</div>
                 <div className="text-[11px] text-text-muted mt-2">{t('api.register_history_help')}</div>
               </button>
+              <div className="bg-bg-card border border-border rounded-lg p-4 min-w-0">
+                <div className="flex items-center gap-2 text-[13px] font-medium"><IconDatabase size={14} /> {t('api.data_backup')}</div>
+                <div className="text-[11px] text-text-muted mt-2 leading-relaxed">{t('api.data_backup_help')}</div>
+                <div className="text-[10px] text-warn mt-2">{t('api.data_backup_warning')}</div>
+                <div className="grid grid-cols-2 gap-2 mt-3">
+                  <button
+                    type="button"
+                    onClick={handleDownloadBackup}
+                    disabled={backupBusy !== null}
+                    className="h-8 inline-flex items-center justify-center gap-1.5 rounded-md border border-border bg-bg-secondary hover:bg-bg-card-hover text-[11px] text-text-primary cursor-pointer disabled:opacity-40 disabled:cursor-wait"
+                  >
+                    <IconDownload size={13} /> {backupBusy === 'download' ? t('api.backup_downloading') : t('api.download_backup')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => backupFileInputRef.current?.click()}
+                    disabled={backupBusy !== null}
+                    className="h-8 inline-flex items-center justify-center gap-1.5 rounded-md border border-notion-blue/30 bg-notion-blue/10 hover:bg-notion-blue/20 text-[11px] text-notion-blue cursor-pointer disabled:opacity-40 disabled:cursor-wait"
+                  >
+                    <IconUpload size={13} /> {backupBusy === 'restore' ? t('api.backup_restoring') : t('api.restore_backup')}
+                  </button>
+                  <input
+                    ref={backupFileInputRef}
+                    type="file"
+                    accept="application/json,.json"
+                    className="hidden"
+                    onChange={event => {
+                      const file = event.target.files?.[0]
+                      event.target.value = ''
+                      if (file) void handleRestoreBackup(file)
+                    }}
+                  />
+                </div>
+                {backupNotice && (
+                  <div className={`text-[10px] mt-2 break-words ${backupNotice.type === 'success' ? 'text-ok' : 'text-err'}`}>
+                    {backupNotice.text}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
