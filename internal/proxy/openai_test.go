@@ -119,6 +119,35 @@ func TestConvertOpenAIResponsesRequest_WithFunctionCallOutput(t *testing.T) {
 	}
 }
 
+func TestNormalizeOpenAIToolChoiceModes(t *testing.T) {
+	forced := map[string]interface{}{
+		"type":     "function",
+		"function": map[string]interface{}{"name": "Read"},
+	}
+	tests := []struct {
+		name         string
+		toolChoice   interface{}
+		functionCall interface{}
+		wantMode     string
+	}{
+		{name: "default auto", wantMode: "auto"},
+		{name: "auto", toolChoice: "auto", wantMode: "auto"},
+		{name: "none", toolChoice: "none", wantMode: "none"},
+		{name: "required", toolChoice: "required", wantMode: "required"},
+		{name: "named", toolChoice: forced, wantMode: "force:Read"},
+		{name: "legacy none", functionCall: "none", wantMode: "none"},
+		{name: "legacy named", functionCall: map[string]interface{}{"name": "Read"}, wantMode: "force:Read"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			normalized := normalizeOpenAIToolChoice(test.toolChoice, test.functionCall)
+			if got := resolveToolChoiceMode(normalized); got != test.wantMode {
+				t.Fatalf("normalized mode = %q, want %q (value %#v)", got, test.wantMode, normalized)
+			}
+		})
+	}
+}
+
 func TestBuildOpenAIChatCompletionResponse_FromAnthropicBlocks(t *testing.T) {
 	stopReason := "tool_use"
 	resp := buildOpenAIChatCompletionResponse("chatcmpl_test", 123, "gpt-5.4", &AnthropicResponse{
@@ -181,6 +210,40 @@ func TestOpenAIChatStreamTranscoder_EmitsToolCallsAndDone(t *testing.T) {
 	}
 	if !strings.Contains(body, "data: [DONE]") {
 		t.Fatalf("body missing DONE: %s", body)
+	}
+	thinkingAt := strings.Index(body, `"reasoning_content":"Need to inspect the file."`)
+	toolAt := strings.Index(body, `"tool_calls"`)
+	argsAt := strings.Index(body, `README.md`)
+	usageAt := strings.Index(body, `"prompt_tokens":11`)
+	doneAt := strings.Index(body, "data: [DONE]")
+	if thinkingAt < 0 || toolAt < thinkingAt || argsAt < toolAt || usageAt < argsAt || doneAt < usageAt {
+		t.Fatalf("stream frames out of order: thinking=%d tool=%d args=%d usage=%d done=%d\n%s", thinkingAt, toolAt, argsAt, usageAt, doneAt, body)
+	}
+}
+
+func TestOpenAIChatStreamTranscoder_StreamsTextDeltasInOrder(t *testing.T) {
+	rr := httptest.NewRecorder()
+	transcoder := newOpenAIChatStreamTranscoder(rr, rr, "chatcmpl_text", "gpt-5.6-sol", 123, true)
+	frames := []anthropicSSEFrame{
+		{Event: "message_start", Data: json.RawMessage(`{"message":{"usage":{"input_tokens":120}}}`)},
+		{Event: "content_block_start", Data: json.RawMessage(`{"index":0,"content_block":{"type":"text","text":""}}`)},
+		{Event: "content_block_delta", Data: json.RawMessage(`{"index":0,"delta":{"type":"text_delta","text":"first"}}`)},
+		{Event: "content_block_delta", Data: json.RawMessage(`{"index":0,"delta":{"type":"text_delta","text":" second"}}`)},
+		{Event: "message_delta", Data: json.RawMessage(`{"delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":120,"output_tokens":2}}`)},
+		{Event: "message_stop", Data: json.RawMessage(`{"type":"message_stop"}`)},
+	}
+	for _, frame := range frames {
+		if err := transcoder.HandleFrame(frame); err != nil {
+			t.Fatalf("HandleFrame(%s) error = %v", frame.Event, err)
+		}
+	}
+	body := rr.Body.String()
+	firstAt := strings.Index(body, `"content":"first"`)
+	secondAt := strings.Index(body, `"content":" second"`)
+	usageAt := strings.Index(body, `"prompt_tokens":120`)
+	doneAt := strings.Index(body, "data: [DONE]")
+	if firstAt < 0 || secondAt < firstAt || usageAt < secondAt || doneAt < usageAt {
+		t.Fatalf("text stream out of order: first=%d second=%d usage=%d done=%d\n%s", firstAt, secondAt, usageAt, doneAt, body)
 	}
 }
 

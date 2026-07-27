@@ -1286,9 +1286,8 @@ func StripAskModeSuffix(model string) (string, bool) {
 
 // CallInference sends a request to Notion's runInferenceTranscript API
 // and streams the response via callback.
-// When opt.Session is non-nil with TurnCount > 0, it sends a partial transcript (subsequent turn).
-// When opt.Session is non-nil with TurnCount == 0, it sends a full transcript (first turn).
-// When opt.Session is nil, it falls back to the legacy single-turn behavior.
+// Every request uses the complete client transcript. This keeps the public API
+// stateless and makes retries or account switches see exactly the same history.
 func CallInference(acc *Account, messages []ChatMessage, model string, disableBuiltinTools bool, cb StreamCallback, opts ...CallOptions) error {
 	var opt CallOptions
 	if len(opts) > 0 {
@@ -1346,119 +1345,59 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 
 	enableWebSearch := opt.EnableWebSearch
 	attachments := opt.Attachments
-	session := opt.Session
-
 	var reqBody NotionInferenceRequest
+	transcript := buildFullTranscript(
+		acc,
+		messages,
+		notionModel,
+		disableBuiltinTools,
+		enableWebSearch,
+		opt.EnableWorkspaceSearch,
+		opt.UseReadOnlyMode,
+		attachments,
+		generateUUIDv4(),
+		generateUUIDv4(),
+		time.Now().Format(time.RFC3339Nano),
+		useClientSystemPrompt,
+		usePersonalInstructions,
+		personalInstructionsPageID,
+	)
 
-	if session != nil && session.TurnCount > 0 {
-		// ── Subsequent turn: partial transcript ──
-		newUserContent := extractLastUserMessage(messages)
-		if newUserContent == "" {
-			newUserContent = "continue"
-		}
-		transcript := buildPartialTranscript(
-			acc,
-			newUserContent,
-			notionModel,
-			disableBuiltinTools,
-			enableWebSearch,
-			opt.EnableWorkspaceSearch,
-			opt.UseReadOnlyMode,
-			session,
-			personalInstructionsPageID,
-		)
-
-		reqBody = NotionInferenceRequest{
-			TraceID:                 generateUUIDv4(),
-			SpaceID:                 acc.SpaceID,
-			ThreadID:                session.ThreadID,
-			Transcript:              transcript,
-			CreateThread:            false,
-			IsPartialTranscript:     true,
-			GenerateTitle:           false,
-			SaveAllThreadOperations: true,
-			SetUnreadState:          false,
-			ThreadType:              "workflow",
-			AsPatchResponse:         false,
-			DebugOverrides: DebugOverrides{
-				Model:                           notionModel,
-				EmitAgentSearchExtractedResults: true,
-			},
-		}
-		log.Printf("[session] subsequent turn %d on thread %s (updated-configs=%d)",
-			session.TurnCount+1, session.ThreadID, len(session.UpdatedConfigIDs))
-	} else {
-		// ── First turn (or legacy single-turn): full transcript ──
-		var configID, contextID, now string
-		if session != nil {
-			// Pre-created session from HandleAnthropicMessages
-			configID = session.ConfigID
-			contextID = session.ContextID
-			now = session.OriginalDatetime
-		} else {
-			// Legacy single-turn fallback (e.g. OpenAI-compatible handler)
-			configID = generateUUIDv4()
-			contextID = generateUUIDv4()
-			now = time.Now().Format(time.RFC3339Nano)
-		}
-		transcript := buildFullTranscript(
-			acc,
-			messages,
-			notionModel,
-			disableBuiltinTools,
-			enableWebSearch,
-			opt.EnableWorkspaceSearch,
-			opt.UseReadOnlyMode,
-			attachments,
-			configID,
-			contextID,
-			now,
-			useClientSystemPrompt,
-			usePersonalInstructions,
-			personalInstructionsPageID,
-		)
-
-		// When attachments are present, reuse the upload thread instead of creating a new one.
-		createThread := true
-		var threadID string
-		if len(attachments) > 0 && attachments[0].SessionID != "" {
-			threadID = attachments[0].SessionID
-			createThread = false
-			log.Printf("[upload] using upload thread %s for inference", threadID)
-		} else if session != nil {
-			threadID = session.ThreadID
-		} else {
-			threadID = generateUUIDv4()
-		}
-
-		reqBody = NotionInferenceRequest{
-			TraceID:                 generateUUIDv4(),
-			SpaceID:                 acc.SpaceID,
-			ThreadID:                threadID,
-			Transcript:              transcript,
-			CreateThread:            createThread,
-			IsPartialTranscript:     false,
-			GenerateTitle:           true,
-			SaveAllThreadOperations: true,
-			SetUnreadState:          false,
-			ThreadType:              "workflow",
-			AsPatchResponse:         false,
-			DebugOverrides: DebugOverrides{
-				Model:                           notionModel,
-				EmitAgentSearchExtractedResults: true,
-			},
-		}
-
-		if createThread {
-			reqBody.ThreadParentPointer = &ThreadParentPointer{
-				Table:   "space",
-				ID:      acc.SpaceID,
-				SpaceID: acc.SpaceID,
-			}
-		}
-
-		log.Printf("[session] first turn, thread %s (session=%v)", threadID, session != nil)
+	createThread := true
+	threadID := generateUUIDv4()
+	if len(attachments) > 0 && attachments[0].SessionID != "" {
+		threadID = attachments[0].SessionID
+		createThread = false
+		log.Printf("[upload] using upload thread %s for inference", threadID)
 	}
+
+	reqBody = NotionInferenceRequest{
+		TraceID:                 generateUUIDv4(),
+		SpaceID:                 acc.SpaceID,
+		ThreadID:                threadID,
+		Transcript:              transcript,
+		CreateThread:            createThread,
+		IsPartialTranscript:     false,
+		GenerateTitle:           true,
+		SaveAllThreadOperations: true,
+		SetUnreadState:          false,
+		ThreadType:              "workflow",
+		AsPatchResponse:         false,
+		DebugOverrides: DebugOverrides{
+			Model:                           notionModel,
+			EmitAgentSearchExtractedResults: true,
+		},
+	}
+
+	if createThread {
+		reqBody.ThreadParentPointer = &ThreadParentPointer{
+			Table:   "space",
+			ID:      acc.SpaceID,
+			SpaceID: acc.SpaceID,
+		}
+	}
+
+	log.Printf("[context] full client transcript: messages=%d thread=%s", len(messages), threadID)
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -1703,45 +1642,6 @@ func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel strin
 			CreatedAt: now,
 		})
 	}
-
-	return transcript
-}
-
-// buildPartialTranscript builds an incremental transcript for subsequent turns.
-// It includes: config + context (reused IDs) + N updated-config placeholders + new user message.
-func buildPartialTranscript(acc *Account, newUserContent string, notionModel string, disableBuiltinTools bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, session *Session, personalInstructionsPageID string) []interface{} {
-	configValue := buildConfigValue(notionModel, disableBuiltinTools, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, false, true)
-	contextValue := buildContextValue(acc, session.OriginalDatetime, personalInstructionsPageID)
-
-	transcript := []interface{}{
-		ResearcherTranscriptMsg{
-			ID:    session.ConfigID,
-			Type:  "config",
-			Value: configValue,
-		},
-		ResearcherTranscriptMsg{
-			ID:    session.ContextID,
-			Type:  "context",
-			Value: contextValue,
-		},
-	}
-
-	// Add updated-config placeholders for each previous turn
-	for _, ucID := range session.UpdatedConfigIDs {
-		transcript = append(transcript, UpdatedConfigMsg{
-			ID:   ucID,
-			Type: "updated-config",
-		})
-	}
-
-	// Add the new user message
-	transcript = append(transcript, ResearcherTranscriptMsg{
-		ID:        generateUUIDv4(),
-		Type:      "user",
-		Value:     [][]string{{newUserContent}},
-		UserID:    acc.UserID,
-		CreatedAt: time.Now().Format(time.RFC3339Nano),
-	})
 
 	return transcript
 }

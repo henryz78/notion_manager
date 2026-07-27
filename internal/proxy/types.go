@@ -270,9 +270,6 @@ type CallOptions struct {
 	KnownCitationURLs     *[]string             // known web result URLs for repairing truncated citations
 	KnownCitationDocs     *[]CitationCandidate  // known search result metadata for context-based citation recovery
 	KnownToolCallURLs     *map[string][]string  // tool call id -> ordered web result URLs for resolving tool citations
-	Session               *Session              // multi-turn session (nil = first turn)
-	ContextBaseline       bool                  // this attempt replays the full conversation into a fresh Notion thread
-	ContextRepeat         bool                  // client retried the same turn; do not grow the conversation counter
 	RequestID             string                // top-level API request ID for log correlation
 	RequestDiagnostic     *RequestDiagnostic    // metadata-only Dashboard request trace
 }

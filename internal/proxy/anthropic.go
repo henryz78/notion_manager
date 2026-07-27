@@ -11,7 +11,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"time"
 )
 
 var ErrToolBridgeNoTool = errors.New("tool bridge produced no usable tool action")
@@ -616,158 +615,6 @@ func declaredToolNames(tools []AnthropicTool) map[string]struct{} {
 	return names
 }
 
-func normalizeToolBridgeResidualText(text string) string {
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
-		return ""
-	}
-	trimmed = strings.TrimSpace(structuredOutputLeadingTagRegex.ReplaceAllString(trimmed, ""))
-	return trimmed
-}
-
-func detectToolBridgeNoToolResponse(text string) bool {
-	normalized := normalizeToolBridgeResidualText(text)
-	if normalized == "" {
-		return false
-	}
-
-	lower := strings.ToLower(normalized)
-	mentionsNotionIdentity := strings.Contains(normalized, "我是 Notion AI") ||
-		strings.Contains(lower, "i am notion ai")
-	mentionsLocalFS := strings.Contains(normalized, "本地文件系统") ||
-		strings.Contains(lower, "local file system")
-	mentionsProjectFS := (strings.Contains(lower, "project") &&
-		(strings.Contains(lower, "file system") || strings.Contains(lower, "filesystem") || strings.Contains(lower, "files"))) ||
-		strings.Contains(normalized, "项目文件")
-	mentionsNoAccess := strings.Contains(lower, "do not have access") ||
-		strings.Contains(lower, "don't have access") ||
-		strings.Contains(lower, "don’t have access") ||
-		strings.Contains(lower, "no access") ||
-		strings.Contains(lower, "cannot access") ||
-		strings.Contains(lower, "can't access") ||
-		strings.Contains(lower, "can’t access") ||
-		strings.Contains(normalized, "无法访问")
-	mentionsCannotSearch := strings.Contains(lower, "cannot search") ||
-		strings.Contains(lower, "can't search") ||
-		strings.Contains(lower, "can’t search") ||
-		strings.Contains(normalized, "无法搜索")
-	mentionsClassificationRefusal := (strings.Contains(lower, "cannot comply") ||
-		strings.Contains(lower, "can't comply") ||
-		strings.Contains(lower, "can’t comply")) &&
-		(strings.Contains(lower, "classify") || strings.Contains(lower, "action label") || strings.Contains(lower, "tool label"))
-	mentionsPrematureNoAction := strings.Contains(lower, "no action needed") ||
-		strings.Contains(lower, "no action is needed") ||
-		strings.Contains(lower, "no file operation is needed") ||
-		strings.Contains(lower, "no tool is needed") ||
-		strings.Contains(lower, "no tool call is needed") ||
-		strings.Contains(normalized, "无需执行操作") ||
-		strings.Contains(normalized, "不需要执行操作") ||
-		strings.Contains(normalized, "无需使用工具") ||
-		strings.Contains(normalized, "不需要调用工具")
-	mentionsMissingProjectData := mentionsProjectFS &&
-		(strings.Contains(lower, "no actual") || strings.Contains(lower, "not provided"))
-	mentionsCodingAssistant := strings.Contains(normalized, "编码助手") ||
-		strings.Contains(normalized, "Claude Code") ||
-		strings.Contains(normalized, "Cursor") ||
-		strings.Contains(lower, "coding assistant")
-	mentionsManualHandOff := strings.Contains(normalized, "复制粘贴") ||
-		strings.Contains(normalized, "手动添加") ||
-		strings.Contains(normalized, "你可以这样做") ||
-		strings.Contains(lower, "copy and paste") ||
-		strings.Contains(lower, "manually add")
-	mentionsMissingLocalTools := strings.Contains(lower, "read") &&
-		strings.Contains(lower, "edit") &&
-		strings.Contains(lower, "bash")
-
-	switch {
-	case mentionsClassificationRefusal:
-		return true
-	case mentionsPrematureNoAction:
-		return true
-	case mentionsMissingProjectData:
-		return true
-	case mentionsNoAccess && (mentionsLocalFS || mentionsProjectFS):
-		return true
-	case mentionsCannotSearch && mentionsProjectFS:
-		return true
-	case mentionsNotionIdentity && mentionsLocalFS:
-		return true
-	case mentionsLocalFS && mentionsCodingAssistant:
-		return true
-	case mentionsNotionIdentity && mentionsCodingAssistant:
-		return true
-	case mentionsMissingLocalTools && mentionsCodingAssistant && mentionsManualHandOff:
-		return true
-	default:
-		return false
-	}
-}
-
-func extractAnthropicSessionSalt(metadata map[string]interface{}) string {
-	if len(metadata) == 0 {
-		return ""
-	}
-
-	extractNestedSessionID := func(v interface{}) string {
-		switch tv := v.(type) {
-		case string:
-			trimmed := strings.TrimSpace(tv)
-			if trimmed == "" {
-				return ""
-			}
-			var parsed map[string]interface{}
-			if json.Unmarshal([]byte(trimmed), &parsed) == nil {
-				for _, key := range []string{"session_id", "conversation_id"} {
-					if sid, ok := parsed[key].(string); ok && strings.TrimSpace(sid) != "" {
-						return strings.TrimSpace(sid)
-					}
-				}
-			}
-			return ""
-		case map[string]interface{}:
-			for _, key := range []string{"session_id", "conversation_id"} {
-				if sid, ok := tv[key].(string); ok && strings.TrimSpace(sid) != "" {
-					return strings.TrimSpace(sid)
-				}
-			}
-		}
-		return ""
-	}
-
-	// Prefer explicit conversation identifiers. Plain strings are valid here
-	// and should not have to contain a JSON object.
-	for _, key := range []string{"session_id", "conversation_id"} {
-		if value, ok := metadata[key]; ok {
-			if sid := extractNestedSessionID(value); sid != "" {
-				return sid
-			}
-			if sid, ok := value.(string); ok && strings.TrimSpace(sid) != "" {
-				return strings.TrimSpace(sid)
-			}
-		}
-	}
-
-	// Claude Code places a JSON object containing session_id inside user_id.
-	// A plain user_id identifies a user rather than a conversation, so it must
-	// not merge every chat from that user into one Notion thread.
-	if sid := extractNestedSessionID(metadata["user_id"]); sid != "" {
-		return sid
-	}
-	return ""
-}
-
-func shouldStartFreshForAmbiguousSingleTurn(session *Session, rawMsgCount int, sessionSalt string) bool {
-	if session == nil || strings.TrimSpace(sessionSalt) != "" {
-		return false
-	}
-	// Without a client conversation ID, two separate new chats containing the
-	// same first message produce the same legacy fingerprint. Treat a new
-	// one-message request as a new chat instead of reusing the prior Notion
-	// thread. Multi-turn clients send the earlier assistant/user history and
-	// therefore have a larger raw message count.
-	return rawMsgCount == 1 && session.RawMessageCount == 1
-}
-
 func applyStructuredOutputBridge(messages []ChatMessage, outputConfig *AnthropicOutputConfig) []ChatMessage {
 	if outputConfig == nil || outputConfig.Format == nil || outputConfig.Format.Type != "json_schema" || outputConfig.Format.Schema == nil {
 		return messages
@@ -888,11 +735,6 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		if len(fileAttachments) > 0 {
 			log.Printf("[upload-debug] extracted %d file attachment(s) from request", len(fileAttachments))
 		}
-		sessionSalt := extractAnthropicSessionSalt(req.Metadata)
-		if sessionSalt != "" {
-			log.Printf("[session] extracted metadata session salt %s", truncateForLog(sessionSalt, 8))
-		}
-
 		// Log converted internal messages
 		logConvertedMessages(messages)
 
@@ -925,63 +767,17 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		// Convert Anthropic tools only while the external tool compatibility
 		// bridge is enabled. When disabled, client tool definitions are ignored
 		// and the request continues as a normal chat request.
-		hasTools := toolBridgeActive(isResearcher, len(req.Tools))
+		toolChoiceMode := resolveToolChoiceMode(req.ToolChoice)
+		hasTools := toolBridgeActive(isResearcher, len(req.Tools)) && toolChoiceMode != "none"
 		allowedToolNames := declaredToolNames(req.Tools)
 		enableWebSearch := effectiveWebSearch
 
-		// ── Multi-turn session management ──
-		// Compute fingerprint BEFORE tool injection so it's stable across turns.
-		// Tool injection may collapse/modify messages, breaking fingerprint stability.
-		var fingerprint string
-		var session *Session
-		isFirstTurn := true
-		isRepeatTurn := false
-		rawMsgCount := 0
-
-		if !isResearcher {
-			fingerprint = computeSessionFingerprintWithSalt(messages, sessionSalt)
-			session = globalSessionManager.Get(fingerprint)
-			rawMsgCount = countNonSystemMessages(messages)
-
-			if session != nil {
-				if shouldStartFreshForAmbiguousSingleTurn(session, rawMsgCount, sessionSalt) {
-					log.Printf("[session] same first message without conversation id; starting a fresh Notion thread")
-					globalSessionManager.Delete(fingerprint)
-					session = nil
-				} else if rawMsgCount < session.RawMessageCount {
-					// Message count decreased (edit/rollback) — invalidate session
-					log.Printf("[session] message rollback detected (rawMsgs=%d < prev=%d), clearing session",
-						rawMsgCount, session.RawMessageCount)
-					globalSessionManager.Delete(fingerprint)
-					session = nil
-				} else if rawMsgCount == session.RawMessageCount {
-					// Same message count — not a new turn (e.g. retry or tool call loop)
-					isRepeatTurn = true
-					log.Printf("[session] repeat turn detected (rawMsgs=%d, turnCount=%d), reusing session",
-						rawMsgCount, session.TurnCount)
-				}
-			}
-
-			if session != nil {
-				isFirstTurn = false
-				log.Printf("[session] found existing session: thread=%s turns=%d rawMsgs=%d account=%s",
-					session.ThreadID, session.TurnCount, session.RawMessageCount, session.AccountEmail)
-			} else {
-				isFirstTurn = true
-				log.Printf("[session] no existing session, will create new thread (fingerprint=%s)", fingerprint[:8])
-			}
-		}
 		if requestDiagnostic != nil {
-			switch {
-			case isResearcher:
-				requestDiagnostic.SetSession("", "not_applicable", 0)
-			case session == nil:
-				requestDiagnostic.SetSession(fingerprint, "new", 1)
-			case isRepeatTurn:
-				requestDiagnostic.SetSession(fingerprint, "repeat", session.TurnCount)
-			default:
-				requestDiagnostic.SetSession(fingerprint, "reused", session.TurnCount+1)
+			state := "full_replay"
+			if isResearcher {
+				state = "not_applicable"
 			}
+			requestDiagnostic.SetContextMode(state)
 		}
 
 		// Convert Anthropic tools to internal Tool format (done once, immutable).
@@ -1032,39 +828,10 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		maxAttempts := pool.Count()
 		var lastNonQuotaErr error
 		var sawEmptyResponse bool
-		var toolRecoveryMessages []ChatMessage
-		toolBridgeRetried := false
 		liveCheckInterval := AppConfig.QuotaLiveCheckInterval()
 
 		for attempt := 0; attempt < maxAttempts; attempt++ {
 			var acc *Account
-
-			// Account binding: for subsequent turns, try the bound account first
-			// — but only if the account still has live quota, otherwise we'd
-			// burn a request just to discover it's exhausted.
-			if !isFirstTurn && session != nil && attempt == 0 {
-				bound := pool.GetByEmail(session.AccountEmail)
-				if bound != nil && pool.RefreshAccountQuota(bound, liveCheckInterval) {
-					acc = bound
-				} else {
-					reason := "unavailable"
-					if bound != nil {
-						reason = "quota exhausted on live check"
-					}
-					log.Printf("[session] bound account %s %s, will pick a new account and replay history",
-						session.AccountEmail, reason)
-					if bound != nil {
-						pool.MarkQuotaExhausted(bound)
-					}
-					globalSessionManager.Delete(fingerprint)
-					session = nil
-					isFirstTurn = true
-					isRepeatTurn = false
-					if requestDiagnostic != nil {
-						requestDiagnostic.SetSession(fingerprint, "replayed_account_switch", 1)
-					}
-				}
-			}
 
 			if acc == nil {
 				if isResearcher {
@@ -1108,7 +875,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			attemptMessages := cloneChatMessages(originalMessages)
 			if hasTools {
 				attemptMessages = aliasToolNamesInMessages(attemptMessages, originalToToolAlias)
-				attemptMessages = injectToolsIntoMessages(attemptMessages, bridgeTools, model, session, aliasToolChoice(req.ToolChoice, originalToToolAlias))
+				attemptMessages = injectToolsIntoMessages(attemptMessages, bridgeTools, aliasToolChoice(req.ToolChoice, originalToToolAlias))
 				if DebugLoggingEnabled() && attempt == 0 {
 					log.Printf("[debug] === After tool injection (%d messages) ===", len(attemptMessages))
 					for i, m := range attemptMessages {
@@ -1120,37 +887,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			}
 
 			requestMessages := attemptMessages
-			if !isResearcher && isFirstTurn {
-				if len(toolRecoveryMessages) > 0 {
-					requestMessages = cloneChatMessages(toolRecoveryMessages)
-				} else if needsFreshThreadRecovery(attemptMessages) {
-					log.Printf("[session] replaying all %d client-history messages into fresh Notion thread for account %s",
-						len(attemptMessages), acc.UserEmail)
-				}
-			}
 
-			// For first turn, pre-create session with generated IDs
-			var currentSession *Session
-			if !isResearcher {
-				if isFirstTurn {
-					now := time.Now().Format(time.RFC3339Nano)
-					currentSession = &Session{
-						ThreadID:         generateUUIDv4(),
-						TurnCount:        0,
-						AccountEmail:     acc.UserEmail,
-						CreatedAt:        time.Now(),
-						LastUsedAt:       time.Now(),
-						ConfigID:         generateUUIDv4(),
-						ContextID:        generateUUIDv4(),
-						OriginalDatetime: now,
-					}
-				} else {
-					currentSession = session
-				}
-			}
-
-			log.Printf("[req] %s model=%s messages=%d stream=%v tools=%d attachments=%d account=%s session=%v (attempt %d/%d) [anthropic]",
-				requestID, model, len(req.Messages), req.Stream, len(req.Tools), len(fileAttachments), acc.UserEmail, !isFirstTurn, attempt+1, maxAttempts)
+			log.Printf("[req] %s model=%s messages=%d stream=%v tools=%d attachments=%d account=%s full_replay=true (attempt %d/%d) [anthropic]",
+				requestID, model, len(req.Messages), req.Stream, len(req.Tools), len(fileAttachments), acc.UserEmail, attempt+1, maxAttempts)
 			if requestDiagnostic != nil {
 				requestDiagnostic.BeginAttempt(acc.UserEmail)
 			}
@@ -1188,9 +927,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					reqErr = handleResearcherNonStream(w, acc, requestMessages, model, requestID, hasThinking, requestDiagnostic)
 				}
 			} else if req.Stream {
-				reqErr = handleAnthropicStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, isFirstTurn, isRepeatTurn, requestDiagnostic)
+				reqErr = handleAnthropicStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, toolChoiceMode, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, requestDiagnostic)
 			} else {
-				reqErr = handleAnthropicNonStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, isFirstTurn, isRepeatTurn, requestDiagnostic)
+				reqErr = handleAnthropicNonStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, toolChoiceMode, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, requestDiagnostic)
 			}
 			if requestDiagnostic != nil {
 				requestDiagnostic.FinishAttempt(requestAttemptOutcome(reqErr))
@@ -1216,7 +955,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 						return -1
 					}())
 				if requestDiagnostic != nil {
-					requestDiagnostic.SetSessionState("replayed_account_switch")
+					requestDiagnostic.SetContextMode("full_replay_account_switch")
 				}
 				continue
 			}
@@ -1225,15 +964,8 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				pool.MarkQuotaExhausted(acc)
 				log.Printf("[quota] %s quota exhausted, trying next account (%d/%d available)",
 					acc.UserEmail, pool.AvailableCount(), pool.Count())
-				// Clear session if the bound account was exhausted
-				if !isFirstTurn && session != nil {
-					globalSessionManager.Delete(fingerprint)
-					session = nil
-					isFirstTurn = true
-					isRepeatTurn = false
-				}
 				if requestDiagnostic != nil {
-					requestDiagnostic.SetSession(fingerprint, "replayed_account_switch", 1)
+					requestDiagnostic.SetContextMode("full_replay_account_switch")
 				}
 				continue
 			}
@@ -1243,39 +975,10 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				log.Printf("[empty] %s returned empty response, trying next account", acc.UserEmail)
 				sawEmptyResponse = true
 				pool.MarkTemporarilyUnavailable(acc, "empty_response", defaultAccountFailureCooldown)
-				if currentSession != nil {
-					globalSessionManager.Delete(fingerprint)
-					session = nil
-					isFirstTurn = true
-					isRepeatTurn = false
-				}
 				if requestDiagnostic != nil {
-					requestDiagnostic.SetSession(fingerprint, "replayed_after_error", 1)
+					requestDiagnostic.SetContextMode("full_replay_after_error")
 				}
 				continue
-			}
-
-			if reqErr != nil && errors.Is(reqErr, ErrToolBridgeNoTool) {
-				if !toolBridgeRetried {
-					log.Printf("[bridge] %s returned no-tool identity-drift text, clearing session and retrying once with sanitized recovery prompt", acc.UserEmail)
-					toolBridgeRetried = true
-					if fingerprint != "" {
-						globalSessionManager.Delete(fingerprint)
-					}
-					session = nil
-					isFirstTurn = true
-					isRepeatTurn = false
-					// Preserve the already-injected tool contract. Rebuilding from
-					// the original messages would retry without any client tools.
-					toolRecoveryMessages = buildToolBridgeRecoveryMessages(attemptMessages)
-					if requestDiagnostic != nil {
-						requestDiagnostic.SetSession(fingerprint, "tool_recovery", 1)
-					}
-					tried = make(map[*Account]bool)
-					attempt = -1
-					continue
-				}
-				lastNonQuotaErr = reqErr
 			}
 
 			if reqErr != nil && errors.Is(reqErr, ErrPremiumFeatureUnavailable) {
@@ -1287,31 +990,13 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					log.Printf("[premium] %s premium feature unavailable, trying next account", acc.UserEmail)
 					pool.MarkTemporarilyUnavailable(acc, "premium_unavailable", defaultAccountFailureCooldown)
 				}
-				if !isFirstTurn && session != nil {
-					globalSessionManager.Delete(fingerprint)
-					session = nil
-					isFirstTurn = true
-					isRepeatTurn = false
-				}
 				if requestDiagnostic != nil {
-					requestDiagnostic.SetSession(fingerprint, "replayed_account_switch", 1)
+					requestDiagnostic.SetContextMode("full_replay_account_switch")
 				}
 				continue
 			}
 
 			if reqErr != nil {
-				// Non-quota error — if this was a subsequent turn, try clearing session and retrying as first turn
-				if !isFirstTurn && session != nil {
-					log.Printf("[session] subsequent turn failed (%v), clearing session and falling back to first turn", reqErr)
-					globalSessionManager.Delete(fingerprint)
-					session = nil
-					isFirstTurn = true
-					isRepeatTurn = false
-					if requestDiagnostic != nil {
-						requestDiagnostic.SetSession(fingerprint, "replayed_after_error", 1)
-					}
-					continue
-				}
 				lastNonQuotaErr = reqErr
 				failure := classifyAccountAttemptError(reqErr)
 				if failure.Retryable {
@@ -1327,39 +1012,15 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					pool.MarkTemporarilyUnavailable(acc, failure.Reason, defaultAccountFailureCooldown)
 					log.Printf("[health] %s failed with %s, trying next account: %v", acc.UserEmail, failure.Reason, reqErr)
 					if requestDiagnostic != nil {
-						requestDiagnostic.SetSession(fingerprint, "replayed_after_error", 1)
+						requestDiagnostic.SetContextMode("full_replay_after_error")
 					}
 					continue
 				}
 				break
 			}
 
-			// ── Success: save/update session ──
 			if reqErr == nil {
 				pool.ClearTemporaryUnavailable(acc)
-			}
-			if !isResearcher && currentSession != nil && reqErr == nil {
-				if isFirstTurn {
-					currentSession.TurnCount = 1
-					currentSession.RawMessageCount = rawMsgCount
-					currentSession.UpdatedConfigIDs = []string{generateUUIDv4()}
-					resolvedModel, _ := ResolveModel(model)
-					currentSession.ModelUsed = resolvedModel
-					globalSessionManager.Set(fingerprint, currentSession)
-					log.Printf("[session] saved new session: thread=%s fingerprint=%s rawMsgs=%d",
-						currentSession.ThreadID, fingerprint[:8], rawMsgCount)
-				} else if isRepeatTurn {
-					currentSession.LastUsedAt = time.Now()
-					log.Printf("[session] kept session unchanged on repeat turn: thread=%s turns=%d",
-						currentSession.ThreadID, currentSession.TurnCount)
-				} else {
-					currentSession.TurnCount++
-					currentSession.RawMessageCount = rawMsgCount
-					currentSession.UpdatedConfigIDs = append(currentSession.UpdatedConfigIDs, generateUUIDv4())
-					currentSession.LastUsedAt = time.Now()
-					log.Printf("[session] updated session: thread=%s turns=%d rawMsgs=%d",
-						currentSession.ThreadID, currentSession.TurnCount, rawMsgCount)
-				}
 			}
 
 			return
@@ -1392,7 +1053,7 @@ func requestAttemptOutcome(err error) string {
 	case errors.Is(err, ErrEmptyResponse):
 		return "empty_response"
 	case errors.Is(err, ErrToolBridgeNoTool):
-		return "tool_recovery"
+		return "required_tool_missing"
 	case errors.Is(err, ErrPremiumFeatureUnavailable):
 		return "premium_unavailable"
 	}
@@ -1827,7 +1488,7 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 	outputTokens := 0
 	inputTokens := 0
 	if finalUsage != nil {
-		inputTokens = contextInputTokens(callOpts.Session, finalUsage.PromptTokens, callOpts.ContextBaseline, callOpts.ContextRepeat, callOpts.RequestDiagnostic)
+		inputTokens = reportedInputTokens(finalUsage.PromptTokens, callOpts.RequestDiagnostic)
 		outputTokens = finalUsage.CompletionTokens
 	}
 	ensureHeaders()
@@ -1873,22 +1534,180 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 	return nil
 }
 
-// handleAnthropicStream handles streaming Anthropic response
-func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, contextBaseline, contextRepeat bool, requestDiagnostic *RequestDiagnostic) error {
+func toolProtocolPrefixState(content string) (protocol, undecided bool) {
+	trimmed := strings.TrimLeft(content, " \t\r\n")
+	if trimmed == "" {
+		return false, true
+	}
+	for _, prefix := range []string{"{", "<|", "<tool_call>", "```"} {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true, false
+		}
+		if strings.HasPrefix(prefix, trimmed) {
+			return false, true
+		}
+	}
+	return false, false
+}
+
+type incrementalToolStream struct {
+	mode    string
+	pending strings.Builder
+}
+
+func newIncrementalToolStream(toolChoiceMode string) *incrementalToolStream {
+	mode := "undecided"
+	if toolChoiceMode == "required" || strings.HasPrefix(toolChoiceMode, "force:") {
+		mode = "protocol"
+	}
+	return &incrementalToolStream{mode: mode}
+}
+
+func (stream *incrementalToolStream) Push(delta string) string {
+	if delta == "" {
+		return ""
+	}
+	switch stream.mode {
+	case "text":
+		return delta
+	case "protocol":
+		return ""
+	}
+	stream.pending.WriteString(delta)
+	protocol, undecided := toolProtocolPrefixState(stream.pending.String())
+	if protocol {
+		stream.mode = "protocol"
+		stream.pending.Reset()
+		return ""
+	}
+	if undecided {
+		return ""
+	}
+	stream.mode = "text"
+	text := stream.pending.String()
+	stream.pending.Reset()
+	return text
+}
+
+func (stream *incrementalToolStream) FlushText() string {
+	if stream.mode != "undecided" {
+		return ""
+	}
+	stream.mode = "text"
+	text := stream.pending.String()
+	stream.pending.Reset()
+	return text
+}
+
+// handleAnthropicStream streams thinking and ordinary text as it arrives. Only
+// a response that begins like a tool protocol is buffered until it can be
+// validated and converted into tool_use events.
+func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, toolChoiceMode string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, requestDiagnostic *RequestDiagnostic) error {
+	if !hasTools {
+		callOpts := CallOptions{
+			HasClientTools:        hasBridgedClientTools,
+			EnableWebSearch:       enableWebSearch,
+			EnableWorkspaceSearch: enableWorkspaceSearch,
+			UseReadOnlyMode:       useReadOnlyMode,
+			Attachments:           attachments,
+			RequestID:             requestID,
+			RequestDiagnostic:     requestDiagnostic,
+		}
+		return streamAnthropicTextResponse(w, acc, messages, model, requestID, hasThinking, AppConfig.Proxy.DisableNotionPrompt, outputConfig, callOpts)
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeAnthropicError(w, requestID, http.StatusInternalServerError, "streaming not supported", "api_error")
+		return nil
+	}
+
 	var fullContent strings.Builder
+	var thinkingForLog strings.Builder
 	var finalUsage *UsageInfo
-	defer func() {
-		recordCompletedAttemptUsage(acc, model, finalUsage, requestDiagnostic)
-	}()
 	var nativeToolUses []AgentValueEntry
 	var thinkingBlocks []ThinkingBlock
 	var knownCitationURLs []string
 	var knownCitationDocs []CitationCandidate
 	knownToolCallURLs := make(map[string][]string)
+	defer func() { recordCompletedAttemptUsage(acc, model, finalUsage, requestDiagnostic) }()
 
-	disableBuiltin := AppConfig.Proxy.DisableNotionPrompt
+	headersSent := false
+	thinkingOpen := false
+	textOpen := false
+	blockIndex := 0
+	toolStream := newIncrementalToolStream(toolChoiceMode)
+	requiresToolCall := toolChoiceMode == "required" || strings.HasPrefix(toolChoiceMode, "force:")
+
+	ensureHeaders := func() {
+		if headersSent {
+			return
+		}
+		headersSent = true
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		sendAnthropicSSE(w, flusher, "message_start", map[string]interface{}{
+			"type": "message_start",
+			"message": map[string]interface{}{
+				"id": requestID, "type": "message", "role": "assistant", "content": []interface{}{}, "model": model,
+				"stop_reason": nil, "stop_sequence": nil,
+				"usage": map[string]interface{}{"input_tokens": 0, "output_tokens": 0},
+			},
+		})
+		sendAnthropicSSE(w, flusher, "ping", map[string]string{"type": "ping"})
+	}
+	closeThinking := func(signature string) {
+		if !thinkingOpen {
+			return
+		}
+		if signature == "" {
+			signature = generateFakeSignature()
+		}
+		sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
+			"type": "content_block_delta", "index": blockIndex,
+			"delta": map[string]interface{}{"type": "signature_delta", "signature": signature},
+		})
+		sendAnthropicSSE(w, flusher, "content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": blockIndex})
+		blockIndex++
+		thinkingOpen = false
+	}
+	ensureText := func() {
+		ensureHeaders()
+		if thinkingOpen {
+			closeThinking("")
+		}
+		if !textOpen {
+			sendAnthropicSSE(w, flusher, "content_block_start", map[string]interface{}{
+				"type": "content_block_start", "index": blockIndex,
+				"content_block": map[string]interface{}{"type": "text", "text": ""},
+			})
+			textOpen = true
+		}
+	}
+	emitText := func(text string) {
+		if text == "" {
+			return
+		}
+		ensureText()
+		sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
+			"type": "content_block_delta", "index": blockIndex,
+			"delta": map[string]interface{}{"type": "text_delta", "text": text},
+		})
+	}
+	closeText := func() {
+		if !textOpen {
+			return
+		}
+		sendAnthropicSSE(w, flusher, "content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": blockIndex})
+		blockIndex++
+		textOpen = false
+	}
 
 	callOpts := CallOptions{
+		NativeToolUses:        &nativeToolUses,
 		ThinkingBlocks:        &thinkingBlocks,
 		HasClientTools:        hasBridgedClientTools,
 		EnableWebSearch:       enableWebSearch,
@@ -1898,283 +1717,158 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 		KnownCitationURLs:     &knownCitationURLs,
 		KnownCitationDocs:     &knownCitationDocs,
 		KnownToolCallURLs:     &knownToolCallURLs,
-		Session:               session,
-		ContextBaseline:       contextBaseline,
-		ContextRepeat:         contextRepeat,
 		RequestID:             requestID,
 		RequestDiagnostic:     requestDiagnostic,
 	}
-
-	if !hasTools {
-		return streamAnthropicTextResponse(w, acc, messages, model, requestID, hasThinking, disableBuiltin, outputConfig, callOpts)
+	if hasThinking {
+		callOpts.ThinkingCallback = func(delta string, done bool, signature string) {
+			if delta != "" {
+				thinkingForLog.WriteString(delta)
+			}
+			// Keep required/forced responses retryable until a valid tool call has
+			// been parsed. Auto mode continues to stream thinking immediately.
+			if requiresToolCall {
+				return
+			}
+			if done {
+				closeThinking(signature)
+				return
+			}
+			if delta == "" {
+				return
+			}
+			ensureHeaders()
+			if !thinkingOpen {
+				sendAnthropicSSE(w, flusher, "content_block_start", map[string]interface{}{
+					"type": "content_block_start", "index": blockIndex,
+					"content_block": map[string]interface{}{"type": "thinking", "thinking": ""},
+				})
+				thinkingOpen = true
+			}
+			sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				"type": "content_block_delta", "index": blockIndex,
+				"delta": map[string]interface{}{"type": "thinking_delta", "thinking": delta},
+			})
+		}
 	}
 
-	callOpts.NativeToolUses = &nativeToolUses
-	// Format-based injection: tools embedded in user messages, use normal chat path
-	cbErr := CallInference(acc, messages, model, disableBuiltin, func(delta string, done bool, usage *UsageInfo) {
+	cbErr := CallInference(acc, messages, model, AppConfig.Proxy.DisableNotionPrompt, func(delta string, done bool, usage *UsageInfo) {
 		if delta != "" {
 			fullContent.WriteString(delta)
+			emitText(toolStream.Push(delta))
 		}
 		if usage != nil {
 			finalUsage = usage
 		}
 	}, callOpts)
-
-	if cbErr != nil {
-		if errors.Is(cbErr, ErrQuotaExhausted) {
-			return cbErr
-		}
-		log.Printf("[err] %s: %v", requestID, cbErr)
+	if cbErr != nil && !headersSent {
 		return cbErr
 	}
-
-	contentStr := fullContent.String()
-	log.Printf("[debug] %s: fullContent=%d bytes, hasTools=%v", requestID, len(contentStr), hasTools)
-	if len(contentStr) > 0 {
-		contentHead := truncateForLog(contentStr, 200)
-		log.Printf("[debug] %s HEAD: %s", requestID, contentHead)
+	if cbErr != nil {
+		log.Printf("[err] %s: tool stream ended after partial output: %v", requestID, cbErr)
 	}
 
-	// Empty response: Notion returned 200 but produced no text — retry on next account
-	if len(contentStr) == 0 && len(nativeToolUses) == 0 {
-		log.Printf("[warn] %s: empty response from Notion, will retry", requestID)
+	content := fullContent.String()
+	if content == "" && len(nativeToolUses) == 0 && thinkingForLog.Len() == 0 {
 		return ErrEmptyResponse
 	}
+	emitText(toolStream.FlushText())
+	streamMode := toolStream.mode
+	if thinkingOpen {
+		closeThinking("")
+	}
 
-	var prepared preparedToolBridgeResponse
-	if hasTools {
-		prepared = prepareToolBridgeResponse(contentStr, nativeToolUses, allowedToolNames, toolAliasToOriginal)
-		if requestDiagnostic != nil {
-			requestDiagnostic.SetToolBridge(prepared.Protocol)
+	prepared := prepareToolBridgeResponse(content, nativeToolUses, allowedToolNames, toolAliasToOriginal)
+	if requestDiagnostic != nil {
+		requestDiagnostic.SetToolBridge(prepared.Protocol)
+	}
+	actionDetected := prepared.HasCalls || prepared.WebSearchQuery != "" || prepared.DoneText != ""
+	if requiresToolCall && !prepared.HasCalls && prepared.WebSearchQuery == "" {
+		return ErrToolBridgeNoTool
+	}
+	if !actionDetected && streamMode == "protocol" {
+		emitText(prepared.Remaining)
+	}
+	if streamMode == "protocol" && prepared.DoneText != "" {
+		emitText(prepared.DoneText)
+	}
+	closeText()
+
+	if requiresToolCall && thinkingForLog.Len() > 0 {
+		ensureHeaders()
+		sendAnthropicSSE(w, flusher, "content_block_start", map[string]interface{}{
+			"type": "content_block_start", "index": blockIndex,
+			"content_block": map[string]interface{}{"type": "thinking", "thinking": ""},
+		})
+		thinkingOpen = true
+		sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
+			"type": "content_block_delta", "index": blockIndex,
+			"delta": map[string]interface{}{"type": "thinking_delta", "thinking": thinkingForLog.String()},
+		})
+		signature := ""
+		if len(thinkingBlocks) > 0 {
+			signature = thinkingBlocks[len(thinkingBlocks)-1].Signature
 		}
-		if prepared.DoneText != "" && detectToolBridgeNoToolResponse(prepared.DoneText) {
-			log.Printf("[bridge] %s received a no-tool refusal inside __done__, requesting clean retry", requestID)
-			return ErrToolBridgeNoTool
+		closeThinking(signature)
+	}
+
+	if prepared.WebSearchQuery != "" {
+		ensureHeaders()
+		searchUsage, searchErr := streamWebSearch(w, flusher, acc, prepared.WebSearchQuery, model, requestID, &blockIndex, hasThinking)
+		if searchErr != nil {
+			log.Printf("[bridge] WebSearch streaming failed: %v", searchErr)
 		}
-		actionDetected := prepared.HasCalls || prepared.WebSearchQuery != "" || prepared.DoneText != ""
-		if !actionDetected && prepared.InvalidDone {
-			log.Printf("[bridge] %s received __done__ without a result, requesting clean retry", requestID)
-			return ErrToolBridgeNoTool
-		}
-		if !actionDetected && prepared.DroppedCalls > 0 && strings.TrimSpace(prepared.Remaining) == "" {
-			log.Printf("[bridge] %s received only undeclared internal tools, requesting clean retry", requestID)
-			return ErrToolBridgeNoTool
-		}
-		if detectToolBridgeNoToolResponse(prepared.Remaining) {
-			log.Printf("[bridge] %s detected no-tool identity-drift text (%d chars), requesting clean retry", requestID, len(prepared.Remaining))
-			return ErrToolBridgeNoTool
+		if searchUsage != nil && finalUsage != nil {
+			finalUsage.PromptTokens += searchUsage.PromptTokens
+			finalUsage.CompletionTokens += searchUsage.CompletionTokens
+			finalUsage.TotalTokens = finalUsage.PromptTokens + finalUsage.CompletionTokens
 		}
 	}
 
-	// Build usage
-	aUsage := &AnthropicUsage{}
+	for _, call := range prepared.ToolCalls {
+		ensureHeaders()
+		sendAnthropicSSE(w, flusher, "content_block_start", map[string]interface{}{
+			"type": "content_block_start", "index": blockIndex,
+			"content_block": map[string]interface{}{
+				"type": "tool_use", "id": call.ID, "name": call.Function.Name, "input": map[string]interface{}{},
+			},
+		})
+		sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
+			"type": "content_block_delta", "index": blockIndex,
+			"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": call.Function.Arguments},
+		})
+		sendAnthropicSSE(w, flusher, "content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": blockIndex})
+		blockIndex++
+	}
+
+	stopReason := "end_turn"
+	if prepared.HasCalls {
+		stopReason = "tool_use"
+	}
+	inputTokens, outputTokens := 0, 0
 	if finalUsage != nil {
-		aUsage.InputTokens = contextInputTokens(session, finalUsage.PromptTokens, contextBaseline, contextRepeat, requestDiagnostic)
-		aUsage.OutputTokens = finalUsage.CompletionTokens
+		inputTokens = reportedInputTokens(finalUsage.PromptTokens, requestDiagnostic)
+		outputTokens = finalUsage.CompletionTokens
 	}
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeAnthropicError(w, requestID, http.StatusInternalServerError, "streaming not supported", "api_error")
-		return nil
+	ensureHeaders()
+	if requestDiagnostic != nil {
+		if prepared.HasCalls {
+			requestDiagnostic.SetFinishReason("tool_calls")
+		} else {
+			requestDiagnostic.SetFinishReason("stop")
+		}
 	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-
-	// message_start
-	sendAnthropicSSE(w, flusher, "message_start", map[string]interface{}{
-		"type": "message_start",
-		"message": map[string]interface{}{
-			"id":            requestID,
-			"type":          "message",
-			"role":          "assistant",
-			"content":       []interface{}{},
-			"model":         model,
-			"stop_reason":   nil,
-			"stop_sequence": nil,
-			"usage":         map[string]interface{}{"input_tokens": aUsage.InputTokens, "output_tokens": 0},
-		},
+	sendAnthropicSSE(w, flusher, "message_delta", map[string]interface{}{
+		"type": "message_delta", "delta": map[string]interface{}{"stop_reason": stopReason, "stop_sequence": nil},
+		"usage": map[string]interface{}{"input_tokens": inputTokens, "output_tokens": outputTokens},
 	})
-
-	// ping
-	sendAnthropicSSE(w, flusher, "ping", map[string]string{"type": "ping"})
-
-	// Emit thinking blocks from Notion (real thinking from Sonnet 4.6 etc.)
-	blockIndex := 0
-	loggedContentBlocks := make([]AnthropicContentBlock, 0, len(thinkingBlocks)+4)
-	if hasThinking && len(thinkingBlocks) > 0 {
-		log.Printf("[thinking] emitting %d thinking block(s)", len(thinkingBlocks))
-		for _, tb := range thinkingBlocks {
-			sendAnthropicSSE(w, flusher, "content_block_start", map[string]interface{}{
-				"type":          "content_block_start",
-				"index":         blockIndex,
-				"content_block": map[string]interface{}{"type": "thinking", "thinking": ""},
-			})
-			sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
-				"type":  "content_block_delta",
-				"index": blockIndex,
-				"delta": map[string]interface{}{"type": "thinking_delta", "thinking": tb.Content},
-			})
-			sig := tb.Signature
-			if sig == "" {
-				sig = generateFakeSignature()
-			}
-			sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
-				"type":  "content_block_delta",
-				"index": blockIndex,
-				"delta": map[string]interface{}{"type": "signature_delta", "signature": sig},
-			})
-			sendAnthropicSSE(w, flusher, "content_block_stop", map[string]interface{}{
-				"type": "content_block_stop", "index": blockIndex,
-			})
-			loggedContentBlocks = append(loggedContentBlocks, AnthropicContentBlock{
-				Type:      "thinking",
-				Thinking:  tb.Content,
-				Signature: sig,
-			})
-			blockIndex++
-		}
-	}
-
-	if hasTools {
-		toolCalls := prepared.ToolCalls
-		remaining := prepared.Remaining
-		hasCalls := prepared.HasCalls
-		doneText := prepared.DoneText
-		webSearchQuery := prepared.WebSearchQuery
-
-		// When any tool action is detected (tool calls, __done__, or WebSearch),
-		// remaining is usually framing residue or Notion-identity leakage.
-		// Real thinking blocks are already captured separately, so suppress this
-		// text instead of echoing it back to Claude Code.
-		if remaining != "" && (hasCalls || webSearchQuery != "" || doneText != "") {
-			log.Printf("[bridge] suppressed %d chars of residual tool framing text", len(remaining))
-			remaining = ""
-		} else if remaining != "" {
-			// No thinking requested or no tool calls — send remaining as plain text
-			sendAnthropicSSE(w, flusher, "content_block_start", map[string]interface{}{
-				"type":          "content_block_start",
-				"index":         blockIndex,
-				"content_block": map[string]interface{}{"type": "text", "text": ""},
-			})
-			sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
-				"type":  "content_block_delta",
-				"index": blockIndex,
-				"delta": map[string]interface{}{"type": "text_delta", "text": remaining},
-			})
-			sendAnthropicSSE(w, flusher, "content_block_stop", map[string]interface{}{
-				"type": "content_block_stop", "index": blockIndex,
-			})
-			loggedContentBlocks = append(loggedContentBlocks, AnthropicContentBlock{Type: "text", Text: remaining})
-			blockIndex++
-		}
-
-		// Send __done__ result as text block
-		if doneText != "" {
-			sendAnthropicSSE(w, flusher, "content_block_start", map[string]interface{}{
-				"type":          "content_block_start",
-				"index":         blockIndex,
-				"content_block": map[string]interface{}{"type": "text", "text": ""},
-			})
-			sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
-				"type":  "content_block_delta",
-				"index": blockIndex,
-				"delta": map[string]interface{}{"type": "text_delta", "text": doneText},
-			})
-			sendAnthropicSSE(w, flusher, "content_block_stop", map[string]interface{}{
-				"type": "content_block_stop", "index": blockIndex,
-			})
-			loggedContentBlocks = append(loggedContentBlocks, AnthropicContentBlock{Type: "text", Text: doneText})
-			blockIndex++
-		}
-
-		// Stream WebSearch results in real-time (after text blocks, before tool_use)
-		if webSearchQuery != "" {
-			log.Printf("[bridge] WebSearch intercepted — streaming via Notion native search: %q", webSearchQuery)
-			searchUsage, searchErr := streamWebSearch(w, flusher, acc, webSearchQuery, model, requestID, &blockIndex, hasThinking)
-			if searchErr != nil {
-				log.Printf("[bridge] WebSearch streaming failed: %v", searchErr)
-			}
-			if searchUsage != nil && finalUsage != nil {
-				finalUsage.PromptTokens += searchUsage.PromptTokens
-				finalUsage.CompletionTokens += searchUsage.CompletionTokens
-				finalUsage.TotalTokens = finalUsage.PromptTokens + finalUsage.CompletionTokens
-			}
-		}
-		if finalUsage != nil {
-			aUsage.OutputTokens = finalUsage.CompletionTokens
-		}
-
-		// Send tool_use blocks
-		if hasCalls {
-			for _, tc := range toolCalls {
-				sendAnthropicSSE(w, flusher, "content_block_start", map[string]interface{}{
-					"type":  "content_block_start",
-					"index": blockIndex,
-					"content_block": map[string]interface{}{
-						"type":  "tool_use",
-						"id":    tc.ID,
-						"name":  tc.Function.Name,
-						"input": map[string]interface{}{},
-					},
-				})
-				sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
-					"type":  "content_block_delta",
-					"index": blockIndex,
-					"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": tc.Function.Arguments},
-				})
-				sendAnthropicSSE(w, flusher, "content_block_stop", map[string]interface{}{
-					"type": "content_block_stop", "index": blockIndex,
-				})
-				loggedContentBlocks = append(loggedContentBlocks, AnthropicContentBlock{
-					Type:  "tool_use",
-					ID:    tc.ID,
-					Name:  tc.Function.Name,
-					Input: json.RawMessage(tc.Function.Arguments),
-				})
-				blockIndex++
-			}
-		}
-
-		stopReason := "end_turn"
-		if hasCalls {
-			stopReason = "tool_use"
-		}
-		if requestDiagnostic != nil {
-			if hasCalls {
-				requestDiagnostic.SetFinishReason("tool_calls")
-			} else {
-				requestDiagnostic.SetFinishReason("stop")
-			}
-		}
-		sendAnthropicSSE(w, flusher, "message_delta", map[string]interface{}{
-			"type":  "message_delta",
-			"delta": map[string]interface{}{"stop_reason": stopReason, "stop_sequence": nil},
-			"usage": map[string]interface{}{"output_tokens": aUsage.OutputTokens},
-		})
-		LogAPIOutputJSON(requestID, "anthropic stream tool response summary", AnthropicResponse{
-			ID:         requestID,
-			Type:       "message",
-			Role:       "assistant",
-			Content:    loggedContentBlocks,
-			Model:      model,
-			StopReason: strPtr(stopReason),
-			Usage:      aUsage,
-		})
-	}
-
-	// message_stop
 	sendAnthropicSSE(w, flusher, "message_stop", map[string]string{"type": "message_stop"})
-
+	log.Printf("[bridge] %s streamed mode=%s text=%d tool_calls=%d", requestID, streamMode, len(content), len(prepared.ToolCalls))
 	return nil
 }
 
 // handleAnthropicNonStream handles non-streaming Anthropic response
-func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, contextBaseline, contextRepeat bool, requestDiagnostic *RequestDiagnostic) error {
+func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, toolChoiceMode string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, requestDiagnostic *RequestDiagnostic) error {
 	var fullContent strings.Builder
 	var finalUsage *UsageInfo
 	defer func() {
@@ -2198,9 +1892,6 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 		KnownCitationURLs:     &knownCitationURLs,
 		KnownCitationDocs:     &knownCitationDocs,
 		KnownToolCallURLs:     &knownToolCallURLs,
-		Session:               session,
-		ContextBaseline:       contextBaseline,
-		ContextRepeat:         contextRepeat,
 		RequestID:             requestID,
 		RequestDiagnostic:     requestDiagnostic,
 	}
@@ -2260,27 +1951,16 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 		if requestDiagnostic != nil {
 			requestDiagnostic.SetToolBridge(prepared.Protocol)
 		}
-		if prepared.DoneText != "" && detectToolBridgeNoToolResponse(prepared.DoneText) {
-			log.Printf("[bridge] %s received a no-tool refusal inside __done__, requesting clean retry", requestID)
-			return ErrToolBridgeNoTool
-		}
-		if !prepared.HasCalls && prepared.WebSearchQuery == "" && prepared.DoneText == "" && prepared.InvalidDone {
-			log.Printf("[bridge] %s received __done__ without a result, requesting clean retry", requestID)
-			return ErrToolBridgeNoTool
-		}
-		if !prepared.HasCalls && prepared.WebSearchQuery == "" && prepared.DoneText == "" && prepared.DroppedCalls > 0 && strings.TrimSpace(prepared.Remaining) == "" {
-			log.Printf("[bridge] %s received only undeclared internal tools, requesting clean retry", requestID)
-			return ErrToolBridgeNoTool
-		}
-		if detectToolBridgeNoToolResponse(prepared.Remaining) {
-			log.Printf("[bridge] %s detected no-tool identity-drift text (%d chars), requesting clean retry", requestID, len(prepared.Remaining))
+		requiresCall := toolChoiceMode == "required" || strings.HasPrefix(toolChoiceMode, "force:")
+		if requiresCall && !prepared.HasCalls && prepared.WebSearchQuery == "" {
+			log.Printf("[bridge] %s required a client tool call but received plain text", requestID)
 			return ErrToolBridgeNoTool
 		}
 	}
 
 	aUsage := &AnthropicUsage{}
 	if finalUsage != nil {
-		aUsage.InputTokens = contextInputTokens(session, finalUsage.PromptTokens, contextBaseline, contextRepeat, requestDiagnostic)
+		aUsage.InputTokens = reportedInputTokens(finalUsage.PromptTokens, requestDiagnostic)
 		aUsage.OutputTokens = finalUsage.CompletionTokens
 	}
 
@@ -2857,15 +2537,14 @@ func recordCompletedAttemptUsage(acc *Account, model string, usage *UsageInfo, r
 	}
 }
 
-func contextInputTokens(session *Session, actual int, baseline, repeat bool, requestDiagnostic *RequestDiagnostic) int {
-	contextTokens := actual
-	if session != nil {
-		contextTokens = session.ApplyContextInputTokens(actual, baseline, repeat)
+func reportedInputTokens(actual int, requestDiagnostic *RequestDiagnostic) int {
+	if actual < 0 {
+		actual = 0
 	}
 	if requestDiagnostic != nil {
-		requestDiagnostic.SetContextTokens(contextTokens)
+		requestDiagnostic.SetContextTokens(actual)
 	}
-	return contextTokens
+	return actual
 }
 
 func writeAnthropicError(w http.ResponseWriter, requestID string, status int, message, errType string) {

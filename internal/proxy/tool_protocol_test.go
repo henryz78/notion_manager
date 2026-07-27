@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -172,7 +171,7 @@ func TestCrossAccountToolReplayKeepsHistoryOnFreshThread(t *testing.T) {
 	}
 	tools[0].Function.Name = "Read"
 
-	replayed := injectToolsIntoMessages(cloneChatMessages(history), tools, "claude-opus-4.6", nil)
+	replayed := injectToolsIntoMessages(cloneChatMessages(history), tools)
 	if len(replayed) != len(history)+1 {
 		t.Fatalf("fresh account replay has %d messages, want %d", len(replayed), len(history)+1)
 	}
@@ -220,7 +219,7 @@ func TestFreshThreadToolReplayAddsReadOnlyHistoryRuleWithoutDroppingContent(t *t
 			}
 			tools[0].Function.Name = "Read"
 
-			got := injectToolsIntoMessages(cloneChatMessages(messages), tools, "gpt-5.6-sol", nil)
+			got := injectToolsIntoMessages(cloneChatMessages(messages), tools)
 			if len(got) != len(messages) {
 				t.Fatalf("message count = %d, want %d", len(got), len(messages))
 			}
@@ -237,42 +236,5 @@ func TestFreshThreadToolReplayAddsReadOnlyHistoryRuleWithoutDroppingContent(t *t
 				}
 			}
 		})
-	}
-}
-
-func TestSessionContextInputTokens(t *testing.T) {
-	session := &Session{}
-	if got := session.ApplyContextInputTokens(98_200, true, false); got != 98_200 {
-		t.Fatalf("initial baseline = %d, want 98200", got)
-	}
-	if got := session.ApplyContextInputTokens(6_600, false, false); got != 104_800 {
-		t.Fatalf("continuation context = %d, want 104800", got)
-	}
-	if got := session.ApplyContextInputTokens(6_600, false, true); got != 104_800 {
-		t.Fatalf("repeat grew context to %d", got)
-	}
-
-	// Account failover starts a fresh Notion thread whose full replay usage is
-	// the new baseline, rather than adding the old account's counter again.
-	failover := &Session{}
-	if got := failover.ApplyContextInputTokens(109_591, true, false); got != 109_591 {
-		t.Fatalf("failover baseline = %d, want 109591", got)
-	}
-}
-
-func TestSessionContextInputTokensConcurrent(t *testing.T) {
-	session := &Session{}
-	session.ApplyContextInputTokens(100, true, false)
-	var wg sync.WaitGroup
-	for i := 0; i < 100; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			session.ApplyContextInputTokens(1, false, false)
-		}()
-	}
-	wg.Wait()
-	if got := session.ApplyContextInputTokens(0, false, true); got != 200 {
-		t.Fatalf("concurrent context total = %d, want 200", got)
 	}
 }

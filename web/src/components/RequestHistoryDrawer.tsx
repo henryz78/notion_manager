@@ -359,8 +359,7 @@ function RequestRow({
           {entry.tool_count > 0 ? String(entry.tool_count) : t('request_history.none')}
         </div>
         <div className="text-[10px] text-text-secondary tabular-nums leading-5">
-          <div>{t('request_history.context')} {formatCompactNumber(entry.context_tokens || entry.input_tokens)}</div>
-          <div>{t('request_history.current_input')} {formatCompactNumber(entry.input_tokens)}</div>
+          <div>{t('request_history.upstream_input')} {formatCompactNumber(entry.context_tokens)}</div>
           <div>{t('request_history.output')} {formatCompactNumber(entry.output_tokens)}</div>
         </div>
         <div className="text-[11px] text-text-secondary tabular-nums leading-5">{formatDuration(entry.duration_ms)}</div>
@@ -376,13 +375,7 @@ function RequestRow({
           <DiagnosticItem label={t('request_history.tool_choice')} value={formatDiagnosticValue(entry.tool_choice)} />
           <DiagnosticItem label={t('request_history.tool_bridge')} value={formatDiagnosticValue(entry.tool_bridge)} />
           <DiagnosticItem label={t('request_history.finish_reason')} value={formatDiagnosticValue(entry.finish_reason)} />
-          <DiagnosticItem
-            label={t('request_history.session')}
-            value={entry.session_id
-              ? `${entry.session_id} · ${formatDiagnosticValue(entry.session_state)}${entry.session_turn ? ` · ${t('request_history.turn', { count: entry.session_turn })}` : ''}`
-              : formatDiagnosticValue(entry.session_state)}
-            mono
-          />
+          <DiagnosticItem label={t('request_history.context_mode')} value={formatDiagnosticValue(entry.context_mode)} mono />
         </div>
         {(entry.attempt_details?.length ?? 0) > 0 && (
           <div className="mt-2 border-t border-white/[.05] pt-2">

@@ -59,9 +59,7 @@ type RequestHistoryEntry struct {
 	ToolChoice       string           `json:"tool_choice,omitempty"`
 	ToolBridge       string           `json:"tool_bridge,omitempty"`
 	FinishReason     string           `json:"finish_reason,omitempty"`
-	SessionID        string           `json:"session_id,omitempty"`
-	SessionState     string           `json:"session_state,omitempty"`
-	SessionTurn      int              `json:"session_turn,omitempty"`
+	ContextMode      string           `json:"context_mode,omitempty"`
 	InputTokens      int              `json:"input_tokens"`
 	ContextTokens    int              `json:"context_tokens"`
 	OutputTokens     int              `json:"output_tokens"`
@@ -140,9 +138,6 @@ func (s *RequestHistoryStore) Record(entry RequestHistoryEntry) {
 	}
 	if entry.Attempts < 0 {
 		entry.Attempts = 0
-	}
-	if entry.SessionTurn < 0 {
-		entry.SessionTurn = 0
 	}
 
 	s.mu.Lock()
@@ -260,8 +255,7 @@ func requestHistoryEntryMatches(entry RequestHistoryEntry, search string) bool {
 		entry.ToolChoice,
 		entry.ToolBridge,
 		entry.FinishReason,
-		entry.SessionID,
-		entry.SessionState,
+		entry.ContextMode,
 	}
 	for _, field := range fields {
 		if strings.Contains(strings.ToLower(field), search) {
@@ -529,30 +523,12 @@ func (d *RequestDiagnostic) SetFinishReason(reason string) {
 	d.mu.Unlock()
 }
 
-func (d *RequestDiagnostic) SetSession(fingerprint, state string, turn int) {
-	if d == nil {
-		return
-	}
-	fingerprint = strings.TrimSpace(fingerprint)
-	if len(fingerprint) > 12 {
-		fingerprint = fingerprint[:12]
-	}
-	if turn < 0 {
-		turn = 0
-	}
-	d.mu.Lock()
-	d.entry.SessionID = fingerprint
-	d.entry.SessionState = strings.TrimSpace(state)
-	d.entry.SessionTurn = turn
-	d.mu.Unlock()
-}
-
-func (d *RequestDiagnostic) SetSessionState(state string) {
+func (d *RequestDiagnostic) SetContextMode(mode string) {
 	if d == nil {
 		return
 	}
 	d.mu.Lock()
-	d.entry.SessionState = strings.TrimSpace(state)
+	d.entry.ContextMode = strings.TrimSpace(mode)
 	d.mu.Unlock()
 }
 

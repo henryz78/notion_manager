@@ -234,9 +234,7 @@ export interface RequestHistoryEntry {
   tool_choice?: string
   tool_bridge?: string
   finish_reason?: string
-  session_id?: string
-  session_state?: string
-  session_turn?: number
+  context_mode?: string
   input_tokens: number
   context_tokens: number
   output_tokens: number

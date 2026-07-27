@@ -352,7 +352,6 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 
 			changed := false
 			rebuildTransport := false
-			clearSessions := false
 			if body.EnableWebSearch != nil {
 				AppConfig.Proxy.EnableWebSearch = body.EnableWebSearch
 				changed = true
@@ -372,7 +371,6 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				if AppConfig.Proxy.UseClientSystemPrompt != *body.UseClientSystemPrompt {
 					AppConfig.Proxy.UseClientSystemPrompt = *body.UseClientSystemPrompt
 					changed = true
-					clearSessions = true
 					log.Printf("[settings] use_client_system_prompt → %v", *body.UseClientSystemPrompt)
 				}
 			}
@@ -380,7 +378,6 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				if AppConfig.Proxy.UseNotionPersonalInstructions != *body.UseNotionPersonalInstructions {
 					AppConfig.Proxy.UseNotionPersonalInstructions = *body.UseNotionPersonalInstructions
 					changed = true
-					clearSessions = true
 					log.Printf("[settings] use_notion_personal_instructions → %v", *body.UseNotionPersonalInstructions)
 				}
 			}
@@ -388,7 +385,6 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				if AppConfig.Proxy.EnableToolBridge != *body.EnableToolBridge {
 					AppConfig.Proxy.EnableToolBridge = *body.EnableToolBridge
 					changed = true
-					clearSessions = true
 					log.Printf("[settings] enable_tool_bridge → %v", *body.EnableToolBridge)
 				}
 			}
@@ -432,10 +428,6 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 			if rebuildTransport {
 				RebuildChromeTransport()
 			}
-			if clearSessions {
-				globalSessionManager.Clear()
-			}
-
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"enable_web_search":                AppConfig.WebSearchEnabled(),
 				"enable_workspace_search":          AppConfig.WorkspaceSearchEnabled(),

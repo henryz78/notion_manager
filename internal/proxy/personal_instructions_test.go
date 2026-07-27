@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestNotionPersonalInstructionsConfigDefaultsAndEnv(t *testing.T) {
@@ -102,10 +101,6 @@ func TestAdminSettingsReadsUpdatesAndPersistsPersonalInstructions(t *testing.T) 
 	AppConfig = DefaultConfig()
 	t.Cleanup(func() { AppConfig = previous })
 
-	globalSessionManager.Clear()
-	globalSessionManager.Set("existing", &Session{LastUsedAt: time.Now()})
-	t.Cleanup(globalSessionManager.Clear)
-
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte("proxy:\n  enable_web_search: true\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -133,10 +128,6 @@ func TestAdminSettingsReadsUpdatesAndPersistsPersonalInstructions(t *testing.T) 
 	if AppConfig.ClientSystemPromptEnabled() || AppConfig.ToolBridgeEnabled() {
 		t.Fatal("independent prompt/tool settings were not updated")
 	}
-	if globalSessionManager.Count() != 0 {
-		t.Fatal("prompt-mode change must clear existing Notion thread sessions")
-	}
-
 	persisted, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("read persisted config: %v", err)
@@ -327,8 +318,6 @@ func TestPersonalInstructionsModePreservesInjectedToolBridge(t *testing.T) {
 				Parameters: map[string]interface{}{"type": "object"},
 			},
 		}},
-		"claude-opus-4-6",
-		nil,
 	)
 
 	transcript := buildFullTranscript(
@@ -489,29 +478,6 @@ func TestToolBridgeSettingControlsExternalToolHandling(t *testing.T) {
 	AppConfig.Proxy.EnableToolBridge = true
 	if toolBridgeActive(true, 1) || toolBridgeActive(false, 0) {
 		t.Fatal("researcher requests and requests without tools should skip the bridge")
-	}
-}
-
-func TestBuildPartialTranscriptUsesCurrentAccountsPageID(t *testing.T) {
-	previous := AppConfig
-	AppConfig = DefaultConfig()
-	t.Cleanup(func() { AppConfig = previous })
-
-	session := &Session{
-		ConfigID:         "config-id",
-		ContextID:        "context-id",
-		OriginalDatetime: "2026-07-13T00:00:00Z",
-	}
-	accA := &Account{UserID: "user-a", SpaceID: "space-a"}
-	accB := &Account{UserID: "user-b", SpaceID: "space-b"}
-
-	getPageID := func(transcript []interface{}) interface{} {
-		return transcript[1].(ResearcherTranscriptMsg).Value.(map[string]interface{})["context_page_id"]
-	}
-	a := buildPartialTranscript(accA, "hello", "model", false, true, nil, false, session, "page-a")
-	b := buildPartialTranscript(accB, "hello", "model", false, true, nil, false, session, "page-b")
-	if getPageID(a) != "page-a" || getPageID(b) != "page-b" {
-		t.Fatalf("account-specific page IDs were mixed: A=%v B=%v", getPageID(a), getPageID(b))
 	}
 }
 

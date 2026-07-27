@@ -165,7 +165,6 @@ func handleBackupRestore(w http.ResponseWriter, r *http.Request, pool *AccountPo
 	}
 
 	applyDashboardBackupSettings(*backup.Settings)
-	globalSessionManager.Clear()
 	log.Printf("[backup] restored %d account(s) and dashboard settings", len(restoredAccounts))
 
 	w.Header().Set("Content-Type", "application/json")

@@ -7,62 +7,6 @@ import (
 	"testing"
 )
 
-func TestExtractAnthropicSessionSalt(t *testing.T) {
-	metadata := map[string]interface{}{
-		"user_id": `{"device_id":"dev-1","session_id":"sess-123","account_uuid":""}`,
-	}
-
-	if got := extractAnthropicSessionSalt(metadata); got != "sess-123" {
-		t.Fatalf("extractAnthropicSessionSalt() = %q, want %q", got, "sess-123")
-	}
-}
-
-func TestExtractAnthropicSessionSaltSupportsDirectConversationIDs(t *testing.T) {
-	if got := extractAnthropicSessionSalt(map[string]interface{}{"session_id": " sess-direct "}); got != "sess-direct" {
-		t.Fatalf("direct session_id = %q, want %q", got, "sess-direct")
-	}
-	if got := extractAnthropicSessionSalt(map[string]interface{}{"conversation_id": "conv-456"}); got != "conv-456" {
-		t.Fatalf("direct conversation_id = %q, want %q", got, "conv-456")
-	}
-	if got := extractAnthropicSessionSalt(map[string]interface{}{"user_id": "user-constant"}); got != "" {
-		t.Fatalf("plain user_id must not be used as a conversation id, got %q", got)
-	}
-}
-
-func TestAmbiguousSingleTurnStartsFreshWithoutConversationID(t *testing.T) {
-	session := &Session{RawMessageCount: 1}
-	if !shouldStartFreshForAmbiguousSingleTurn(session, 1, "") {
-		t.Fatal("same one-message fingerprint without a conversation id should start fresh")
-	}
-	if shouldStartFreshForAmbiguousSingleTurn(session, 1, "conversation-a") {
-		t.Fatal("stable conversation id should keep the matching Notion thread")
-	}
-	if shouldStartFreshForAmbiguousSingleTurn(&Session{RawMessageCount: 3}, 3, "") {
-		t.Fatal("multi-turn history should keep its existing Notion thread")
-	}
-}
-
-func TestComputeSessionFingerprintWithSalt_IgnoresBillingHeaderDrift(t *testing.T) {
-	turn1 := []ChatMessage{
-		{Role: "system", Content: "x-anthropic-billing-header: cc_version=2.1.81.a; cch=aaaa;\nYou are Claude Code, Anthropic's official CLI for Claude.\nSystem body"},
-		{Role: "user", Content: "<available-deferred-tools>\nGrep\nRead\n</available-deferred-tools>"},
-	}
-	turn2 := []ChatMessage{
-		{Role: "system", Content: "x-anthropic-billing-header: cc_version=2.1.81.b; cch=bbbb;\nYou are Claude Code, Anthropic's official CLI for Claude.\nSystem body"},
-		{Role: "user", Content: "<available-deferred-tools>\nGrep\nRead\n</available-deferred-tools>"},
-		{Role: "assistant", Content: "", ToolCalls: []ToolCall{
-			{ID: "call_1", Type: "function", Function: ToolCallFunction{Name: "Grep", Arguments: `{"pattern":"copy"}`}},
-		}},
-		{Role: "tool", ToolCallID: "call_1", Name: "Grep", Content: "Found 1 file\nsrc/content.js"},
-	}
-
-	fp1 := computeSessionFingerprintWithSalt(turn1, "sess-123")
-	fp2 := computeSessionFingerprintWithSalt(turn2, "sess-123")
-	if fp1 != fp2 {
-		t.Fatalf("fingerprint drifted across billing-header changes: %s vs %s", fp1, fp2)
-	}
-}
-
 func TestApplyStructuredOutputBridge_JSONSchema(t *testing.T) {
 	messages := []ChatMessage{
 		{Role: "system", Content: "x-anthropic-billing-header: cc_version=2.1.81; cch=aaaa;"},
@@ -118,15 +62,18 @@ func TestInjectToolsIntoMessages_PreservesWrapperAndSystemMessages(t *testing.T)
 		{Role: "user", Content: "修复登录校验"},
 	}
 
-	got := injectToolsIntoMessages(messages, tools, "claude-opus-4-6", nil)
+	got := injectToolsIntoMessages(messages, tools)
 	if len(got) != len(messages) {
 		t.Fatalf("expected %d preserved messages, got %d", len(messages), len(got))
 	}
 	if got[0].Content != messages[0].Content || got[1].Content != messages[1].Content {
 		t.Fatalf("system or wrapper message was altered: %#v", got)
 	}
-	if !strings.Contains(got[2].Content, `TEST INPUT: "修复登录校验"`) {
+	if !strings.Contains(got[2].Content, `REQUEST: "修复登录校验"`) {
 		t.Fatalf("expected actual user query in bridged content, got %q", got[2].Content)
+	}
+	if strings.Contains(got[2].Content, "__done__") || !strings.Contains(got[2].Content, "answer the request directly in natural language") {
+		t.Fatalf("auto mode still forces a done/tool response: %q", got[2].Content)
 	}
 }
 
@@ -148,7 +95,7 @@ func TestInjectToolsIntoMessages_AllModelFamiliesReceiveToolSchema(t *testing.T)
 
 	for _, model := range []string{"claude-opus-5", "gpt-5.6-sol", "gemini-3.1-pro", "grok-4.5", "deepseek-v4-pro"} {
 		t.Run(model, func(t *testing.T) {
-			got := injectToolsIntoMessages([]ChatMessage{{Role: "user", Content: "read alpha"}}, tools, model, nil)
+			got := injectToolsIntoMessages([]ChatMessage{{Role: "user", Content: "read alpha"}}, tools)
 			if len(got) != 1 || !strings.Contains(got[0].Content, "get_test_value") || !strings.Contains(got[0].Content, `"required":["key"]`) {
 				t.Fatalf("model %s did not receive the complete tool schema: %#v", model, got)
 			}
@@ -171,7 +118,7 @@ func TestInjectToolsIntoMessages_ForcedToolIncludesSchema(t *testing.T) {
 	choice := map[string]interface{}{"type": "tool", "name": "get_test_value"}
 
 	for _, model := range []string{"claude-opus-5", "gpt-5.6-sol", "gemini-3.1-pro"} {
-		got := injectToolsIntoMessages([]ChatMessage{{Role: "user", Content: "read alpha"}}, tools, model, nil, choice)
+		got := injectToolsIntoMessages([]ChatMessage{{Role: "user", Content: "read alpha"}}, tools, choice)
 		if len(got) != 1 || !strings.Contains(got[0].Content, `"required":["key"]`) {
 			t.Fatalf("forced tool schema missing for %s: %#v", model, got)
 		}
@@ -317,18 +264,6 @@ func TestPrepareToolBridgeResponsePreservesDeclaredDoneTool(t *testing.T) {
 	}
 }
 
-func TestPrepareToolBridgeResponseExposesDoneRefusalForRecovery(t *testing.T) {
-	prepared := prepareToolBridgeResponse(
-		`{"name":"__done__","arguments":{"result":"I don’t have access to a local project filesystem, so I can’t search project files."}}`,
-		nil,
-		map[string]struct{}{"Grep": {}},
-		nil,
-	)
-	if prepared.DoneText == "" || !detectToolBridgeNoToolResponse(prepared.DoneText) {
-		t.Fatalf("refusal inside __done__ should be visible to recovery detection: %+v", prepared)
-	}
-}
-
 func TestClientToolAliasesRoundTripToOriginalName(t *testing.T) {
 	tools := []Tool{{
 		Type: "function",
@@ -406,7 +341,7 @@ func TestLargeClientToolSetUsesAnonymousLabelsAndFullSchemasBelowLimit(t *testin
 		{Type: "function", Function: ToolFunction{Name: "Grep", Description: "Search file contents.", Parameters: params}},
 	}
 	aliased, _, _ := aliasClientTools(tools)
-	got := injectToolsIntoMessages([]ChatMessage{{Role: "user", Content: "search for needle"}}, aliased, "claude-opus-5", nil)
+	got := injectToolsIntoMessages([]ChatMessage{{Role: "user", Content: "search for needle"}}, aliased)
 	if len(got) != 1 || !strings.Contains(got[0].Content, "action_6") || strings.Contains(got[0].Content, "Grep") || !strings.Contains(got[0].Content, "Argument schema:") {
 		t.Fatalf("large tool prompt did not preserve full anonymous schemas: %#v", got)
 	}
@@ -462,45 +397,5 @@ func TestNormalizeStructuredOutputText_ExtractsJSONObjectFromPrefixedText(t *tes
 	want := "{\"title\":\"Fix invalid password\"}"
 	if got != want {
 		t.Fatalf("normalizeStructuredOutputText() = %q, want %q", got, want)
-	}
-}
-
-func TestDetectToolBridgeNoToolResponse_MatchesIdentityDriftHandOff(t *testing.T) {
-	raw := `<lang primary="zh-CN"/>
-
-抱歉，我理解你希望我直接帮你修改文件，但**我是 Notion AI，无法访问你的本地文件系统**。我没有 Read、Edit、Bash 这些工具的能力。
-
-把下面这段话直接发给你的编码助手（Cursor / Claude Code），它就能帮你操作。`
-
-	if !detectToolBridgeNoToolResponse(raw) {
-		t.Fatalf("expected no-tool identity drift text to be detected")
-	}
-}
-
-func TestDetectToolBridgeNoToolResponse_MatchesMissingProjectAccess(t *testing.T) {
-	responses := []string{
-		`I can’t comply with that classify-this-text request because these external action labels are not tools available here.`,
-		`No action needed.`,
-		`No file operation is needed here. The quoted text asks for a search, but there is no actual project file system or paths provided to search.`,
-		`I do not have access to your project’s file system in this chat. If you share the files here, I can search them.`,
-		`I don’t have access to a project filesystem or file-search tools in this chat, so I can’t search for "needle-731".`,
-		`No action taken. I do not have access to your local project files in this chat context, so I cannot search for the exact text "needle-731" and return the match results.`,
-		`I can’t search “project files” from here because I don’t have access to a local filesystem or repository contents. If the files are in your workspace, share the relevant page/database or tell me where they live in Notion and I can search there.`,
-		`No action can be taken because there is no access to a project filesystem or file-search tool in this environment.`,
-		`I can’t search local project files from here, and no tool output was provided.`,
-		`I cannot search project files from this environment.`,
-	}
-	for _, raw := range responses {
-		if !detectToolBridgeNoToolResponse(raw) {
-			t.Fatalf("expected missing project access response to trigger a clean retry: %q", raw)
-		}
-	}
-}
-
-func TestDetectToolBridgeNoToolResponse_DoesNotMatchNormalAnswer(t *testing.T) {
-	raw := "我已经根据上面的 grep 结果定位到文件，下一步建议缩小 Read 范围后继续编辑。"
-
-	if detectToolBridgeNoToolResponse(raw) {
-		t.Fatalf("normal answer should not be classified as no-tool identity drift")
 	}
 }

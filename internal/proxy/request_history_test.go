@@ -153,7 +153,7 @@ func TestTrackRequestHistoryRecordsMetadataAndSanitizedError(t *testing.T) {
 		diagnostic.SetClientRequest(true, "required", nil, 2)
 		diagnostic.SetToolBridge("sentinel_json")
 		diagnostic.SetFinishReason("tool_calls")
-		diagnostic.SetSession("0123456789abcdef", "replayed_account_switch", 3)
+		diagnostic.SetContextMode("full_replay_account_switch")
 		diagnostic.BeginAttempt("selected@example.com")
 		diagnostic.AddUsage(100, 25)
 		diagnostic.FinishAttempt("upstream_error")
@@ -178,8 +178,8 @@ func TestTrackRequestHistoryRecordsMetadataAndSanitizedError(t *testing.T) {
 	if !entry.Stream || entry.ToolChoice != "required" || entry.ToolBridge != "sentinel_json" || entry.FinishReason != "tool_calls" {
 		t.Fatalf("protocol metadata mismatch: %+v", entry)
 	}
-	if entry.SessionID != "0123456789ab" || entry.SessionState != "replayed_account_switch" || entry.SessionTurn != 3 {
-		t.Fatalf("session metadata mismatch: %+v", entry)
+	if entry.ContextMode != "full_replay_account_switch" {
+		t.Fatalf("context mode mismatch: %+v", entry)
 	}
 	if len(entry.AttemptDetails) != 1 || entry.AttemptDetails[0].Outcome != "upstream_error" || entry.AttemptDetails[0].AccountEmail != "selected@example.com" {
 		t.Fatalf("attempt metadata mismatch: %+v", entry.AttemptDetails)
