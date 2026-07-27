@@ -1,4 +1,4 @@
-import type { DashboardData, JobStartResponse, ProviderInfo, RegisterJob, RequestHistoryPage, TokenStats } from './types'
+import type { APIKeyInfo, DashboardData, DeploymentVersionStatus, JobStartResponse, ProviderInfo, RegisterJob, RequestHistoryPage, TokenStats } from './types'
 
 // --- Auth API ---
 
@@ -267,6 +267,28 @@ export async function clearRequestHistory(): Promise<void> {
     const data = await readJson<{ error?: string }>(resp, `HTTP ${resp.status}`)
     throw new Error(data.error || `HTTP ${resp.status}`)
   }
+}
+
+export async function fetchAPIKey(reveal = false): Promise<APIKeyInfo> {
+  const resp = await fetch(`/admin/api-key${reveal ? '?reveal=1' : ''}`, {
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+    cache: 'no-store',
+  })
+  const data = await readJson<APIKeyInfo & { error?: string }>(resp, 'API Key 接口返回了无效响应')
+  if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`)
+  return data
+}
+
+export async function fetchVersionStatus(refresh = false): Promise<DeploymentVersionStatus> {
+  const resp = await fetch(`/admin/version${refresh ? '?refresh=1' : ''}`, {
+    headers: { Accept: 'application/json' },
+    credentials: 'same-origin',
+    cache: 'no-store',
+  })
+  const data = await readJson<DeploymentVersionStatus & { error?: string }>(resp, '版本接口返回了无效响应')
+  if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`)
+  return data
 }
 
 export function openProxy(email: string) {

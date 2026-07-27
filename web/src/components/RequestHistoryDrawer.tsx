@@ -31,7 +31,7 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
   const [api, setAPI] = useState('all')
   const [promptMode, setPromptMode] = useState('all')
   const [page, setPage] = useState(0)
-  const [copiedID, setCopiedID] = useState<string | null>(null)
+  const [copiedTarget, setCopiedTarget] = useState<string | null>(null)
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedQuery(query.trim()), 250)
@@ -114,11 +114,11 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
     }
   }
 
-  const copyError = async (entry: RequestHistoryEntry) => {
-    if (!entry.error) return
-    await navigator.clipboard.writeText(entry.error)
-    setCopiedID(entry.id)
-    window.setTimeout(() => setCopiedID(null), 1200)
+  const copyValue = async (value: string, target: string) => {
+    if (!value) return
+    await navigator.clipboard.writeText(value)
+    setCopiedTarget(target)
+    window.setTimeout(() => setCopiedTarget(null), 1200)
   }
 
   if (!open) return null
@@ -236,8 +236,10 @@ export function RequestHistoryDrawer({ open, onClose }: Props) {
                   <RequestRow
                     key={entry.id}
                     entry={entry}
-                    copied={copiedID === entry.id}
-                    onCopyError={() => copyError(entry)}
+                    copiedError={copiedTarget === `${entry.id}:error`}
+                    copiedRequestID={copiedTarget === `${entry.id}:request`}
+                    onCopyError={() => copyValue(entry.error || '', `${entry.id}:error`)}
+                    onCopyRequestID={() => copyValue(entry.id, `${entry.id}:request`)}
                   />
                 ))}
               </div>
@@ -298,12 +300,16 @@ function FilterSelect({
 
 function RequestRow({
   entry,
-  copied,
+  copiedError,
+  copiedRequestID,
   onCopyError,
+  onCopyRequestID,
 }: {
   entry: RequestHistoryEntry
-  copied: boolean
+  copiedError: boolean
+  copiedRequestID: boolean
   onCopyError: () => void
+  onCopyRequestID: () => void
 }) {
   const { t, i18n: i18nInstance } = useTranslation()
   const created = new Date(entry.created_at).toLocaleString(i18nInstance.language === 'zh' ? 'zh-CN' : 'en-US', { hour12: false })
@@ -314,7 +320,17 @@ function RequestRow({
   return (
     <div className={`px-5 py-3 ${success ? 'hover:bg-white/[.015]' : 'bg-err/[.025] hover:bg-err/[.045]'}`}>
       <div className="grid grid-cols-[150px_88px_110px_minmax(220px,1.35fr)_minmax(170px,1fr)_150px_70px_105px_80px] gap-3 items-start">
-        <div className="text-[11px] text-text-secondary tabular-nums leading-5">{created}</div>
+        <div className="text-[11px] text-text-secondary tabular-nums leading-5">
+          <div>{created}</div>
+          <button
+            type="button"
+            onClick={onCopyRequestID}
+            className={`inline-flex items-center gap-1 bg-transparent border-none p-0 cursor-pointer font-mono text-[9px] ${copiedRequestID ? 'text-ok' : 'text-text-muted hover:text-text-secondary'}`}
+            title={t('request_history.copy_request_id')}
+          >
+            {copiedRequestID ? t('request_history.copied_id') : entry.id.slice(0, 12)} <IconCopy size={9} />
+          </button>
+        </div>
         <div>
           <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] ${success ? 'text-ok bg-ok/10' : 'text-err bg-err/10'}`}>
             <span className={`w-1.5 h-1.5 rounded-full ${success ? 'bg-ok' : 'bg-err'}`} />
@@ -350,6 +366,41 @@ function RequestRow({
         <div className="text-[11px] text-text-secondary tabular-nums leading-5">{formatDuration(entry.duration_ms)}</div>
       </div>
 
+      <details className="mt-2 ml-[376px] max-w-[760px] group max-sm:ml-0">
+        <summary className="text-[10px] text-text-muted hover:text-text-secondary cursor-pointer select-none">
+          {t('request_history.diagnostics')}
+        </summary>
+        <div className="mt-2 grid grid-cols-3 gap-x-4 gap-y-2 text-[10px] max-md:grid-cols-2 max-sm:grid-cols-1">
+          <DiagnosticItem label={t('request_history.request_id')} value={entry.id} mono />
+          <DiagnosticItem label={t('request_history.stream')} value={entry.stream ? t('request_history.stream_yes') : t('request_history.stream_no')} />
+          <DiagnosticItem label={t('request_history.tool_choice')} value={formatDiagnosticValue(entry.tool_choice)} />
+          <DiagnosticItem label={t('request_history.tool_bridge')} value={formatDiagnosticValue(entry.tool_bridge)} />
+          <DiagnosticItem label={t('request_history.finish_reason')} value={formatDiagnosticValue(entry.finish_reason)} />
+          <DiagnosticItem
+            label={t('request_history.session')}
+            value={entry.session_id
+              ? `${entry.session_id} · ${formatDiagnosticValue(entry.session_state)}${entry.session_turn ? ` · ${t('request_history.turn', { count: entry.session_turn })}` : ''}`
+              : formatDiagnosticValue(entry.session_state)}
+            mono
+          />
+        </div>
+        {(entry.attempt_details?.length ?? 0) > 0 && (
+          <div className="mt-2 border-t border-white/[.05] pt-2">
+            <div className="text-[10px] text-text-muted mb-1">{t('request_history.attempt_timeline')}</div>
+            <div className="space-y-1">
+              {entry.attempt_details!.map((attempt, index) => (
+                <div key={`${entry.id}:${index}`} className="grid grid-cols-[24px_minmax(180px,1fr)_140px_80px] gap-2 text-[10px] max-sm:grid-cols-[24px_1fr]">
+                  <span className="text-text-muted tabular-nums">#{index + 1}</span>
+                  <span className="text-text-secondary font-mono break-all">{attempt.account_email || t('request_history.not_selected')}</span>
+                  <span className={attempt.outcome === 'success' ? 'text-ok' : 'text-warn'}>{formatDiagnosticValue(attempt.outcome)}</span>
+                  <span className="text-text-muted tabular-nums">{formatDuration(attempt.duration_ms)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </details>
+
       {!success && entry.error && (
         <details className="mt-2 ml-[376px] max-w-[690px] group max-sm:ml-0">
           <summary className="text-[11px] text-err/90 hover:text-err cursor-pointer select-none truncate">
@@ -362,7 +413,7 @@ function RequestRow({
             <button
               type="button"
               onClick={onCopyError}
-              className={`shrink-0 p-1.5 rounded border cursor-pointer ${copied ? 'text-ok border-ok/30 bg-ok/10' : 'text-text-secondary border-border bg-bg-card hover:text-text-primary'}`}
+              className={`shrink-0 p-1.5 rounded border cursor-pointer ${copiedError ? 'text-ok border-ok/30 bg-ok/10' : 'text-text-secondary border-border bg-bg-card hover:text-text-primary'}`}
               title={t('request_history.copy_error')}
             >
               <IconCopy size={12} />
@@ -372,6 +423,21 @@ function RequestRow({
       )}
     </div>
   )
+}
+
+function DiagnosticItem({ label, value, mono = false }: { label: string; value?: string; mono?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-text-muted">{label}</div>
+      <div className={`text-text-secondary break-all mt-0.5 ${mono ? 'font-mono' : ''}`}>{value || '—'}</div>
+    </div>
+  )
+}
+
+function formatDiagnosticValue(value?: string): string {
+  if (!value) return '—'
+  const key = `request_history.value_${value}`
+  return i18n.exists(key) ? i18n.t(key) : value.split('_').join(' ')
 }
 
 function formatAPI(api: string): string {

@@ -859,7 +859,7 @@ func HandleOpenAIChatCompletions(pool *AccountPool) http.HandlerFunc {
 				model = AppConfig.Proxy.DefaultModel
 			}
 			diagnostic.SetRequestedModel(model, usedDefaultModel)
-			diagnostic.SetToolCount(len(req.Tools) + len(req.Functions))
+			diagnostic.SetClientRequest(req.Stream, req.ToolChoice, req.FunctionCall, len(req.Tools)+len(req.Functions))
 		}
 		anthReq, err := convertOpenAIChatCompletionRequest(&req)
 		if err != nil {
@@ -919,7 +919,7 @@ func HandleOpenAIResponses(pool *AccountPool) http.HandlerFunc {
 				model = AppConfig.Proxy.DefaultModel
 			}
 			diagnostic.SetRequestedModel(model, usedDefaultModel)
-			diagnostic.SetToolCount(len(req.Tools))
+			diagnostic.SetClientRequest(req.Stream, req.ToolChoice, nil, len(req.Tools))
 		}
 		anthReq, err := convertOpenAIResponsesRequest(&req)
 		if err != nil {

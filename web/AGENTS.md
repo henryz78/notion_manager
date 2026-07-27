@@ -41,7 +41,7 @@ The build pipeline:
 1. `npm run build` → `web/dist/`
 2. `xcopy web/dist internal/web/dist/` (embedded into Go binary)
 3. `go build` with `//go:embed dist/*` in `internal/web/embed.go`
-4. Go serves at `/dashboard/` with API key injected into `<meta name="api-key">`
+4. Go serves `/dashboard/` with only public version metadata in the HTML; after Dashboard authentication, the SPA fetches a masked API key from `/admin/api-key` and requests the full value only for reveal/copy actions
 
 ## Design System
 

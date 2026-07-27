@@ -124,6 +124,9 @@ func newMux(pool *proxy.AccountPool, accountsDir string, configPath string, apiK
 	mux.HandleFunc("/admin/backup", proxy.HandleAdminBackup(pool, accountsDir, configPath, dashAuth))
 	mux.HandleFunc("/admin/stats", proxy.HandleAdminStats(usageStats, dashAuth))
 	mux.HandleFunc("/admin/request-history", proxy.HandleAdminRequestHistory(requestHistory, dashAuth))
+	mux.HandleFunc("/admin/api-key", proxy.HandleAdminAPIKey(apiKey, dashAuth))
+	mux.HandleFunc("/admin/health", proxy.HandleAdminHealth(pool, dashAuth))
+	mux.HandleFunc("/admin/version", proxy.HandleAdminVersionStatus(proxy.NewVersionStatusService(), dashAuth))
 
 	// Bulk Microsoft-SSO registration. The legacy synchronous endpoint is
 	// kept for parity with the dashboard's older "submit + wait" UI; the
@@ -140,8 +143,8 @@ func newMux(pool *proxy.AccountPool, accountsDir string, configPath string, apiK
 	// catch-all /admin/accounts/.
 	mux.HandleFunc("/admin/accounts/", proxy.HandleAdminDeleteAccount(regDeps))
 
-	// Dashboard (React SPA with embedded API key + auth)
-	mux.Handle("/dashboard/", proxy.HandleDashboard(apiKey, dashAuth))
+	// Dashboard (React SPA; credentials are fetched after session auth)
+	mux.Handle("/dashboard/", proxy.HandleDashboard(dashAuth))
 	mux.HandleFunc("/dashboard", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/dashboard/", http.StatusMovedPermanently)
 	})
@@ -276,6 +279,7 @@ func main() {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, X-Web-Search, X-Workspace-Search")
+			w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID, X-Notion-Manager-Version")
 			if r.Method == "OPTIONS" {
 				w.WriteHeader(http.StatusOK)
 				return

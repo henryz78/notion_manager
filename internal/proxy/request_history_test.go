@@ -150,9 +150,13 @@ func TestTrackRequestHistoryRecordsMetadataAndSanitizedError(t *testing.T) {
 		}
 		diagnostic.SetRequestedModel("claude-opus-4.8", false)
 		diagnostic.SetNotionModel("notion-internal-opus")
-		diagnostic.SetToolCount(2)
+		diagnostic.SetClientRequest(true, "required", nil, 2)
+		diagnostic.SetToolBridge("sentinel_json")
+		diagnostic.SetFinishReason("tool_calls")
+		diagnostic.SetSession("0123456789abcdef", "replayed_account_switch", 3)
 		diagnostic.BeginAttempt("selected@example.com")
 		diagnostic.AddUsage(100, 25)
+		diagnostic.FinishAttempt("upstream_error")
 		writeOpenAIError(w, http.StatusBadGateway, "upstream failed\nwith details", "api_error", "")
 	}))
 
@@ -170,6 +174,15 @@ func TestTrackRequestHistoryRecordsMetadataAndSanitizedError(t *testing.T) {
 	}
 	if entry.AccountEmail != "selected@example.com" || entry.Attempts != 1 || entry.ToolCount != 2 {
 		t.Fatalf("routing metadata mismatch: %+v", entry)
+	}
+	if !entry.Stream || entry.ToolChoice != "required" || entry.ToolBridge != "sentinel_json" || entry.FinishReason != "tool_calls" {
+		t.Fatalf("protocol metadata mismatch: %+v", entry)
+	}
+	if entry.SessionID != "0123456789ab" || entry.SessionState != "replayed_account_switch" || entry.SessionTurn != 3 {
+		t.Fatalf("session metadata mismatch: %+v", entry)
+	}
+	if len(entry.AttemptDetails) != 1 || entry.AttemptDetails[0].Outcome != "upstream_error" || entry.AttemptDetails[0].AccountEmail != "selected@example.com" {
+		t.Fatalf("attempt metadata mismatch: %+v", entry.AttemptDetails)
 	}
 	if entry.InputTokens != 100 || entry.OutputTokens != 25 || entry.Status != "error" || entry.HTTPStatus != http.StatusBadGateway {
 		t.Fatalf("result metadata mismatch: %+v", entry)

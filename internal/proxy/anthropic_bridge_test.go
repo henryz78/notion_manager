@@ -266,12 +266,30 @@ func TestPrepareToolBridgeResponseAcceptsSentinelActionWithTrailingProtocolMarke
 		map[string]string{"action_3": "clipboard"},
 	)
 
-	if !prepared.HasCalls || len(prepared.ToolCalls) != 1 || prepared.DroppedCalls != 0 {
+	if prepared.Protocol != "sentinel_json" || !prepared.HasCalls || len(prepared.ToolCalls) != 1 || prepared.DroppedCalls != 0 {
 		t.Fatalf("sentinel action was not recovered: %+v", prepared)
 	}
 	call := prepared.ToolCalls[0]
 	if call.Function.Name != "clipboard" || call.Function.Arguments != `{"action":"read"}` {
 		t.Fatalf("sentinel action was not restored to the client tool: %+v", call)
+	}
+}
+
+func TestPrepareToolBridgeResponseClassifiesNativeTextAndDone(t *testing.T) {
+	allowed := map[string]struct{}{"lookup": {}}
+	native := prepareToolBridgeResponse("", []AgentValueEntry{{Type: "tool_use", Name: "lookup", Input: json.RawMessage(`{}`)}}, allowed, nil)
+	if native.Protocol != "native" || !native.HasCalls {
+		t.Fatalf("unexpected native bridge result: %+v", native)
+	}
+
+	text := prepareToolBridgeResponse(`{"name":"lookup","arguments":{}}`, nil, allowed, nil)
+	if text.Protocol != "text_json" || !text.HasCalls {
+		t.Fatalf("unexpected text bridge result: %+v", text)
+	}
+
+	done := prepareToolBridgeResponse(`{"name":"__done__","arguments":{"result":"complete"}}`, nil, map[string]struct{}{}, nil)
+	if done.Protocol != "done" || done.DoneText != "complete" || done.HasCalls {
+		t.Fatalf("unexpected done bridge result: %+v", done)
 	}
 }
 

@@ -46,23 +46,38 @@ func currentRequestPromptMode() string {
 // It deliberately has no fields for messages, prompts, tool arguments, model
 // output, or Notion personal-instruction content.
 type RequestHistoryEntry struct {
-	ID               string    `json:"id"`
-	CreatedAt        time.Time `json:"created_at"`
-	API              string    `json:"api"`
-	RequestedModel   string    `json:"requested_model"`
-	UsedDefaultModel bool      `json:"used_default_model,omitempty"`
-	NotionModel      string    `json:"notion_model,omitempty"`
-	AccountEmail     string    `json:"account_email,omitempty"`
-	PromptMode       string    `json:"prompt_mode"`
-	ToolCount        int       `json:"tool_count"`
-	InputTokens      int       `json:"input_tokens"`
-	ContextTokens    int       `json:"context_tokens"`
-	OutputTokens     int       `json:"output_tokens"`
-	DurationMs       int64     `json:"duration_ms"`
-	Status           string    `json:"status"`
-	HTTPStatus       int       `json:"http_status"`
-	Error            string    `json:"error,omitempty"`
-	Attempts         int       `json:"attempts"`
+	ID               string           `json:"id"`
+	CreatedAt        time.Time        `json:"created_at"`
+	API              string           `json:"api"`
+	RequestedModel   string           `json:"requested_model"`
+	UsedDefaultModel bool             `json:"used_default_model,omitempty"`
+	NotionModel      string           `json:"notion_model,omitempty"`
+	AccountEmail     string           `json:"account_email,omitempty"`
+	PromptMode       string           `json:"prompt_mode"`
+	ToolCount        int              `json:"tool_count"`
+	Stream           bool             `json:"stream"`
+	ToolChoice       string           `json:"tool_choice,omitempty"`
+	ToolBridge       string           `json:"tool_bridge,omitempty"`
+	FinishReason     string           `json:"finish_reason,omitempty"`
+	SessionID        string           `json:"session_id,omitempty"`
+	SessionState     string           `json:"session_state,omitempty"`
+	SessionTurn      int              `json:"session_turn,omitempty"`
+	InputTokens      int              `json:"input_tokens"`
+	ContextTokens    int              `json:"context_tokens"`
+	OutputTokens     int              `json:"output_tokens"`
+	DurationMs       int64            `json:"duration_ms"`
+	Status           string           `json:"status"`
+	HTTPStatus       int              `json:"http_status"`
+	Error            string           `json:"error,omitempty"`
+	Attempts         int              `json:"attempts"`
+	AttemptDetails   []RequestAttempt `json:"attempt_details,omitempty"`
+}
+
+type RequestAttempt struct {
+	AccountEmail string `json:"account_email"`
+	Outcome      string `json:"outcome,omitempty"`
+	DurationMs   int64  `json:"duration_ms"`
+	startedAt    time.Time
 }
 
 type requestHistoryFile struct {
@@ -125,6 +140,9 @@ func (s *RequestHistoryStore) Record(entry RequestHistoryEntry) {
 	}
 	if entry.Attempts < 0 {
 		entry.Attempts = 0
+	}
+	if entry.SessionTurn < 0 {
+		entry.SessionTurn = 0
 	}
 
 	s.mu.Lock()
@@ -231,6 +249,7 @@ func (s *RequestHistoryStore) Snapshot(query RequestHistoryQuery) RequestHistory
 
 func requestHistoryEntryMatches(entry RequestHistoryEntry, search string) bool {
 	fields := []string{
+		entry.ID,
 		entry.RequestedModel,
 		entry.NotionModel,
 		entry.AccountEmail,
@@ -238,9 +257,19 @@ func requestHistoryEntryMatches(entry RequestHistoryEntry, search string) bool {
 		entry.PromptMode,
 		entry.Status,
 		entry.Error,
+		entry.ToolChoice,
+		entry.ToolBridge,
+		entry.FinishReason,
+		entry.SessionID,
+		entry.SessionState,
 	}
 	for _, field := range fields {
 		if strings.Contains(strings.ToLower(field), search) {
+			return true
+		}
+	}
+	for _, attempt := range entry.AttemptDetails {
+		if strings.Contains(strings.ToLower(attempt.AccountEmail), search) || strings.Contains(strings.ToLower(attempt.Outcome), search) {
 			return true
 		}
 	}
@@ -429,6 +458,104 @@ func (d *RequestDiagnostic) SetToolCount(count int) {
 	d.mu.Unlock()
 }
 
+func (d *RequestDiagnostic) SetClientRequest(stream bool, toolChoice interface{}, legacyChoice interface{}, toolCount int) {
+	if d == nil {
+		return
+	}
+	if toolCount < 0 {
+		toolCount = 0
+	}
+	d.mu.Lock()
+	d.entry.Stream = stream
+	d.entry.ToolCount = toolCount
+	d.entry.ToolChoice = requestToolChoiceMode(toolChoice, legacyChoice, toolCount)
+	d.mu.Unlock()
+}
+
+func requestToolChoiceMode(toolChoice interface{}, legacyChoice interface{}, toolCount int) string {
+	if toolCount <= 0 {
+		return "none"
+	}
+	choice := toolChoice
+	if choice == nil {
+		choice = legacyChoice
+	}
+	if choice == nil {
+		return "auto"
+	}
+	switch value := choice.(type) {
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "none":
+			return "none"
+		case "required", "any":
+			return "required"
+		case "auto":
+			return "auto"
+		default:
+			return "forced"
+		}
+	case map[string]interface{}:
+		if fn, ok := value["function"].(map[string]interface{}); ok {
+			if name, _ := fn["name"].(string); strings.TrimSpace(name) != "" {
+				return "forced"
+			}
+		}
+		if name, _ := value["name"].(string); strings.TrimSpace(name) != "" {
+			return "forced"
+		}
+		if kind, _ := value["type"].(string); kind != "" {
+			return requestToolChoiceMode(kind, nil, toolCount)
+		}
+	}
+	return "auto"
+}
+
+func (d *RequestDiagnostic) SetToolBridge(protocol string) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.entry.ToolBridge = strings.TrimSpace(protocol)
+	d.mu.Unlock()
+}
+
+func (d *RequestDiagnostic) SetFinishReason(reason string) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.entry.FinishReason = strings.TrimSpace(reason)
+	d.mu.Unlock()
+}
+
+func (d *RequestDiagnostic) SetSession(fingerprint, state string, turn int) {
+	if d == nil {
+		return
+	}
+	fingerprint = strings.TrimSpace(fingerprint)
+	if len(fingerprint) > 12 {
+		fingerprint = fingerprint[:12]
+	}
+	if turn < 0 {
+		turn = 0
+	}
+	d.mu.Lock()
+	d.entry.SessionID = fingerprint
+	d.entry.SessionState = strings.TrimSpace(state)
+	d.entry.SessionTurn = turn
+	d.mu.Unlock()
+}
+
+func (d *RequestDiagnostic) SetSessionState(state string) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.entry.SessionState = strings.TrimSpace(state)
+	d.mu.Unlock()
+}
+
 func (d *RequestDiagnostic) BeginAttempt(accountEmail string) {
 	if d == nil {
 		return
@@ -436,7 +563,30 @@ func (d *RequestDiagnostic) BeginAttempt(accountEmail string) {
 	d.mu.Lock()
 	d.entry.Attempts++
 	d.entry.AccountEmail = strings.TrimSpace(accountEmail)
+	d.entry.AttemptDetails = append(d.entry.AttemptDetails, RequestAttempt{
+		AccountEmail: strings.TrimSpace(accountEmail),
+		startedAt:    time.Now(),
+	})
 	d.mu.Unlock()
+}
+
+func (d *RequestDiagnostic) FinishAttempt(outcome string) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i := len(d.entry.AttemptDetails) - 1; i >= 0; i-- {
+		attempt := &d.entry.AttemptDetails[i]
+		if attempt.Outcome != "" {
+			continue
+		}
+		attempt.Outcome = strings.TrimSpace(outcome)
+		if !attempt.startedAt.IsZero() {
+			attempt.DurationMs = time.Since(attempt.startedAt).Milliseconds()
+		}
+		return
+	}
 }
 
 // AddUsage adds the final cumulative usage reported by one Notion attempt.
@@ -501,7 +651,29 @@ func (d *RequestDiagnostic) finish(httpStatus int) RequestHistoryEntry {
 	}
 	d.entry.DurationMs = time.Since(d.started).Milliseconds()
 	d.entry.Error = sanitizeRequestHistoryError(d.entry.Error)
+	for i := range d.entry.AttemptDetails {
+		attempt := &d.entry.AttemptDetails[i]
+		if attempt.Outcome == "" {
+			if d.errorSet || httpStatus >= http.StatusBadRequest {
+				attempt.Outcome = "error"
+			} else {
+				attempt.Outcome = "completed"
+			}
+			if !attempt.startedAt.IsZero() {
+				attempt.DurationMs = time.Since(attempt.startedAt).Milliseconds()
+			}
+		}
+	}
 	return d.entry
+}
+
+func (d *RequestDiagnostic) ID() string {
+	if d == nil {
+		return ""
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.entry.ID
 }
 
 type requestDiagnosticContextKey struct{}
@@ -526,6 +698,7 @@ func TrackRequestHistory(api string, store *RequestHistoryStore, next http.Handl
 		}
 
 		diagnostic := newRequestDiagnostic(api)
+		w.Header().Set("X-Request-ID", diagnostic.ID())
 		base := &requestDiagnosticResponseWriter{
 			ResponseWriter: w,
 			diagnostic:     diagnostic,

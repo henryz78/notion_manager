@@ -263,11 +263,42 @@ func (rp *ReverseProxy) CreateTargetedSession(w http.ResponseWriter, acc *Accoun
 
 // --- HTTP Handlers ---
 
-// HandleDashboard serves the React SPA dashboard.
-// It injects the API key into index.html via a <meta> tag so the frontend
-// can authenticate against /admin/* endpoints.
+// HandleAdminAPIKey returns connection credentials only after Dashboard
+// authentication. The public SPA document must never contain the API key.
+func HandleAdminAPIKey(apiKey string, auth *DashboardAuth) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store, max-age=0")
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		if auth != nil && auth.HasAdminPassword() && !auth.ValidateSession(r) {
+			http.Error(w, `{"error":"unauthorized, dashboard login required"}`, http.StatusUnauthorized)
+			return
+		}
+
+		response := map[string]string{"masked": maskAPIKey(apiKey)}
+		if reveal := r.URL.Query().Get("reveal"); reveal == "1" || strings.EqualFold(reveal, "true") {
+			response["value"] = apiKey
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	}
+}
+
+func maskAPIKey(apiKey string) string {
+	apiKey = strings.TrimSpace(apiKey)
+	if len(apiKey) <= 9 {
+		return strings.Repeat("•", len(apiKey))
+	}
+	return apiKey[:5] + strings.Repeat("•", len(apiKey)-9) + apiKey[len(apiKey)-4:]
+}
+
+// HandleDashboard serves the React SPA dashboard. Runtime version metadata is
+// safe to publish; credentials are fetched from /admin/api-key after login.
 // Auth endpoints are nested under /dashboard/auth/*.
-func HandleDashboard(apiKey string, auth *DashboardAuth) http.Handler {
+func HandleDashboard(auth *DashboardAuth) http.Handler {
 	// Serve from embedded dist/ filesystem
 	distFS, err := fs.Sub(web.DistFS, "dist")
 	if err != nil {
@@ -306,8 +337,7 @@ func HandleDashboard(apiKey string, auth *DashboardAuth) http.Handler {
 				http.Error(w, "index.html not found", http.StatusInternalServerError)
 				return
 			}
-			metadata := `<meta name="api-key" content="` + html.EscapeString(apiKey) + `">` +
-				`<meta name="app-version" content="` + html.EscapeString(CurrentBuildVersion()) + `">`
+			metadata := `<meta name="app-version" content="` + html.EscapeString(CurrentBuildVersion()) + `">`
 			pageHTML := strings.Replace(string(data), "<head>", "<head>"+metadata, 1)
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store, max-age=0")

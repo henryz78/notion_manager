@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
-import type { DashboardData, AccountInfo, AccountSummary, RefreshStatus, TokenStats } from './types'
-import { fetchDashboardData, fetchAccountSelection, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats, startAccountBatchJob, getAccountBatchJob, listAccountBatchJobs, retryAccountBatchJob, downloadBackup, restoreBackup } from './api'
+import type { DashboardData, AccountInfo, AccountSummary, DeploymentVersionStatus, RefreshStatus, TokenStats } from './types'
+import { fetchDashboardData, fetchAccountSelection, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats, startAccountBatchJob, getAccountBatchJob, listAccountBatchJobs, retryAccountBatchJob, downloadBackup, restoreBackup, fetchAPIKey, fetchVersionStatus } from './api'
 import type { SearchSettings, AccountStatusFilter, AccountBatchJob, AccountBatchJobAction, AccountImportPersonalInstructionsPolicy } from './api'
 import { fmt, formatTokens, getQuotaStatusByUsage, getQuotaPct, avatarColor, avatarLetter, formatCheckedAt, formatTimestampMs, providerDisplay } from './utils'
 import { AccountMenu } from './components/AccountMenu'
@@ -975,7 +975,13 @@ export default function App() {
   const [page, setPage] = useState(0)
   const [settings, setSettings] = useState<SearchSettings | null>(null)
   const [tokenStats, setTokenStats] = useState<TokenStats | null>(null)
+  const [apiKeyMasked, setApiKeyMasked] = useState('')
+  const [apiKeyValue, setApiKeyValue] = useState('')
   const [apiKeyRevealed, setApiKeyRevealed] = useState(false)
+  const [apiKeyLoading, setApiKeyLoading] = useState(false)
+  const [apiKeyError, setApiKeyError] = useState<string | null>(null)
+  const [versionStatus, setVersionStatus] = useState<DeploymentVersionStatus | null>(null)
+  const [versionLoading, setVersionLoading] = useState(false)
   const [registerOpen, setRegisterOpen] = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [requestHistoryOpen, setRequestHistoryOpen] = useState(false)
@@ -983,8 +989,8 @@ export default function App() {
   const [showAddModal, setShowAddModal] = useState(false)
   const [activePage, setActivePage] = useState<DashboardPage>(() => window.location.hash === '#settings' ? 'settings' : 'accounts')
   const appVersion = document.querySelector('meta[name="app-version"]')?.getAttribute('content') || 'dev'
-  const copyToClipboard = (text: string, field: 'key' | 'base') => {
-    navigator.clipboard.writeText(text)
+  const copyToClipboard = async (text: string, field: 'key' | 'base') => {
+    await navigator.clipboard.writeText(text)
     setCopiedField(field)
     setTimeout(() => setCopiedField(null), 1000)
   }
@@ -1016,6 +1022,12 @@ export default function App() {
     window.addEventListener('hashchange', syncPageFromHash)
     return () => window.removeEventListener('hashchange', syncPageFromHash)
   }, [])
+
+  useEffect(() => {
+    if (activePage === 'settings') return
+    setApiKeyRevealed(false)
+    setApiKeyValue('')
+  }, [activePage])
 
   const changePage = (nextPage: DashboardPage) => {
     setActivePage(nextPage)
@@ -1073,7 +1085,18 @@ export default function App() {
       })
       .catch(() => {})
     fetchTokenStats().then(setTokenStats).catch(() => {})
-  }, [authState])
+    fetchAPIKey()
+      .then(info => {
+        setApiKeyMasked(info.masked || '')
+        setApiKeyError(null)
+      })
+      .catch(error => setApiKeyError(error?.message || t('api.api_key_load_failed')))
+    setVersionLoading(true)
+    fetchVersionStatus()
+      .then(setVersionStatus)
+      .catch(() => setVersionStatus(null))
+      .finally(() => setVersionLoading(false))
+  }, [authState, t])
 
   // Restore the active account-batch task after a browser refresh. The server
   // keeps the task and its step progress, so closing/reloading the page does
@@ -1124,8 +1147,57 @@ export default function App() {
 
   const handleLogout = async () => {
     await logout()
+    setApiKeyValue('')
+    setApiKeyMasked('')
+    setApiKeyRevealed(false)
     setAuthState('login')
     setData(null)
+  }
+
+  const toggleAPIKey = async () => {
+    if (apiKeyRevealed) {
+      setApiKeyRevealed(false)
+      setApiKeyValue('')
+      return
+    }
+    setApiKeyLoading(true)
+    setApiKeyError(null)
+    try {
+      const info = await fetchAPIKey(true)
+      if (!info.value) throw new Error(t('api.api_key_load_failed'))
+      setApiKeyMasked(info.masked || apiKeyMasked)
+      setApiKeyValue(info.value)
+      setApiKeyRevealed(true)
+    } catch (error: any) {
+      setApiKeyError(error?.message || t('api.api_key_load_failed'))
+    } finally {
+      setApiKeyLoading(false)
+    }
+  }
+
+  const copyAPIKey = async () => {
+    setApiKeyLoading(true)
+    setApiKeyError(null)
+    try {
+      const value = apiKeyValue || (await fetchAPIKey(true)).value
+      if (!value) throw new Error(t('api.api_key_load_failed'))
+      await copyToClipboard(value, 'key')
+    } catch (error: any) {
+      setApiKeyError(error?.message || t('api.api_key_load_failed'))
+    } finally {
+      setApiKeyLoading(false)
+    }
+  }
+
+  const refreshVersionStatus = async () => {
+    setVersionLoading(true)
+    try {
+      setVersionStatus(await fetchVersionStatus(true))
+    } catch {
+      setVersionStatus(null)
+    } finally {
+      setVersionLoading(false)
+    }
   }
 
   const refresh = async () => {
@@ -1617,9 +1689,30 @@ export default function App() {
             </div>
             <div className="grid grid-cols-4 gap-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
               <div className="bg-bg-card border border-border rounded-lg p-4">
-                <div className="text-[11px] text-text-muted uppercase tracking-wider">{t('api.current_version')}</div>
-                <div className="text-[20px] font-semibold font-mono mt-1" title={appVersion}>{displayVersion(appVersion)}</div>
-                <div className="text-[11px] text-text-muted mt-1">{t('api.version_help')}</div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-[11px] text-text-muted uppercase tracking-wider">{t('api.deployment_version')}</div>
+                  <button
+                    type="button"
+                    onClick={refreshVersionStatus}
+                    disabled={versionLoading}
+                    className={`text-text-muted hover:text-text-primary bg-transparent border-none cursor-pointer p-0.5 flex disabled:opacity-40 ${versionLoading ? 'animate-spin' : ''}`}
+                    title={t('api.check_version')}
+                  >
+                    <IconRefresh />
+                  </button>
+                </div>
+                <div className="flex items-baseline gap-2 mt-1">
+                  <div className="text-[20px] font-semibold font-mono" title={versionStatus?.current_version || appVersion}>{displayVersion(versionStatus?.current_version || appVersion)}</div>
+                  {versionStatus && (
+                    <span className={`text-[10px] ${versionStatus.status === 'up_to_date' ? 'text-ok' : versionStatus.status === 'update_available' ? 'text-warn' : 'text-text-muted'}`}>
+                      {t(`api.version_${versionStatus.status}`, { defaultValue: t('api.version_unknown') })}
+                    </span>
+                  )}
+                </div>
+                <div className="text-[11px] text-text-muted mt-1 font-mono" title={versionStatus?.latest_version || ''}>
+                  {t('api.latest_image')}: {versionStatus?.latest_version ? displayVersion(versionStatus.latest_version) : t('api.version_unknown')}
+                </div>
+                {versionStatus?.error && <div className="text-[10px] text-warn mt-1 truncate" title={versionStatus.error}>{t('api.version_check_failed')}</div>}
               </div>
               <button
                 onClick={() => setRequestHistoryOpen(true)}
@@ -1680,9 +1773,7 @@ export default function App() {
 
         {/* API Settings */}
         {activePage === 'settings' && settings && (() => {
-          const apiKey = document.querySelector('meta[name="api-key"]')?.getAttribute('content') || ''
           const apiBase = `${window.location.origin}/v1`
-          const maskedKey = apiKey ? apiKey.slice(0, 5) + '•'.repeat(Math.max(0, apiKey.length - 9)) + apiKey.slice(-4) : ''
           return (
             <div className="mb-6 px-5 py-5 bg-[#171717] border border-white/5 rounded-lg shadow-inner max-sm:px-3 max-sm:py-4">
               <div className="mb-4">
@@ -1750,13 +1841,14 @@ export default function App() {
                     <span className="text-[11px] text-text-muted">API Key</span>
                     <code
                       className={`text-[11px] bg-white/[.05] px-1.5 py-0.5 rounded cursor-pointer hover:bg-white/[.1] transition-colors font-mono max-sm:max-w-[220px] max-sm:truncate ${copiedField === 'key' ? 'text-ok' : 'text-text-primary'}`}
-                      onClick={() => copyToClipboard(apiKey, 'key')}
+                      onClick={copyAPIKey}
                       title={t('api.click_to_copy')}
                     >
-                      {copiedField === 'key' ? `✓ ${t('api.copied')}` : (apiKeyRevealed ? apiKey : maskedKey)}
+                      {copiedField === 'key' ? `✓ ${t('api.copied')}` : apiKeyLoading ? t('api.loading_key') : (apiKeyRevealed ? apiKeyValue : apiKeyMasked || t('api.key_unavailable'))}
                     </code>
                     <button
-                      onClick={() => setApiKeyRevealed(!apiKeyRevealed)}
+                      onClick={toggleAPIKey}
+                      disabled={apiKeyLoading}
                       className="ml-3 text-text-muted hover:text-text-primary transition-colors bg-transparent border-none cursor-pointer px-0.5 flex items-center"
                       title={apiKeyRevealed ? t('api.hide') : t('api.show')}
                     >
@@ -1836,6 +1928,7 @@ export default function App() {
                     >
                       <span className={`absolute top-[2px] left-[2px] w-3 h-3 rounded-full transition-all duration-200 ${settings.ask_mode_default ? 'bg-white shadow-sm translate-x-[12px]' : 'bg-white/40'}`} />
                     </button>
+                    {apiKeyError && <span className="text-[10px] text-err" title={apiKeyError}>{t('api.api_key_load_failed')}</span>}
                     <span className="text-[12px] text-text-primary">{t('api.ask_mode')}</span>
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer select-none">

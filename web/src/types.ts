@@ -193,9 +193,30 @@ export interface TokenStats {
   last_record_at: number
 }
 
+export interface APIKeyInfo {
+  masked: string
+  value?: string
+}
+
+export interface DeploymentVersionStatus {
+  current_version: string
+  latest_version?: string
+  status: 'up_to_date' | 'update_available' | 'unknown' | string
+  checked_at: string
+  published_at?: string
+  run_url?: string
+  error?: string
+}
+
 export type RequestHistoryStatus = 'success' | 'error'
 export type RequestHistoryAPI = 'anthropic' | 'openai_chat' | 'openai_responses'
 export type RequestPromptMode = 'existing_prompt' | 'notion_personal_instructions' | 'client_and_notion_personal' | 'no_behavior_prompt' | 'not_applicable'
+
+export interface RequestAttempt {
+  account_email: string
+  outcome?: string
+  duration_ms: number
+}
 
 // Metadata-only API diagnostics. The backend never includes request messages,
 // system prompts, response text, tool arguments, or personal-instruction text.
@@ -209,6 +230,13 @@ export interface RequestHistoryEntry {
   account_email?: string
   prompt_mode: RequestPromptMode | string
   tool_count: number
+  stream: boolean
+  tool_choice?: string
+  tool_bridge?: string
+  finish_reason?: string
+  session_id?: string
+  session_state?: string
+  session_turn?: number
   input_tokens: number
   context_tokens: number
   output_tokens: number
@@ -217,6 +245,7 @@ export interface RequestHistoryEntry {
   http_status: number
   error?: string
   attempts: number
+  attempt_details?: RequestAttempt[]
 }
 
 export interface RequestHistoryPage {

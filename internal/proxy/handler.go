@@ -40,18 +40,40 @@ type publicModel struct {
 	OwnedBy string `json:"owned_by"`
 }
 
-// HandleHealth returns an HTTP handler for the /health endpoint
+// HandleHealth is intentionally minimal because /health is public.
 func HandleHealth(pool *AccountPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Notion-Manager-Version", CurrentBuildVersion())
 		w.Header().Set("Content-Type", "application/json")
 		resp := map[string]interface{}{
+			"status":  "ok",
+			"version": CurrentBuildVersion(),
+		}
+		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// HandleAdminHealth keeps operational pool details behind Dashboard auth.
+func HandleAdminHealth(pool *AccountPool, auth *DashboardAuth) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store, max-age=0")
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+		if auth != nil && auth.HasAdminPassword() && !auth.ValidateSession(r) {
+			http.Error(w, `{"error":"unauthorized, dashboard login required"}`, http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":    "ok",
+			"version":   CurrentBuildVersion(),
 			"accounts":  pool.Count(),
 			"available": pool.AvailableCount(),
 			"quota":     pool.GetQuotaSummary(),
-		}
-		json.NewEncoder(w).Encode(resp)
+		})
 	}
 }
 

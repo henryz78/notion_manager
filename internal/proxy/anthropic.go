@@ -491,15 +491,17 @@ type preparedToolBridgeResponse struct {
 	Remaining      string
 	DoneText       string
 	WebSearchQuery string
+	Protocol       string
 	HasCalls       bool
 	DroppedCalls   int
 	InvalidDone    bool
 }
 
 func prepareToolBridgeResponse(content string, nativeToolUses []AgentValueEntry, allowedToolNames map[string]struct{}, aliasToOriginal map[string]string) preparedToolBridgeResponse {
-	prepared := preparedToolBridgeResponse{Remaining: content}
+	prepared := preparedToolBridgeResponse{Remaining: content, Protocol: "none"}
 
 	if len(nativeToolUses) > 0 {
+		prepared.Protocol = "native"
 		nativeCalls := nativeToolUseToOpenAI(nativeToolUses)
 		prepared.ToolCalls, prepared.DroppedCalls = filterDeclaredToolCalls(nativeCalls, allowedToolNames, aliasToOriginal)
 		prepared.HasCalls = len(prepared.ToolCalls) > 0
@@ -507,6 +509,7 @@ func prepareToolBridgeResponse(content string, nativeToolUses []AgentValueEntry,
 	if !prepared.HasCalls {
 		parsedCalls, remaining, hasParsedCalls := parseToolCalls(content)
 		if hasParsedCalls {
+			prepared.Protocol = classifyTextToolBridgeProtocol(content)
 			var dropped int
 			prepared.ToolCalls, dropped = filterDeclaredToolCalls(parsedCalls, allowedToolNames, aliasToOriginal)
 			prepared.DroppedCalls += dropped
@@ -537,6 +540,9 @@ func prepareToolBridgeResponse(content string, nativeToolUses []AgentValueEntry,
 		}
 		prepared.ToolCalls = realCalls
 		prepared.HasCalls = len(prepared.ToolCalls) > 0
+		if prepared.DoneText != "" || prepared.InvalidDone {
+			prepared.Protocol = "done"
+		}
 	}
 
 	if prepared.HasCalls {
@@ -567,6 +573,13 @@ func prepareToolBridgeResponse(content string, nativeToolUses []AgentValueEntry,
 	}
 
 	return prepared
+}
+
+func classifyTextToolBridgeProtocol(content string) string {
+	if strings.HasPrefix(strings.TrimSpace(content), "<|") {
+		return "sentinel_json"
+	}
+	return "text_json"
 }
 
 func filterDeclaredToolCalls(calls []ToolCall, allowedToolNames map[string]struct{}, aliasToOriginal map[string]string) ([]ToolCall, int) {
@@ -833,7 +846,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		requestDiagnostic := RequestDiagnosticFromContext(r.Context())
 		if requestDiagnostic != nil {
 			requestDiagnostic.SetRequestedModel(model, usedDefaultModel)
-			requestDiagnostic.SetToolCount(len(req.Tools))
+			requestDiagnostic.SetClientRequest(req.Stream, req.ToolChoice, nil, len(req.Tools))
 		}
 
 		// ── ASK mode resolution ──
@@ -863,7 +876,6 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				return
 			}
 		}
-
 		// ── Detailed request logging ──
 		logAnthropicRequest(req, model)
 
@@ -959,6 +971,18 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				log.Printf("[session] no existing session, will create new thread (fingerprint=%s)", fingerprint[:8])
 			}
 		}
+		if requestDiagnostic != nil {
+			switch {
+			case isResearcher:
+				requestDiagnostic.SetSession("", "not_applicable", 0)
+			case session == nil:
+				requestDiagnostic.SetSession(fingerprint, "new", 1)
+			case isRepeatTurn:
+				requestDiagnostic.SetSession(fingerprint, "repeat", session.TurnCount)
+			default:
+				requestDiagnostic.SetSession(fingerprint, "reused", session.TurnCount+1)
+			}
+		}
 
 		// Convert Anthropic tools to internal Tool format (done once, immutable).
 		var convertedTools []Tool
@@ -1036,6 +1060,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					session = nil
 					isFirstTurn = true
 					isRepeatTurn = false
+					if requestDiagnostic != nil {
+						requestDiagnostic.SetSession(fingerprint, "replayed_account_switch", 1)
+					}
 				}
 			}
 
@@ -1137,6 +1164,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					uploaded, err := UploadFileToNotion(acc, &fa)
 					if err != nil {
 						log.Printf("[upload] %s: attachment %d upload failed: %v", requestID, i+1, err)
+						if requestDiagnostic != nil {
+							requestDiagnostic.FinishAttempt("upload_error")
+						}
 						writeAnthropicError(w, requestID, http.StatusBadGateway, "file upload failed: "+err.Error(), "api_error")
 						return
 					}
@@ -1162,6 +1192,13 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			} else {
 				reqErr = handleAnthropicNonStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, isFirstTurn, isRepeatTurn, requestDiagnostic)
 			}
+			if requestDiagnostic != nil {
+				requestDiagnostic.FinishAttempt(requestAttemptOutcome(reqErr))
+				if reqErr == nil && !hasTools {
+					requestDiagnostic.SetToolBridge("none")
+					requestDiagnostic.SetFinishReason("stop")
+				}
+			}
 
 			// Trigger an async live quota refresh after every call so the next
 			// selection has up-to-date numbers. Deduplicated per account so
@@ -1178,6 +1215,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 						}
 						return -1
 					}())
+				if requestDiagnostic != nil {
+					requestDiagnostic.SetSessionState("replayed_account_switch")
+				}
 				continue
 			}
 			if reqErr != nil && errors.Is(reqErr, ErrQuotaExhausted) {
@@ -1192,6 +1232,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					isFirstTurn = true
 					isRepeatTurn = false
 				}
+				if requestDiagnostic != nil {
+					requestDiagnostic.SetSession(fingerprint, "replayed_account_switch", 1)
+				}
 				continue
 			}
 
@@ -1205,6 +1248,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					session = nil
 					isFirstTurn = true
 					isRepeatTurn = false
+				}
+				if requestDiagnostic != nil {
+					requestDiagnostic.SetSession(fingerprint, "replayed_after_error", 1)
 				}
 				continue
 			}
@@ -1222,6 +1268,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					// Preserve the already-injected tool contract. Rebuilding from
 					// the original messages would retry without any client tools.
 					toolRecoveryMessages = buildToolBridgeRecoveryMessages(attemptMessages)
+					if requestDiagnostic != nil {
+						requestDiagnostic.SetSession(fingerprint, "tool_recovery", 1)
+					}
 					tried = make(map[*Account]bool)
 					attempt = -1
 					continue
@@ -1244,6 +1293,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					isFirstTurn = true
 					isRepeatTurn = false
 				}
+				if requestDiagnostic != nil {
+					requestDiagnostic.SetSession(fingerprint, "replayed_account_switch", 1)
+				}
 				continue
 			}
 
@@ -1255,6 +1307,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					session = nil
 					isFirstTurn = true
 					isRepeatTurn = false
+					if requestDiagnostic != nil {
+						requestDiagnostic.SetSession(fingerprint, "replayed_after_error", 1)
+					}
 					continue
 				}
 				lastNonQuotaErr = reqErr
@@ -1271,6 +1326,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					}
 					pool.MarkTemporarilyUnavailable(acc, failure.Reason, defaultAccountFailureCooldown)
 					log.Printf("[health] %s failed with %s, trying next account: %v", acc.UserEmail, failure.Reason, reqErr)
+					if requestDiagnostic != nil {
+						requestDiagnostic.SetSession(fingerprint, "replayed_after_error", 1)
+					}
 					continue
 				}
 				break
@@ -1320,6 +1378,29 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		writeAnthropicError(w, requestID, http.StatusServiceUnavailable,
 			"all accounts exhausted after retries", "overloaded_error")
 	}
+}
+
+func requestAttemptOutcome(err error) string {
+	if err == nil {
+		return "success"
+	}
+	switch {
+	case errors.Is(err, ErrResearchQuotaExhausted):
+		return "research_quota_exhausted"
+	case errors.Is(err, ErrQuotaExhausted):
+		return "quota_exhausted"
+	case errors.Is(err, ErrEmptyResponse):
+		return "empty_response"
+	case errors.Is(err, ErrToolBridgeNoTool):
+		return "tool_recovery"
+	case errors.Is(err, ErrPremiumFeatureUnavailable):
+		return "premium_unavailable"
+	}
+	failure := classifyAccountAttemptError(err)
+	if failure.Reason != "" {
+		return failure.Reason
+	}
+	return "error"
 }
 
 func toolBridgeActive(isResearcher bool, toolCount int) bool {
@@ -1863,6 +1944,9 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 	var prepared preparedToolBridgeResponse
 	if hasTools {
 		prepared = prepareToolBridgeResponse(contentStr, nativeToolUses, allowedToolNames, toolAliasToOriginal)
+		if requestDiagnostic != nil {
+			requestDiagnostic.SetToolBridge(prepared.Protocol)
+		}
 		if prepared.DoneText != "" && detectToolBridgeNoToolResponse(prepared.DoneText) {
 			log.Printf("[bridge] %s received a no-tool refusal inside __done__, requesting clean retry", requestID)
 			return ErrToolBridgeNoTool
@@ -2060,6 +2144,13 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 		if hasCalls {
 			stopReason = "tool_use"
 		}
+		if requestDiagnostic != nil {
+			if hasCalls {
+				requestDiagnostic.SetFinishReason("tool_calls")
+			} else {
+				requestDiagnostic.SetFinishReason("stop")
+			}
+		}
 		sendAnthropicSSE(w, flusher, "message_delta", map[string]interface{}{
 			"type":  "message_delta",
 			"delta": map[string]interface{}{"stop_reason": stopReason, "stop_sequence": nil},
@@ -2166,6 +2257,9 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 	var prepared preparedToolBridgeResponse
 	if hasTools {
 		prepared = prepareToolBridgeResponse(content, nativeToolUses, allowedToolNames, toolAliasToOriginal)
+		if requestDiagnostic != nil {
+			requestDiagnostic.SetToolBridge(prepared.Protocol)
+		}
 		if prepared.DoneText != "" && detectToolBridgeNoToolResponse(prepared.DoneText) {
 			log.Printf("[bridge] %s received a no-tool refusal inside __done__, requesting clean retry", requestID)
 			return ErrToolBridgeNoTool
@@ -2287,6 +2381,13 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 		Model:      model,
 		StopReason: &stopReason,
 		Usage:      aUsage,
+	}
+	if requestDiagnostic != nil {
+		if stopReason == "tool_use" {
+			requestDiagnostic.SetFinishReason("tool_calls")
+		} else {
+			requestDiagnostic.SetFinishReason("stop")
+		}
 	}
 
 	LogAPIOutputJSON(requestID, "anthropic non-stream response", resp)
