@@ -1876,7 +1876,7 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 			log.Printf("[bridge] %s received only undeclared internal tools, requesting clean retry", requestID)
 			return ErrToolBridgeNoTool
 		}
-		if !actionDetected && detectToolBridgeNoToolResponse(prepared.Remaining) {
+		if detectToolBridgeNoToolResponse(prepared.Remaining) {
 			log.Printf("[bridge] %s detected no-tool identity-drift text (%d chars), requesting clean retry", requestID, len(prepared.Remaining))
 			return ErrToolBridgeNoTool
 		}
@@ -2178,8 +2178,7 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 			log.Printf("[bridge] %s received only undeclared internal tools, requesting clean retry", requestID)
 			return ErrToolBridgeNoTool
 		}
-		actionDetected := prepared.HasCalls || prepared.WebSearchQuery != "" || prepared.DoneText != ""
-		if !actionDetected && detectToolBridgeNoToolResponse(prepared.Remaining) {
+		if detectToolBridgeNoToolResponse(prepared.Remaining) {
 			log.Printf("[bridge] %s detected no-tool identity-drift text (%d chars), requesting clean retry", requestID, len(prepared.Remaining))
 			return ErrToolBridgeNoTool
 		}

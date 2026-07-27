@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -189,6 +190,53 @@ func TestCrossAccountToolReplayKeepsHistoryOnFreshThread(t *testing.T) {
 		if !strings.Contains(serialized, want) {
 			t.Fatalf("fresh account transcript dropped %q", want)
 		}
+	}
+}
+
+func TestFreshThreadToolReplayAddsReadOnlyHistoryRuleWithoutDroppingContent(t *testing.T) {
+	marker := "ACCOUNT_A_TOOL_RESULT_TAIL_MUST_SURVIVE"
+	messages := []ChatMessage{
+		{Role: "user", Content: "inspect the artifact"},
+		{Role: "assistant", ToolCalls: []ToolCall{{
+			ID:   "call-account-a",
+			Type: "function",
+			Function: ToolCallFunction{
+				Name:      "Read",
+				Arguments: `{"path":"artifact.txt"}`,
+			},
+		}}},
+		{Role: "tool", ToolCallID: "call-account-a", Name: "Read", Content: strings.Repeat("r", 64*1024) + marker},
+		{Role: "user", Content: "what did the completed result say?"},
+	}
+
+	for _, toolCount := range []int{1, 6} {
+		t.Run(fmt.Sprintf("tools_%d", toolCount), func(t *testing.T) {
+			tools := make([]Tool, toolCount)
+			for i := range tools {
+				tools[i] = Tool{Type: "function", Function: ToolFunction{
+					Name:       fmt.Sprintf("action_%d", i),
+					Parameters: map[string]interface{}{"type": "object"},
+				}}
+			}
+			tools[0].Function.Name = "Read"
+
+			got := injectToolsIntoMessages(cloneChatMessages(messages), tools, "gpt-5.6-sol", nil)
+			if len(got) != len(messages) {
+				t.Fatalf("message count = %d, want %d", len(got), len(messages))
+			}
+			if !strings.Contains(got[len(got)-1].Content, freshThreadToolHistoryRule) {
+				t.Fatal("fresh-thread replay did not label prior tool history as completed read-only evidence")
+			}
+			serialized, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{"call-account-a", marker, "what did the completed result say?"} {
+				if !strings.Contains(string(serialized), want) {
+					t.Fatalf("fresh-thread replay dropped %q", want)
+				}
+			}
+		})
 	}
 }
 
