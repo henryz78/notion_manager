@@ -659,8 +659,17 @@ func parseToolCalls(content string) ([]ToolCall, string, bool) {
 	remaining = content
 	stripped := strings.TrimSpace(content)
 	if strings.HasPrefix(stripped, "<|") {
-		stripped = strings.TrimSpace(strings.TrimPrefix(stripped, "<|"))
-		stripped = strings.TrimSpace(strings.TrimSuffix(stripped, "|>"))
+		sentinelPayload := strings.TrimSpace(strings.TrimPrefix(stripped, "<|"))
+		decoder := json.NewDecoder(strings.NewReader(sentinelPayload))
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err == nil {
+			if tc := parseToolCallJSON(string(raw), 0); tc != nil {
+				rest := strings.TrimSpace(sentinelPayload[int(decoder.InputOffset()):])
+				rest = strings.TrimSpace(strings.TrimPrefix(rest, "|>"))
+				return []ToolCall{*tc}, rest, true
+			}
+		}
+		stripped = strings.TrimSpace(strings.TrimSuffix(sentinelPayload, "|>"))
 	}
 
 	// Try direct {"name": "...", "arguments": {...}} format
@@ -750,7 +759,7 @@ func parseToolCallJSON(jsonStr string, index int) *ToolCall {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 	}
-	if err := json.Unmarshal([]byte(jsonStr), &call); err != nil {
+	if err := json.Unmarshal([]byte(jsonStr), &call); err != nil || strings.TrimSpace(call.Name) == "" {
 		return nil
 	}
 	argsStr := string(call.Arguments)

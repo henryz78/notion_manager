@@ -258,6 +258,35 @@ func TestPrepareToolBridgeResponseAcceptsSentinelWrappedDoneAlias(t *testing.T) 
 	}
 }
 
+func TestPrepareToolBridgeResponseAcceptsSentinelActionWithTrailingProtocolMarker(t *testing.T) {
+	prepared := prepareToolBridgeResponse(
+		`<|{"name":"action_3","arguments":{"action":"read"}}<|eot_id|>`,
+		nil,
+		map[string]struct{}{"clipboard": {}},
+		map[string]string{"action_3": "clipboard"},
+	)
+
+	if !prepared.HasCalls || len(prepared.ToolCalls) != 1 || prepared.DroppedCalls != 0 {
+		t.Fatalf("sentinel action was not recovered: %+v", prepared)
+	}
+	call := prepared.ToolCalls[0]
+	if call.Function.Name != "clipboard" || call.Function.Arguments != `{"action":"read"}` {
+		t.Fatalf("sentinel action was not restored to the client tool: %+v", call)
+	}
+}
+
+func TestParseToolCallsDoesNotTreatMalformedSentinelAsAction(t *testing.T) {
+	for _, content := range []string{
+		`<|this is ordinary malformed output`,
+		`<|{"arguments":{"action":"read"}}`,
+	} {
+		toolCalls, remaining, ok := parseToolCalls(content)
+		if ok || len(toolCalls) != 0 || remaining != content {
+			t.Fatalf("malformed sentinel should remain plain text: calls=%+v remaining=%q ok=%v", toolCalls, remaining, ok)
+		}
+	}
+}
+
 func TestPrepareToolBridgeResponsePreservesDeclaredDoneTool(t *testing.T) {
 	prepared := prepareToolBridgeResponse(
 		`{"name":"done","arguments":{"value":"client action"}}`,
