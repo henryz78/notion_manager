@@ -72,8 +72,11 @@ func TestInjectToolsIntoMessages_PreservesWrapperAndSystemMessages(t *testing.T)
 	if !strings.Contains(got[2].Content, `REQUEST: "修复登录校验"`) {
 		t.Fatalf("expected actual user query in bridged content, got %q", got[2].Content)
 	}
-	if strings.Contains(got[2].Content, "__done__") || !strings.Contains(got[2].Content, "answer the request directly in natural language") {
+	if strings.Contains(got[2].Content, "__done__") || !strings.Contains(got[2].Content, "answer directly in natural language") {
 		t.Fatalf("auto mode still forces a done/tool response: %q", got[2].Content)
+	}
+	if !strings.Contains(got[2].Content, "only a routing decision") || !strings.Contains(got[2].Content, "requires live or external data") {
+		t.Fatalf("auto mode does not use neutral routing classification: %q", got[2].Content)
 	}
 }
 

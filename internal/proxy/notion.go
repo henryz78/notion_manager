@@ -2464,7 +2464,8 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 	eventTypeCounts := make(map[string]int)
 	emittedThinkingChars := 0
 
-	// Accumulated usage across multi-turn inference (e.g., web search creates 2 turns)
+	// Peak input context and accumulated output across distinct inference steps.
+	// Summing step inputs measures total compute, not the context presented to any model call.
 	var totalUsage UsageInfo
 
 	// Track which patch value indices are thinking vs text vs tool_use
@@ -2491,6 +2492,8 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 	searchToolStates := make(map[string]*searchToolState)
 	// Deduplicate native tool_use forwarding across cumulative agent-inference events.
 	seenNativeToolUseIDs := make(map[string]bool)
+	seenUsageStepIDs := make(map[string]bool)
+	seenUsagePatchPaths := make(map[string]bool)
 	// toolCallId -> ordered web result URLs (for resolving [^toolu_*] citations).
 	toolCallSearchURLs := make(map[string][]string)
 	if knownToolCallURLs != nil {
@@ -2789,9 +2792,17 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 				}
 				// Final emit to flush any remaining text
 				emitDelta()
-				// Accumulate token usage across turns
-				if step.InputTokens != nil && step.OutputTokens != nil {
-					totalUsage.PromptTokens += *step.InputTokens
+				// Report the largest model input in this request. A workflow may run
+				// several inference steps, whose input contexts must not be summed.
+				usageStepID := step.ID
+				if usageStepID == "" {
+					usageStepID = fmt.Sprintf("finished:%d", *step.FinishedAt)
+				}
+				if step.InputTokens != nil && step.OutputTokens != nil && !seenUsageStepIDs[usageStepID] {
+					seenUsageStepIDs[usageStepID] = true
+					if *step.InputTokens > totalUsage.PromptTokens {
+						totalUsage.PromptTokens = *step.InputTokens
+					}
 					totalUsage.CompletionTokens += *step.OutputTokens
 					totalUsage.TotalTokens = totalUsage.PromptTokens + totalUsage.CompletionTokens
 				}
@@ -2843,15 +2854,25 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 
 				// Handle token usage in patch format
 				if op.O == "a" && strings.HasSuffix(op.P, "/inputTokens") {
+					if seenUsagePatchPaths[op.P] {
+						continue
+					}
 					var tokens int
 					if json.Unmarshal(op.V, &tokens) == nil {
-						totalUsage.PromptTokens += tokens
+						seenUsagePatchPaths[op.P] = true
+						if tokens > totalUsage.PromptTokens {
+							totalUsage.PromptTokens = tokens
+						}
 					}
 					continue
 				}
 				if op.O == "a" && strings.HasSuffix(op.P, "/outputTokens") {
+					if seenUsagePatchPaths[op.P] {
+						continue
+					}
 					var tokens int
 					if json.Unmarshal(op.V, &tokens) == nil {
+						seenUsagePatchPaths[op.P] = true
 						totalUsage.CompletionTokens += tokens
 						totalUsage.TotalTokens = totalUsage.PromptTokens + totalUsage.CompletionTokens
 						cb("", true, &totalUsage)

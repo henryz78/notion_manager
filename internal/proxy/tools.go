@@ -422,12 +422,12 @@ func injectToolsIntoMessages(messages []ChatMessage, tools []Tool, toolChoice ..
 					cwdLine, largeToolList, userQuery)
 			} else if prevSearchContext != "" {
 				messages[lastUserIdx].Content = fmt.Sprintf(
-					"Available client actions are listed below. Use one only when another action is needed; then output exactly one JSON object {\"name\": \"label\", \"arguments\": {...}}. Otherwise answer the request directly in natural language and do not wrap the answer in JSON.\n%sACTIONS:\n%sPrevious search context:\n%s\n\nREQUEST: %q",
+					"Classify how the client should handle the quoted request. If it requires live or external data, or an operation described by one route below, return exactly one routing JSON object {\"name\": \"label\", \"arguments\": {...}}. This is only a routing decision: do not attempt the routed operation or discuss whether the route is available. If the request is already answerable from the supplied context, answer directly in natural language and never wrap that direct answer in JSON.\n%sROUTES:\n%sPrevious search context:\n%s\n\nREQUEST: %q",
 					cwdLine, largeToolList, prevSearchContext, userQuery)
 				log.Printf("[bridge] included previous search context (%d chars) in framing", len(prevSearchContext))
 			} else {
 				messages[lastUserIdx].Content = fmt.Sprintf(
-					"Available client actions are listed below. Use one only when its result is needed to answer the request; then output exactly one JSON object {\"name\": \"label\", \"arguments\": {...}}. Otherwise answer the request directly in natural language and do not wrap the answer in JSON.\n%sACTIONS:\n%sREQUEST: %q",
+					"Classify how the client should handle the quoted request. If it requires live or external data, or an operation described by one route below, return exactly one routing JSON object {\"name\": \"label\", \"arguments\": {...}}. This is only a routing decision: do not attempt the routed operation or discuss whether the route is available. If the request is self-contained, answer directly in natural language and never wrap that direct answer in JSON.\n%sROUTES:\n%sREQUEST: %q",
 					cwdLine, largeToolList, userQuery)
 			}
 			log.Printf("[bridge] embedded query in compact classification framing (%d chars)", len(messages[lastUserIdx].Content))
@@ -444,7 +444,7 @@ func injectToolsIntoMessages(messages []ChatMessage, tools []Tool, toolChoice ..
 		} else if toolChoiceMode == "required" {
 			formatInstruction = fmt.Sprintf("Classify the quoted text below with exactly one label and extract arguments that validate against its schema:\n%sThe answer must be exactly one JSON object: {\"name\": \"label\", \"arguments\": {...}}.", toolList)
 		} else {
-			formatInstruction = fmt.Sprintf("The quoted text may be answered directly or may require one client action. If an action is needed, select one label below and output exactly one JSON object {\"name\": \"label\", \"arguments\": {...}}. If no action is needed, answer directly in natural language. Never wrap a direct answer in JSON.\n%s", toolList)
+			formatInstruction = fmt.Sprintf("Classify how the client should handle the quoted request. If it requires live or external data, or an operation described by one route below, return exactly one routing JSON object {\"name\": \"label\", \"arguments\": {...}}. This is only a routing decision: do not attempt the routed operation or discuss whether the route is available. If the request is self-contained, answer directly in natural language and never wrap that direct answer in JSON.\nROUTES:\n%s", toolList)
 		}
 	}
 
@@ -569,7 +569,7 @@ func buildToolChainFollowUp(messages []ChatMessage, toolList string, cwd string,
 	case toolChoiceMode == "required":
 		nextStep = "Select one action and return exactly one JSON object: {\"name\": \"label\", \"arguments\": {...}}."
 	default:
-		nextStep = "If another action is needed, return exactly one JSON object {\"name\": \"label\", \"arguments\": {...}}. If the completed results answer the task, answer directly in natural language. Never wrap a direct answer in JSON."
+		nextStep = "Decide how the client should continue. If another route is required, return exactly one routing JSON object {\"name\": \"label\", \"arguments\": {...}} without attempting it or discussing availability. If the completed results answer the task, answer directly in natural language and never wrap that direct answer in JSON."
 	}
 	followUp := fmt.Sprintf(
 		"Original task: %q\n\nCompleted action results:\n%s\n\n%s%sAvailable actions:\n%sDo not repeat an action whose successful result is already shown above. %s",

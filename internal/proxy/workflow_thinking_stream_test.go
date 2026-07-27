@@ -23,6 +23,44 @@ func TestParseNDJSONStreamAcceptsLargeUpstreamEvent(t *testing.T) {
 	}
 }
 
+func TestParseNDJSONStreamCountsEachFinishedStepUsageOnce(t *testing.T) {
+	step1 := `{"type":"agent-inference","id":"step1","value":[{"type":"text","content":"first"}],"finishedAt":1,"inputTokens":16000,"outputTokens":20}`
+	step2 := `{"type":"agent-inference","id":"step2","value":[{"type":"text","content":"second"}],"finishedAt":2,"inputTokens":500,"outputTokens":5}`
+	stream := strings.Join([]string{step1, step1, step2, step2}, "\n")
+
+	var finalUsage UsageInfo
+	err := parseNDJSONStream(bytes.NewBufferString(stream), "", func(delta string, done bool, usage *UsageInfo) {
+		if usage != nil {
+			finalUsage = *usage
+		}
+	}, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalUsage.PromptTokens != 16_000 || finalUsage.CompletionTokens != 25 || finalUsage.TotalTokens != 16_025 {
+		t.Fatalf("usage did not preserve peak input and distinct output totals: %+v", finalUsage)
+	}
+}
+
+func TestParseNDJSONStreamCountsEachPatchUsagePathOnce(t *testing.T) {
+	patch1 := `{"type":"patch","v":[{"o":"a","p":"/s/0/inputTokens","v":16000},{"o":"a","p":"/s/0/outputTokens","v":20}]}`
+	patch2 := `{"type":"patch","v":[{"o":"a","p":"/s/1/inputTokens","v":500},{"o":"a","p":"/s/1/outputTokens","v":5}]}`
+	stream := strings.Join([]string{patch1, patch1, patch2, patch2}, "\n")
+
+	var finalUsage UsageInfo
+	err := parseNDJSONStream(bytes.NewBufferString(stream), "", func(delta string, done bool, usage *UsageInfo) {
+		if usage != nil {
+			finalUsage = *usage
+		}
+	}, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalUsage.PromptTokens != 16_000 || finalUsage.CompletionTokens != 25 || finalUsage.TotalTokens != 16_025 {
+		t.Fatalf("patch usage did not preserve peak input and distinct output totals: %+v", finalUsage)
+	}
+}
+
 func TestParseNDJSONStreamEmitsWorkflowProcessThinking(t *testing.T) {
 	stream := strings.Join([]string{
 		`{"type":"agent-inference","id":"step1","value":[{"type":"thinking","content":"Let me search"}]}`,
