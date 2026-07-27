@@ -343,7 +343,8 @@ function RequestRow({
           {entry.tool_count > 0 ? String(entry.tool_count) : t('request_history.none')}
         </div>
         <div className="text-[10px] text-text-secondary tabular-nums leading-5">
-          <div>{t('request_history.input')} {formatCompactNumber(entry.input_tokens)}</div>
+          <div>{t('request_history.context')} {formatCompactNumber(entry.context_tokens || entry.input_tokens)}</div>
+          <div>{t('request_history.current_input')} {formatCompactNumber(entry.input_tokens)}</div>
           <div>{t('request_history.output')} {formatCompactNumber(entry.output_tokens)}</div>
         </div>
         <div className="text-[11px] text-text-secondary tabular-nums leading-5">{formatDuration(entry.duration_ms)}</div>

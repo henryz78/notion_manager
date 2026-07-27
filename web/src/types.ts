@@ -210,6 +210,7 @@ export interface RequestHistoryEntry {
   prompt_mode: RequestPromptMode | string
   tool_count: number
   input_tokens: number
+  context_tokens: number
   output_tokens: number
   duration_ms: number
   status: RequestHistoryStatus | string

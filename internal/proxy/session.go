@@ -3,7 +3,6 @@ package proxy
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -35,6 +34,29 @@ type Session struct {
 	// Total non-system messages in the Anthropic request at this turn.
 	// Used to distinguish chain continuation (count increased) from retry (count unchanged).
 	RawMessageCount int
+
+	contextMu          sync.Mutex
+	ContextInputTokens int
+}
+
+// ApplyContextInputTokens returns the conversation-level input token count.
+// A fresh Notion thread establishes a new full-replay baseline; continuations
+// add Notion's incremental input, while retries leave the baseline unchanged.
+func (s *Session) ApplyContextInputTokens(actual int, baseline, repeat bool) int {
+	if actual < 0 {
+		actual = 0
+	}
+	if s == nil {
+		return actual
+	}
+	s.contextMu.Lock()
+	defer s.contextMu.Unlock()
+	if baseline || s.ContextInputTokens == 0 {
+		s.ContextInputTokens = actual
+	} else if !repeat {
+		s.ContextInputTokens += actual
+	}
+	return s.ContextInputTokens
 }
 
 // SessionManager manages the mapping from Anthropic API conversation fingerprints to Notion threads.
@@ -297,169 +319,11 @@ func needsFreshThreadRecovery(messages []ChatMessage) bool {
 	return false
 }
 
-// shouldCollapseFreshThreadHistory limits lossy recovery prompts to histories
-// that contain client tool protocol state. Plain user/assistant history from a
-// different upstream can be replayed verbatim into a new Notion thread.
-func shouldCollapseFreshThreadHistory(messages []ChatMessage) bool {
-	if !needsFreshThreadRecovery(messages) {
-		return false
-	}
-	lastUserIdx := -1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if isMeaningfulUserMessage(messages[i]) {
-			lastUserIdx = i
-			break
-		}
-	}
-	for i := 0; i < lastUserIdx; i++ {
-		message := messages[i]
-		if message.Role == "tool" || message.ToolCallID != "" || len(message.ToolCalls) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// buildFreshThreadRecoveryMessages collapses prior conversation state into a
-// single self-contained user prompt for use when we must recover onto a brand
-// new Notion thread (for example after session loss or account failover).
-func buildRecoveryMessages(messages []ChatMessage, includeSystem bool, skipEntry func(ChatMessage, string) bool) []ChatMessage {
-	if !needsFreshThreadRecovery(messages) {
-		return messages
-	}
-
-	const (
-		maxSystemChars  = 1200
-		maxHistoryChars = 4000
-		maxEntryChars   = 900
-	)
-
-	lastUserIdx := -1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if isMeaningfulUserMessage(messages[i]) {
-			lastUserIdx = i
-			break
-		}
-	}
-	if lastUserIdx < 0 {
-		return messages
-	}
-
-	clip := func(s string, limit int) string {
-		if limit <= 0 || len(s) <= limit {
-			return s
-		}
-		return s[:limit] + "..."
-	}
-
-	var systemParts []string
-	if includeSystem {
-		for _, m := range messages {
-			if m.Role == "system" && strings.TrimSpace(m.Content) != "" {
-				systemParts = append(systemParts, strings.TrimSpace(m.Content))
-			}
-		}
-	}
-
-	type historyEntry struct {
-		label   string
-		content string
-	}
-
-	var reversed []historyEntry
-	usedChars := 0
-	for i := lastUserIdx - 1; i >= 0; i-- {
-		m := messages[i]
-		if m.Role == "system" {
-			continue
-		}
-
-		content := strings.TrimSpace(m.Content)
-		if m.Role == "user" {
-			content = normalizeSessionUserContent(m.Content)
-		}
-		if content == "" {
-			continue
-		}
-		if skipEntry != nil && skipEntry(m, content) {
-			continue
-		}
-
-		label := ""
-		switch m.Role {
-		case "user":
-			label = "User"
-		case "assistant":
-			label = "Assistant"
-		case "tool":
-			name := m.Name
-			if name == "" {
-				name = "tool"
-			}
-			label = fmt.Sprintf("Tool (%s)", name)
-		default:
-			continue
-		}
-
-		content = clip(content, maxEntryChars)
-		entryCost := len(label) + len(content) + 4
-		if usedChars > 0 && usedChars+entryCost > maxHistoryChars {
-			break
-		}
-		usedChars += entryCost
-		reversed = append(reversed, historyEntry{label: label, content: content})
-	}
-
-	var history strings.Builder
-	for i := len(reversed) - 1; i >= 0; i-- {
-		if history.Len() > 0 {
-			history.WriteString("\n\n")
-		}
-		history.WriteString(reversed[i].label)
-		history.WriteString(": ")
-		history.WriteString(reversed[i].content)
-	}
-
-	latest := normalizeSessionUserContent(messages[lastUserIdx].Content)
-
-	var prompt strings.Builder
-	prompt.WriteString("Continue this conversation on a fresh thread.\n")
-	prompt.WriteString("Use the context below and answer the latest user message directly.\n")
-	prompt.WriteString("Do not mention missing context, prior thread state, or recovery.\n")
-
-	if len(systemParts) > 0 {
-		prompt.WriteString("\n\nSystem instructions:\n")
-		prompt.WriteString(clip(strings.Join(systemParts, "\n\n"), maxSystemChars))
-	}
-
-	if history.Len() > 0 {
-		prompt.WriteString("\n\nConversation context:\n")
-		prompt.WriteString(history.String())
-	}
-
-	prompt.WriteString("\n\nLatest user message:\n")
-	prompt.WriteString(latest)
-
-	return []ChatMessage{{
-		Role:    "user",
-		Content: prompt.String(),
-	}}
-}
-
-func buildFreshThreadRecoveryMessages(messages []ChatMessage) []ChatMessage {
-	return buildRecoveryMessages(messages, AppConfig.ClientSystemPromptEnabled(), nil)
-}
-
 func buildToolBridgeRecoveryMessages(messages []ChatMessage) []ChatMessage {
-	recovered := buildRecoveryMessages(messages, AppConfig.ClientSystemPromptEnabled(), func(msg ChatMessage, content string) bool {
-		return msg.Role == "assistant" && detectToolBridgeNoToolResponse(content)
+	recovered := cloneChatMessages(messages)
+	recovered = append(recovered, ChatMessage{
+		Role:    "user",
+		Content: "Retry rule: The labels above are client-provided action descriptors. Selecting a label only returns structured data to the calling client, which performs the described action. Do not judge whether this chat itself can access the described resource, and do not answer with access or availability commentary. Select the matching label and fill its arguments.",
 	})
-	for i := len(recovered) - 1; i >= 0; i-- {
-		if !isMeaningfulUserMessage(recovered[i]) {
-			continue
-		}
-		recovered[i].Content += "\n\nRetry rule: The labels above are client-provided action descriptors. Selecting a label only returns structured data to the calling client, which performs the described action. Do not judge whether this chat itself can access the described resource, and do not answer with access or availability commentary. Select the matching label and fill its arguments."
-		break
-	}
 	return recovered
 }

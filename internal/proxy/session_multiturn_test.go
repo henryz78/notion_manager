@@ -95,9 +95,11 @@ func TestBuildSessionChainFollowUpUsesLatestUserTask(t *testing.T) {
 	}
 }
 
-// TestBuildSessionChainFollowUp_TruncatesLargeOutput verifies truncation of large tool output.
-func TestBuildSessionChainFollowUp_TruncatesLargeOutput(t *testing.T) {
-	largeOutput := strings.Repeat("x", 5000)
+// TestBuildSessionChainFollowUp_PreservesLargeOutput verifies that the bridge
+// never clips client tool results.
+func TestBuildSessionChainFollowUp_PreservesLargeOutput(t *testing.T) {
+	marker := "TAIL_MUST_SURVIVE"
+	largeOutput := strings.Repeat("x", 5000) + marker
 	messages := []ChatMessage{
 		{Role: "user", Content: "read large file"},
 		{Role: "assistant", Content: "Reading.", ToolCalls: []ToolCall{
@@ -109,12 +111,8 @@ func TestBuildSessionChainFollowUp_TruncatesLargeOutput(t *testing.T) {
 	result := buildSessionChainFollowUp(messages, "- Read(file_path: str)\n", "")
 
 	content := result[0].Content
-	if !strings.Contains(content, "... (truncated)") {
-		t.Errorf("expected truncation marker in large output")
-	}
-	// Should be well under the original 5000 chars
-	if len(content) > 5000 {
-		t.Errorf("follow-up too large: %d chars (expected <= 5000)", len(content))
+	if !strings.Contains(content, largeOutput) || !strings.Contains(content, marker) {
+		t.Error("large tool output was truncated")
 	}
 }
 
@@ -300,10 +298,10 @@ func TestSessionContinuationDetection(t *testing.T) {
 	}
 }
 
-// TestInjectToolsSessionVsLegacy verifies that injectToolsIntoMessages takes
-// the session-based path when a session is provided, and the legacy collapse
-// path when no session exists.
-func TestInjectToolsSessionVsLegacy(t *testing.T) {
+// TestInjectToolsSessionVsFreshThread verifies that an existing Notion thread
+// receives only the follow-up, while a fresh thread receives the full protocol
+// history plus that follow-up.
+func TestInjectToolsSessionVsFreshThread(t *testing.T) {
 	// Build a chain continuation scenario with >5 tools (triggers useLargeToolSet)
 	tools := []Tool{
 		{Type: "function", Function: ToolFunction{Name: "Bash", Description: "Execute shell command", Parameters: map[string]interface{}{"type": "object"}}},
@@ -336,17 +334,19 @@ func TestInjectToolsSessionVsLegacy(t *testing.T) {
 		t.Error("session path: should preserve the original query for reliable completion")
 	}
 
-	// Without session: should use legacy collapse with the original query and
-	// the neutral next-label contract.
+	// Without a session, preserve all protocol messages for cross-account replay.
 	resultNoSession := injectToolsIntoMessages(messages, tools, "claude-sonnet-4-20250514", nil)
 
-	if len(resultNoSession) != 1 {
-		t.Fatalf("legacy path: expected 1 message, got %d", len(resultNoSession))
+	if len(resultNoSession) != len(messages)+1 {
+		t.Fatalf("fresh-thread path: expected %d messages, got %d", len(messages)+1, len(resultNoSession))
 	}
-	if !strings.Contains(resultNoSession[0].Content, "Classify the next step for the original task") {
-		t.Error("legacy path: expected next-label framing")
+	for i := range messages {
+		if resultNoSession[i].Role != messages[i].Role || resultNoSession[i].Content != messages[i].Content || resultNoSession[i].ToolCallID != messages[i].ToolCallID {
+			t.Fatalf("fresh-thread path altered message %d: got %#v want %#v", i, resultNoSession[i], messages[i])
+		}
 	}
-	if !strings.Contains(resultNoSession[0].Content, "list all go files") {
-		t.Error("legacy path: expected original query in collapsed message")
+	if !strings.Contains(resultNoSession[len(messages)].Content, "Completed action results:") ||
+		!strings.Contains(resultNoSession[len(messages)].Content, "list all go files") {
+		t.Error("fresh-thread path should append the complete continuation instruction")
 	}
 }

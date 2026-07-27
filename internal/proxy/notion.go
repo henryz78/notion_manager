@@ -1655,16 +1655,40 @@ func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel strin
 				CreatedAt: now,
 			})
 		case "assistant":
+			content := msg.Content
+			if len(msg.ToolCalls) > 0 {
+				toolCalls, _ := json.Marshal(msg.ToolCalls)
+				if content != "" {
+					content += "\n\n"
+				}
+				content += "[Client tool calls preserved as read-only conversation history]\n" + string(toolCalls)
+			}
 			transcript = append(transcript, TranscriptMsg{
 				Type: "assistant-reply",
 				Value: []map[string]interface{}{
 					{
 						"type": "agent-inference",
 						"value": []map[string]string{
-							{"type": "text", "content": msg.Content},
+							{"type": "text", "content": content},
 						},
 					},
 				},
+			})
+		case "tool":
+			content := fmt.Sprintf(
+				"[Client tool result preserved as read-only conversation history]\nname: %s\ntool_call_id: %s\nresult:\n%s",
+				msg.Name, msg.ToolCallID, msg.Content,
+			)
+			if systemPrompt != "" {
+				content = systemPrompt + "\n" + content
+				systemPrompt = ""
+			}
+			transcript = append(transcript, ResearcherTranscriptMsg{
+				ID:        generateUUIDv4(),
+				Type:      "user",
+				Value:     [][]string{{content}},
+				UserID:    acc.UserID,
+				CreatedAt: now,
 			})
 		}
 	}

@@ -85,23 +85,16 @@ func TestApplyStructuredOutputBridge_JSONSchema(t *testing.T) {
 	}
 
 	bridged := applyStructuredOutputBridge(messages, cfg)
-	if len(bridged) != 1 {
-		t.Fatalf("expected 1 bridged message, got %d", len(bridged))
+	if len(bridged) != len(messages) {
+		t.Fatalf("expected %d preserved messages, got %d", len(messages), len(bridged))
 	}
-	if bridged[0].Role != "user" {
-		t.Fatalf("expected bridged role=user, got %s", bridged[0].Role)
+	for i := 0; i < len(messages)-1; i++ {
+		if bridged[i].Role != messages[i].Role || bridged[i].Content != messages[i].Content {
+			t.Fatalf("structured output bridge altered message %d", i)
+		}
 	}
 
-	content := bridged[0].Content
-	if strings.Contains(content, "x-anthropic-billing-header") {
-		t.Fatalf("structured output bridge leaked billing header: %s", content)
-	}
-	if strings.Contains(content, "You are Claude Code") {
-		t.Fatalf("structured output bridge leaked Claude identity line: %s", content)
-	}
-	if !strings.Contains(content, `Return JSON with a single "title" field.`) {
-		t.Fatalf("structured output bridge dropped system instruction: %s", content)
-	}
+	content := bridged[len(bridged)-1].Content
 	if !strings.Contains(content, "检查为什么右侧预览栏的md copy按钮出不来") {
 		t.Fatalf("structured output bridge dropped user content: %s", content)
 	}
@@ -110,7 +103,7 @@ func TestApplyStructuredOutputBridge_JSONSchema(t *testing.T) {
 	}
 }
 
-func TestInjectToolsIntoMessages_DropsWrapperOnlyUserMessage(t *testing.T) {
+func TestInjectToolsIntoMessages_PreservesWrapperAndSystemMessages(t *testing.T) {
 	tools := []Tool{
 		{Type: "function", Function: ToolFunction{Name: "Bash", Description: "Execute shell command", Parameters: map[string]interface{}{"type": "object"}}},
 		{Type: "function", Function: ToolFunction{Name: "Read", Description: "Read a file", Parameters: map[string]interface{}{"type": "object"}}},
@@ -126,19 +119,14 @@ func TestInjectToolsIntoMessages_DropsWrapperOnlyUserMessage(t *testing.T) {
 	}
 
 	got := injectToolsIntoMessages(messages, tools, "claude-opus-4-6", nil)
-	if len(got) != 1 {
-		t.Fatalf("expected 1 bridged message, got %d", len(got))
+	if len(got) != len(messages) {
+		t.Fatalf("expected %d preserved messages, got %d", len(messages), len(got))
 	}
-
-	content := got[0].Content
-	if strings.Contains(content, "User: Hello") || strings.Contains(content, "\nHello\n") {
-		t.Fatalf("wrapper-only message should not turn into synthetic Hello: %q", content)
+	if got[0].Content != messages[0].Content || got[1].Content != messages[1].Content {
+		t.Fatalf("system or wrapper message was altered: %#v", got)
 	}
-	if strings.Contains(content, "<available-deferred-tools>") {
-		t.Fatalf("wrapper-only message leaked into bridged content: %q", content)
-	}
-	if !strings.Contains(content, `TEST INPUT: "修复登录校验"`) {
-		t.Fatalf("expected actual user query in bridged content, got %q", content)
+	if !strings.Contains(got[2].Content, `TEST INPUT: "修复登录校验"`) {
+		t.Fatalf("expected actual user query in bridged content, got %q", got[2].Content)
 	}
 }
 
@@ -377,7 +365,7 @@ func TestLargeClientToolSetUsesAnonymousLabelsAndFullSchemasBelowLimit(t *testin
 	}
 }
 
-func TestBuildSizedToolListCompactsByBytesNotCount(t *testing.T) {
+func TestBuildSizedToolListNeverCompactsClientSchemas(t *testing.T) {
 	smallTools := make([]Tool, 6)
 	for i := range smallTools {
 		smallTools[i] = Tool{Type: "function", Function: ToolFunction{
@@ -392,21 +380,22 @@ func TestBuildSizedToolListCompactsByBytesNotCount(t *testing.T) {
 		}}
 	}
 	list, compacted, fullBytes := buildSizedToolList(smallTools)
-	if compacted || fullBytes > maxFullToolDefinitionBytes || !strings.Contains(list, `"enum":["fast","exact"]`) {
+	if compacted || fullBytes != len(list) || !strings.Contains(list, `"enum":["fast","exact"]`) {
 		t.Fatalf("six small tools should retain full schemas: compacted=%v bytes=%d list=%q", compacted, fullBytes, list)
 	}
 
+	marker := "SCHEMA_TAIL_MUST_SURVIVE"
 	hugeTool := Tool{Type: "function", Function: ToolFunction{
 		Name:        "action_1",
-		Description: strings.Repeat("x", maxFullToolDefinitionBytes+1),
-		Parameters:  map[string]interface{}{"type": "object"},
+		Description: strings.Repeat("x", 64*1024) + marker,
+		Parameters:  map[string]interface{}{"type": "object", "description": marker},
 	}}
 	list, compacted, fullBytes = buildSizedToolList([]Tool{hugeTool})
-	if !compacted || fullBytes <= maxFullToolDefinitionBytes || strings.Contains(list, "Argument schema:") || len(list) >= fullBytes {
-		t.Fatalf("one oversized tool should use compact definitions: compacted=%v bytes=%d sent=%d", compacted, fullBytes, len(list))
+	if compacted || fullBytes != len(list) || !strings.Contains(list, "Argument schema:") || strings.Count(list, marker) != 2 {
+		t.Fatalf("oversized tool definition was altered: compacted=%v bytes=%d sent=%d", compacted, fullBytes, len(list))
 	}
 	forced := buildForcedToolList([]Tool{hugeTool}, "action_1")
-	if !strings.Contains(forced, "Argument schema:") || len(forced) <= maxFullToolDefinitionBytes {
+	if !strings.Contains(forced, "Argument schema:") || strings.Count(forced, marker) != 2 {
 		t.Fatal("a forced tool must retain its complete definition")
 	}
 }

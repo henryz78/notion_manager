@@ -515,26 +515,35 @@ func TestBuildPartialTranscriptUsesCurrentAccountsPageID(t *testing.T) {
 	}
 }
 
-func TestRecoveryPromptOmitsClientSystemInPersonalInstructionsMode(t *testing.T) {
+func TestFullReplayOmitsClientSystemInPersonalInstructionsMode(t *testing.T) {
 	previous := AppConfig
 	AppConfig = DefaultConfig()
 	AppConfig.Proxy.UseClientSystemPrompt = false
 	AppConfig.Proxy.UseNotionPersonalInstructions = true
 	t.Cleanup(func() { AppConfig = previous })
 
-	recovered := buildFreshThreadRecoveryMessages([]ChatMessage{
+	messages := []ChatMessage{
 		{Role: "system", Content: "CLIENT SYSTEM PROMPT MUST NOT BE SENT"},
 		{Role: "user", Content: "first"},
 		{Role: "assistant", Content: "answer"},
 		{Role: "user", Content: "second"},
-	})
-	if len(recovered) != 1 {
-		t.Fatalf("recovered message count = %d, want 1", len(recovered))
 	}
-	if strings.Contains(recovered[0].Content, "CLIENT SYSTEM PROMPT") {
-		t.Fatalf("client system prompt leaked through recovery: %q", recovered[0].Content)
+	transcript := buildFullTranscript(
+		&Account{UserID: "user", UserEmail: "user@example.com"}, messages,
+		"model", false, false, nil, false, nil, "config", "context",
+		"2026-07-26T00:00:00Z", false, true, "page-id",
+	)
+	raw, err := json.Marshal(transcript)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(recovered[0].Content, "second") {
-		t.Fatalf("latest user message missing from recovery: %q", recovered[0].Content)
+	serialized := string(raw)
+	if strings.Contains(serialized, "CLIENT SYSTEM PROMPT") {
+		t.Fatalf("client system prompt leaked through full replay: %s", serialized)
+	}
+	for _, want := range []string{"first", "answer", "second"} {
+		if !strings.Contains(serialized, want) {
+			t.Fatalf("full replay dropped %q: %s", want, serialized)
+		}
 	}
 }

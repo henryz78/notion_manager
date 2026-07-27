@@ -755,27 +755,6 @@ func shouldStartFreshForAmbiguousSingleTurn(session *Session, rawMsgCount int, s
 	return rawMsgCount == 1 && session.RawMessageCount == 1
 }
 
-func stripStructuredOutputSystemNoise(content string) string {
-	content = normalizeSessionSystemContent(content)
-	if content == "" {
-		return ""
-	}
-	lines := strings.Split(content, "\n")
-	filtered := make([]string, 0, len(lines))
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			filtered = append(filtered, "")
-			continue
-		}
-		if strings.HasPrefix(trimmed, "You are Claude Code") {
-			continue
-		}
-		filtered = append(filtered, line)
-	}
-	return strings.TrimSpace(strings.Join(filtered, "\n"))
-}
-
 func applyStructuredOutputBridge(messages []ChatMessage, outputConfig *AnthropicOutputConfig) []ChatMessage {
 	if outputConfig == nil || outputConfig.Format == nil || outputConfig.Format.Type != "json_schema" || outputConfig.Format.Schema == nil {
 		return messages
@@ -786,54 +765,23 @@ func applyStructuredOutputBridge(messages []ChatMessage, outputConfig *Anthropic
 		schemaJSON, _ = json.Marshal(outputConfig.Format.Schema)
 	}
 
-	var instructionParts []string
-	var conversationParts []string
-	for _, msg := range messages {
-		content := strings.TrimSpace(msg.Content)
-		if content == "" {
-			continue
-		}
-		switch msg.Role {
-		case "system":
-			cleaned := stripStructuredOutputSystemNoise(content)
-			if cleaned != "" {
-				instructionParts = append(instructionParts, cleaned)
-			}
-		case "user":
-			cleaned := stripSystemReminders(content)
-			if cleaned == "" {
-				cleaned = content
-			}
-			conversationParts = append(conversationParts, "User:\n"+cleaned)
-		case "assistant":
-			conversationParts = append(conversationParts, "Assistant:\n"+content)
-		case "tool":
-			conversationParts = append(conversationParts, "Tool result:\n"+content)
-		}
-	}
-
-	if len(conversationParts) == 0 {
-		return messages
-	}
-
 	var prompt strings.Builder
-	prompt.WriteString("Return exactly one JSON object that matches this schema.\n")
+	prompt.WriteString("\n\nReturn exactly one JSON object that matches this schema.\n")
 	prompt.WriteString("Do not output markdown fences, explanations, or extra text.\n\n")
 	prompt.WriteString("Schema:\n")
 	prompt.Write(schemaJSON)
-	if len(instructionParts) > 0 {
-		prompt.WriteString("\n\nInstructions:\n")
-		prompt.WriteString(strings.Join(instructionParts, "\n\n"))
-	}
-	prompt.WriteString("\n\nConversation:\n")
-	prompt.WriteString(strings.Join(conversationParts, "\n\n"))
 	prompt.WriteString("\n\nJSON only.")
 
-	log.Printf("[bridge] structured output bridge applied (json_schema, %d chars)", prompt.Len())
-	return []ChatMessage{{
-		Role:    "user",
-		Content: prompt.String(),
-	}}
+	result := cloneChatMessages(messages)
+	for i := len(result) - 1; i >= 0; i-- {
+		if result[i].Role == "user" && result[i].ToolCallID == "" {
+			result[i].Content += prompt.String()
+			log.Printf("[bridge] structured output constraint appended without collapsing history (%d chars)", prompt.Len())
+			return result
+		}
+	}
+	result = append(result, ChatMessage{Role: "user", Content: strings.TrimSpace(prompt.String())})
+	return result
 }
 
 // SSE events are constructed using maps for precise JSON field control
@@ -921,6 +869,10 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 
 		// Convert Anthropic messages to internal ChatMessage format
 		messages, fileAttachments := convertAnthropicMessages(req.System, req.Messages)
+		if err := validateToolProtocol(messages); err != nil {
+			writeAnthropicError(w, requestID, http.StatusBadRequest, "invalid tool history: "+err.Error(), "invalid_request_error")
+			return
+		}
 		if len(fileAttachments) > 0 {
 			log.Printf("[upload-debug] extracted %d file attachment(s) from request", len(fileAttachments))
 		}
@@ -1031,8 +983,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			convertedTools, toolDetectedWebSearch = filterNativeSearchTools(convertedTools)
 			if toolDetectedWebSearch {
 				enableWebSearch = true
-				log.Printf("[bridge] WebSearch/WebFetch detected — enabling Notion native search, stripping history")
-				messages = stripWebSearchHistory(messages)
+				log.Printf("[bridge] WebSearch/WebFetch detected — enabling Notion native search and preserving history")
 			}
 			bridgeTools, originalToToolAlias, toolAliasToOriginal = aliasClientTools(convertedTools)
 		} else if !isResearcher && req.OutputConfig != nil && req.OutputConfig.Format != nil && req.OutputConfig.Format.Type == "json_schema" {
@@ -1143,21 +1094,11 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 
 			requestMessages := attemptMessages
 			if !isResearcher && isFirstTurn {
-				switch {
-				case len(toolRecoveryMessages) > 0:
+				if len(toolRecoveryMessages) > 0 {
 					requestMessages = cloneChatMessages(toolRecoveryMessages)
-				case shouldCollapseFreshThreadHistory(attemptMessages):
-					collapsed := buildFreshThreadRecoveryMessages(attemptMessages)
-					if len(collapsed) == 1 {
-						log.Printf("[session] collapsed history to self-contained fresh-thread prompt (%d msgs → %d chars) for account %s",
-							len(attemptMessages), len(collapsed[0].Content), acc.UserEmail)
-					}
-					requestMessages = collapsed
-				default:
-					if needsFreshThreadRecovery(attemptMessages) {
-						log.Printf("[session] replaying %d plain client-history messages into fresh Notion thread for account %s",
-							len(attemptMessages), acc.UserEmail)
-					}
+				} else if needsFreshThreadRecovery(attemptMessages) {
+					log.Printf("[session] replaying all %d client-history messages into fresh Notion thread for account %s",
+						len(attemptMessages), acc.UserEmail)
 				}
 			}
 
@@ -1217,9 +1158,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					reqErr = handleResearcherNonStream(w, acc, requestMessages, model, requestID, hasThinking, requestDiagnostic)
 				}
 			} else if req.Stream {
-				reqErr = handleAnthropicStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic)
+				reqErr = handleAnthropicStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, isFirstTurn, isRepeatTurn, requestDiagnostic)
 			} else {
-				reqErr = handleAnthropicNonStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic)
+				reqErr = handleAnthropicNonStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, isFirstTurn, isRepeatTurn, requestDiagnostic)
 			}
 
 			// Trigger an async live quota refresh after every call so the next
@@ -1805,7 +1746,7 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 	outputTokens := 0
 	inputTokens := 0
 	if finalUsage != nil {
-		inputTokens = finalUsage.PromptTokens
+		inputTokens = contextInputTokens(callOpts.Session, finalUsage.PromptTokens, callOpts.ContextBaseline, callOpts.ContextRepeat, callOpts.RequestDiagnostic)
 		outputTokens = finalUsage.CompletionTokens
 	}
 	ensureHeaders()
@@ -1852,7 +1793,7 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 }
 
 // handleAnthropicStream handles streaming Anthropic response
-func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic) error {
+func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, contextBaseline, contextRepeat bool, requestDiagnostic *RequestDiagnostic) error {
 	var fullContent strings.Builder
 	var finalUsage *UsageInfo
 	defer func() {
@@ -1877,6 +1818,8 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 		KnownCitationDocs:     &knownCitationDocs,
 		KnownToolCallURLs:     &knownToolCallURLs,
 		Session:               session,
+		ContextBaseline:       contextBaseline,
+		ContextRepeat:         contextRepeat,
 		RequestID:             requestID,
 		RequestDiagnostic:     requestDiagnostic,
 	}
@@ -1942,7 +1885,7 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 	// Build usage
 	aUsage := &AnthropicUsage{}
 	if finalUsage != nil {
-		aUsage.InputTokens = finalUsage.PromptTokens
+		aUsage.InputTokens = contextInputTokens(session, finalUsage.PromptTokens, contextBaseline, contextRepeat, requestDiagnostic)
 		aUsage.OutputTokens = finalUsage.CompletionTokens
 	}
 
@@ -2079,7 +2022,6 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 			}
 		}
 		if finalUsage != nil {
-			aUsage.InputTokens = finalUsage.PromptTokens
 			aUsage.OutputTokens = finalUsage.CompletionTokens
 		}
 
@@ -2141,7 +2083,7 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 }
 
 // handleAnthropicNonStream handles non-streaming Anthropic response
-func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic) error {
+func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, contextBaseline, contextRepeat bool, requestDiagnostic *RequestDiagnostic) error {
 	var fullContent strings.Builder
 	var finalUsage *UsageInfo
 	defer func() {
@@ -2166,6 +2108,8 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 		KnownCitationDocs:     &knownCitationDocs,
 		KnownToolCallURLs:     &knownToolCallURLs,
 		Session:               session,
+		ContextBaseline:       contextBaseline,
+		ContextRepeat:         contextRepeat,
 		RequestID:             requestID,
 		RequestDiagnostic:     requestDiagnostic,
 	}
@@ -2243,7 +2187,7 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 
 	aUsage := &AnthropicUsage{}
 	if finalUsage != nil {
-		aUsage.InputTokens = finalUsage.PromptTokens
+		aUsage.InputTokens = contextInputTokens(session, finalUsage.PromptTokens, contextBaseline, contextRepeat, requestDiagnostic)
 		aUsage.OutputTokens = finalUsage.CompletionTokens
 	}
 
@@ -2811,6 +2755,17 @@ func recordCompletedAttemptUsage(acc *Account, model string, usage *UsageInfo, r
 	if requestDiagnostic != nil {
 		requestDiagnostic.AddUsage(usage.PromptTokens, usage.CompletionTokens)
 	}
+}
+
+func contextInputTokens(session *Session, actual int, baseline, repeat bool, requestDiagnostic *RequestDiagnostic) int {
+	contextTokens := actual
+	if session != nil {
+		contextTokens = session.ApplyContextInputTokens(actual, baseline, repeat)
+	}
+	if requestDiagnostic != nil {
+		requestDiagnostic.SetContextTokens(contextTokens)
+	}
+	return contextTokens
 }
 
 func writeAnthropicError(w http.ResponseWriter, requestID string, status int, message, errType string) {

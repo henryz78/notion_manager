@@ -56,6 +56,7 @@ type RequestHistoryEntry struct {
 	PromptMode       string    `json:"prompt_mode"`
 	ToolCount        int       `json:"tool_count"`
 	InputTokens      int       `json:"input_tokens"`
+	ContextTokens    int       `json:"context_tokens"`
 	OutputTokens     int       `json:"output_tokens"`
 	DurationMs       int64     `json:"duration_ms"`
 	Status           string    `json:"status"`
@@ -115,6 +116,9 @@ func (s *RequestHistoryStore) Record(entry RequestHistoryEntry) {
 	}
 	if entry.InputTokens < 0 {
 		entry.InputTokens = 0
+	}
+	if entry.ContextTokens < 0 {
+		entry.ContextTokens = 0
 	}
 	if entry.OutputTokens < 0 {
 		entry.OutputTokens = 0
@@ -451,6 +455,18 @@ func (d *RequestDiagnostic) AddUsage(input, output int) {
 	d.mu.Lock()
 	d.entry.InputTokens += input
 	d.entry.OutputTokens += output
+	d.mu.Unlock()
+}
+
+func (d *RequestDiagnostic) SetContextTokens(tokens int) {
+	if d == nil {
+		return
+	}
+	if tokens < 0 {
+		tokens = 0
+	}
+	d.mu.Lock()
+	d.entry.ContextTokens = tokens
 	d.mu.Unlock()
 }
 
