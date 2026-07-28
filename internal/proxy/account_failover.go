@@ -11,6 +11,15 @@ type accountAttemptFailure struct {
 	Reason    string
 }
 
+func shouldQuarantineAccountFailure(reason string) bool {
+	switch reason {
+	case "empty_response", "upstream_timeout", "context_too_long":
+		return false
+	default:
+		return true
+	}
+}
+
 func classifyAccountAttemptError(err error) accountAttemptFailure {
 	if err == nil {
 		return accountAttemptFailure{}
@@ -18,10 +27,18 @@ func classifyAccountAttemptError(err error) accountAttemptFailure {
 	if errors.Is(err, ErrEmptyResponse) {
 		return accountAttemptFailure{Retryable: true, Reason: "empty_response"}
 	}
+	if errors.Is(err, ErrPromptTooLong) {
+		return accountAttemptFailure{Retryable: false, Reason: "context_too_long"}
+	}
+	if errors.Is(err, ErrInferenceIdleTimeout) {
+		return accountAttemptFailure{Retryable: false, Reason: "upstream_timeout"}
+	}
 	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "timeout") {
+		return accountAttemptFailure{Retryable: false, Reason: "upstream_timeout"}
+	}
 	if strings.Contains(msg, "send request:") ||
-		strings.Contains(msg, "context deadline exceeded") ||
-		strings.Contains(msg, "timeout") ||
 		strings.Contains(msg, "connection reset") ||
 		strings.Contains(msg, "unexpected eof") {
 		return accountAttemptFailure{Retryable: true, Reason: "network_error"}

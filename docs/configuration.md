@@ -60,8 +60,8 @@ files across container replacement. Environment variables such as
 
 | Setting | Repo sample | Code default | Notes |
 | --- | --- | --- | --- |
-| `timeouts.inference_timeout` | `300` | `300` | Standard inference timeout (s) |
-| `timeouts.research_timeout` | unset | `360` | Research-mode timeout (s) — applies to `researcher` / `fast-researcher` |
+| `timeouts.inference_timeout` | `120` | `120` | Maximum idle time between standard inference events (s); continuous output is not cut off |
+| `timeouts.research_timeout` | unset | `360` | Maximum idle time between research events (s) — applies to `researcher` / `fast-researcher` |
 | `timeouts.api_timeout` | `30` | `30` | Quota / models REST timeout (s) |
 | `timeouts.tls_dial_timeout` | `30` | `30` | TLS dial timeout (s) |
 | `refresh.interval_minutes` | `30` | `30` | Background refresh interval |

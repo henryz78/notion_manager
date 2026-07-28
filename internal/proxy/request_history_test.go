@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -156,7 +157,7 @@ func TestTrackRequestHistoryRecordsMetadataAndSanitizedError(t *testing.T) {
 		diagnostic.SetContextMode("full_replay_account_switch")
 		diagnostic.BeginAttempt("selected@example.com")
 		diagnostic.AddUsage(100, 25)
-		diagnostic.FinishAttempt("upstream_error")
+		diagnostic.FinishAttempt("upstream_timeout", errors.New("context deadline exceeded"))
 		writeOpenAIError(w, http.StatusBadGateway, "upstream failed\nwith details", "api_error", "")
 	}))
 
@@ -181,7 +182,7 @@ func TestTrackRequestHistoryRecordsMetadataAndSanitizedError(t *testing.T) {
 	if entry.ContextMode != "full_replay_account_switch" {
 		t.Fatalf("context mode mismatch: %+v", entry)
 	}
-	if len(entry.AttemptDetails) != 1 || entry.AttemptDetails[0].Outcome != "upstream_error" || entry.AttemptDetails[0].AccountEmail != "selected@example.com" {
+	if len(entry.AttemptDetails) != 1 || entry.AttemptDetails[0].Outcome != "upstream_timeout" || entry.AttemptDetails[0].AccountEmail != "selected@example.com" || entry.AttemptDetails[0].Error != "context deadline exceeded" {
 		t.Fatalf("attempt metadata mismatch: %+v", entry.AttemptDetails)
 	}
 	if entry.InputTokens != 100 || entry.OutputTokens != 25 || entry.Status != "error" || entry.HTTPStatus != http.StatusBadGateway {

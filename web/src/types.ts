@@ -215,6 +215,7 @@ export type RequestPromptMode = 'existing_prompt' | 'notion_personal_instruction
 export interface RequestAttempt {
   account_email: string
   outcome?: string
+  error?: string
   duration_ms: number
 }
 

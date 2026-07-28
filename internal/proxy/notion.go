@@ -39,6 +39,10 @@ var ErrResearchQuotaExhausted = errors.New("research mode usage limit exceeded")
 // This typically means the account/thread is in a bad state and should be retried.
 var ErrEmptyResponse = errors.New("empty response from inference")
 
+// ErrPromptTooLong is returned when Notion rejects a complete transcript
+// because it exceeds the selected model's context window.
+var ErrPromptTooLong = errors.New("prompt too long")
+
 // ErrModelNotFound is returned when a client requests a model ID that is not
 // present in the current Notion model map. Unknown names must never be sent to
 // Notion because Notion can silently fall back to a different default model.
@@ -1412,8 +1416,7 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 
 	setNotionHeaders(req, acc)
 
-	client := getChromeHTTPClient(AppConfig.InferenceTimeoutDuration())
-	resp, err := client.Do(req)
+	resp, err := doChromeRequestWithIdleTimeout(req, AppConfig.InferenceTimeoutDuration())
 	if err != nil {
 		return fmt.Errorf("send request: %w", err)
 	}
@@ -1427,6 +1430,9 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
 		LogNotionResponseText(requestID, "POST /runInferenceTranscript error body", string(body))
+		if isPromptTooLongMessage(string(body)) {
+			return fmt.Errorf("%w: %s", ErrPromptTooLong, strings.TrimSpace(string(body)))
+		}
 		return fmt.Errorf("notion API error %d: %s", resp.StatusCode, string(body[:min(len(body), 500)]))
 	}
 
@@ -2923,6 +2929,9 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 				"line_count": lineCount,
 				"message":    errEvt.Message,
 			})
+			if isPromptTooLongMessage(errEvt.Message) {
+				return fmt.Errorf("%w: %s", ErrPromptTooLong, strings.TrimSpace(errEvt.Message))
+			}
 			return fmt.Errorf("notion error: %s", errEvt.Message)
 		}
 	}
@@ -2942,6 +2951,13 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 		"usage":                 totalUsage,
 	})
 	return nil
+}
+
+func isPromptTooLongMessage(message string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(normalized, "prompt too long") ||
+		strings.Contains(normalized, "context length exceeded") ||
+		strings.Contains(normalized, "maximum context length")
 }
 
 // classifyPatchContent determines whether a patch content path belongs to
@@ -3362,8 +3378,7 @@ func callResearcherInference(acc *Account, messages []ChatMessage, cb StreamCall
 
 	setNotionHeaders(req, acc)
 
-	client := getChromeHTTPClient(AppConfig.ResearchTimeoutDuration())
-	resp, err := client.Do(req)
+	resp, err := doChromeRequestWithIdleTimeout(req, AppConfig.ResearchTimeoutDuration())
 	if err != nil {
 		return fmt.Errorf("send researcher request: %w", err)
 	}
@@ -3377,6 +3392,9 @@ func callResearcherInference(acc *Account, messages []ChatMessage, cb StreamCall
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
 		LogNotionResponseText(requestID, "POST /runInferenceTranscript researcher error body", string(body))
+		if isPromptTooLongMessage(string(body)) {
+			return fmt.Errorf("%w: %s", ErrPromptTooLong, strings.TrimSpace(string(body)))
+		}
 		return fmt.Errorf("notion researcher API error %d: %s", resp.StatusCode, string(body[:min(len(body), 500)]))
 	}
 
@@ -3671,6 +3689,9 @@ func parseResearcherStream(reader io.Reader, requestID string, cb StreamCallback
 				"line_count": lineCount,
 				"message":    errEvt.Message,
 			})
+			if isPromptTooLongMessage(errEvt.Message) {
+				return fmt.Errorf("%w: %s", ErrPromptTooLong, strings.TrimSpace(errEvt.Message))
+			}
 			return fmt.Errorf("notion researcher error: %s", errEvt.Message)
 		}
 	}

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -20,6 +21,20 @@ func TestParseNDJSONStreamAcceptsLargeUpstreamEvent(t *testing.T) {
 	}
 	if got.String() != "ok" {
 		t.Fatalf("unexpected parser output: %q", got.String())
+	}
+}
+
+func TestParseNDJSONStreamClassifiesPromptTooLong(t *testing.T) {
+	err := parseNDJSONStream(bytes.NewBufferString(`{"type":"error","message":"Prompt too long."}`), "", func(string, bool, *UsageInfo) {}, nil, nil, nil, nil, nil, nil)
+	if !errors.Is(err, ErrPromptTooLong) {
+		t.Fatalf("error=%v want ErrPromptTooLong", err)
+	}
+}
+
+func TestParseResearcherStreamClassifiesPromptTooLong(t *testing.T) {
+	err := parseResearcherStream(bytes.NewBufferString(`{"type":"error","message":"Prompt too long."}`), "", func(string, bool, *UsageInfo) {}, nil, nil)
+	if !errors.Is(err, ErrPromptTooLong) {
+		t.Fatalf("error=%v want ErrPromptTooLong", err)
 	}
 }
 

@@ -80,6 +80,8 @@ type TimeoutConfig struct {
 	TLSDialTimeout   int `yaml:"tls_dial_timeout"`
 }
 
+const maxStandardInferenceTimeout = 120 * time.Second
+
 type RefreshConfig struct {
 	IntervalMinutes     int `yaml:"interval_minutes"`
 	QuotaRecheckMinutes int `yaml:"quota_recheck_minutes"`
@@ -186,7 +188,7 @@ func DefaultConfig() *Config {
 			AskModeDefault:                boolPtr(false),
 		},
 		Timeouts: TimeoutConfig{
-			InferenceTimeout: 300,
+			InferenceTimeout: 120,
 			ResearchTimeout:  360,
 			APITimeout:       30,
 			TLSDialTimeout:   30,
@@ -614,7 +616,11 @@ func EnsureApiKey(cfg *Config, configPath string) {
 // Helper methods for convenient access to typed timeout values
 
 func (c *Config) InferenceTimeoutDuration() time.Duration {
-	return time.Duration(c.Timeouts.InferenceTimeout) * time.Second
+	configured := time.Duration(c.Timeouts.InferenceTimeout) * time.Second
+	if configured <= 0 || configured > maxStandardInferenceTimeout {
+		return maxStandardInferenceTimeout
+	}
+	return configured
 }
 
 func (c *Config) ResearchTimeoutDuration() time.Duration {

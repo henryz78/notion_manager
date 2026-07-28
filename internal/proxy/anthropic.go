@@ -15,6 +15,16 @@ import (
 
 var ErrToolBridgeNoTool = errors.New("tool bridge produced no usable tool action")
 
+const maxInferenceAccountCalls = 3
+const maxEmptyResponseAttempts = 2
+
+func inferenceAccountCallLimit(poolSize int) int {
+	if poolSize <= 0 {
+		return 0
+	}
+	return min(poolSize, maxInferenceAccountCalls)
+}
+
 // citationReplacer is a streaming state machine that replaces Notion's
 // [^{{URL}}] and [^URL] citation markers with numbered references [N]
 // as text deltas arrive. It buffers only when inside a potential citation.
@@ -825,23 +835,25 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 
 		// Try accounts with automatic failover
 		tried := make(map[*Account]bool)
-		maxAttempts := pool.Count()
+		selectionLimit := pool.Count()
+		maxAccountCalls := inferenceAccountCallLimit(selectionLimit)
+		accountCalls := 0
 		var lastNonQuotaErr error
-		var sawEmptyResponse bool
+		emptyResponseCount := 0
 		liveCheckInterval := AppConfig.QuotaLiveCheckInterval()
 
-		for attempt := 0; attempt < maxAttempts; attempt++ {
+		for selection := 0; selection < selectionLimit && accountCalls < maxAccountCalls; selection++ {
 			var acc *Account
 
 			if acc == nil {
 				if isResearcher {
-					if attempt == 0 {
+					if selection == 0 {
 						acc = pool.NextForResearch()
 					} else {
 						// Research-mode fallback also rotates through the pool.
 						acc = pool.NextExcluding(tried)
 					}
-				} else if attempt == 0 {
+				} else if selection == 0 {
 					// New-conversation routing: prefer full Notion AI plans,
 					// then live premium signals, without adding undocumented
 					// private counters together.
@@ -876,7 +888,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			if hasTools {
 				attemptMessages = aliasToolNamesInMessages(attemptMessages, originalToToolAlias)
 				attemptMessages = injectToolsIntoMessages(attemptMessages, bridgeTools, aliasToolChoice(req.ToolChoice, originalToToolAlias))
-				if DebugLoggingEnabled() && attempt == 0 {
+				if DebugLoggingEnabled() && accountCalls == 0 {
 					log.Printf("[debug] === After tool injection (%d messages) ===", len(attemptMessages))
 					for i, m := range attemptMessages {
 						preview := truncateForLog(m.Content, 300)
@@ -888,8 +900,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 
 			requestMessages := attemptMessages
 
+			accountCalls++
 			log.Printf("[req] %s model=%s messages=%d stream=%v tools=%d attachments=%d account=%s full_replay=true (attempt %d/%d) [anthropic]",
-				requestID, model, len(req.Messages), req.Stream, len(req.Tools), len(fileAttachments), acc.UserEmail, attempt+1, maxAttempts)
+				requestID, model, len(req.Messages), req.Stream, len(req.Tools), len(fileAttachments), acc.UserEmail, accountCalls, maxAccountCalls)
 			if requestDiagnostic != nil {
 				requestDiagnostic.BeginAttempt(acc.UserEmail)
 			}
@@ -904,7 +917,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					if err != nil {
 						log.Printf("[upload] %s: attachment %d upload failed: %v", requestID, i+1, err)
 						if requestDiagnostic != nil {
-							requestDiagnostic.FinishAttempt("upload_error")
+							requestDiagnostic.FinishAttempt("upload_error", err)
 						}
 						writeAnthropicError(w, requestID, http.StatusBadGateway, "file upload failed: "+err.Error(), "api_error")
 						return
@@ -932,7 +945,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				reqErr = handleAnthropicNonStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, toolChoiceMode, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, requestDiagnostic)
 			}
 			if requestDiagnostic != nil {
-				requestDiagnostic.FinishAttempt(requestAttemptOutcome(reqErr))
+				requestDiagnostic.FinishAttempt(requestAttemptOutcome(reqErr), reqErr)
 				if reqErr == nil && !hasTools {
 					requestDiagnostic.SetToolBridge("none")
 					requestDiagnostic.SetFinishReason("stop")
@@ -970,13 +983,22 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				continue
 			}
 
+			if reqErr != nil && errors.Is(reqErr, ErrPromptTooLong) {
+				lastNonQuotaErr = reqErr
+				break
+			}
+
 			if reqErr != nil && errors.Is(reqErr, ErrEmptyResponse) {
-				// Empty response — account/thread in bad state, clear session and try next account
+				// An empty stream can be request-specific (notably context overflow).
+				// The tried set is enough to rotate for this request; do not quarantine
+				// an otherwise healthy account for later requests.
 				log.Printf("[empty] %s returned empty response, trying next account", acc.UserEmail)
-				sawEmptyResponse = true
-				pool.MarkTemporarilyUnavailable(acc, "empty_response", defaultAccountFailureCooldown)
+				emptyResponseCount++
 				if requestDiagnostic != nil {
 					requestDiagnostic.SetContextMode("full_replay_after_error")
+				}
+				if emptyResponseCount >= maxEmptyResponseAttempts {
+					break
 				}
 				continue
 			}
@@ -1009,7 +1031,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 						}
 						continue
 					}
-					pool.MarkTemporarilyUnavailable(acc, failure.Reason, defaultAccountFailureCooldown)
+					if shouldQuarantineAccountFailure(failure.Reason) {
+						pool.MarkTemporarilyUnavailable(acc, failure.Reason, defaultAccountFailureCooldown)
+					}
 					log.Printf("[health] %s failed with %s, trying next account: %v", acc.UserEmail, failure.Reason, reqErr)
 					if requestDiagnostic != nil {
 						requestDiagnostic.SetContextMode("full_replay_after_error")
@@ -1027,18 +1051,25 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		}
 
 		if lastNonQuotaErr != nil {
-			writeAnthropicError(w, requestID, http.StatusBadGateway,
-				"notion API error: "+lastNonQuotaErr.Error(), "api_error")
+			status, message, errorType := inferenceHTTPError(lastNonQuotaErr)
+			writeAnthropicError(w, requestID, status, message, errorType)
 			return
 		}
-		if sawEmptyResponse {
+		if emptyResponseCount > 0 {
 			writeAnthropicError(w, requestID, http.StatusBadGateway,
-				"notion returned empty response after retries", "api_error")
+				fmt.Sprintf("notion returned no content on %d account(s); the prompt may exceed the model context or upstream ended without a terminal event", emptyResponseCount), "api_error")
 			return
 		}
 		writeAnthropicError(w, requestID, http.StatusServiceUnavailable,
 			"all accounts exhausted after retries", "overloaded_error")
 	}
+}
+
+func inferenceHTTPError(err error) (int, string, string) {
+	if errors.Is(err, ErrPromptTooLong) {
+		return http.StatusBadRequest, "context length exceeded: " + err.Error(), "invalid_request_error"
+	}
+	return http.StatusBadGateway, "notion API error: " + err.Error(), "api_error"
 }
 
 func requestAttemptOutcome(err error) string {
@@ -1052,6 +1083,8 @@ func requestAttemptOutcome(err error) string {
 		return "quota_exhausted"
 	case errors.Is(err, ErrEmptyResponse):
 		return "empty_response"
+	case errors.Is(err, ErrPromptTooLong):
+		return "context_too_long"
 	case errors.Is(err, ErrToolBridgeNoTool):
 		return "required_tool_missing"
 	case errors.Is(err, ErrPremiumFeatureUnavailable):

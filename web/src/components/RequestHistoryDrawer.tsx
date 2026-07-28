@@ -382,11 +382,16 @@ function RequestRow({
             <div className="text-[10px] text-text-muted mb-1">{t('request_history.attempt_timeline')}</div>
             <div className="space-y-1">
               {entry.attempt_details!.map((attempt, index) => (
-                <div key={`${entry.id}:${index}`} className="grid grid-cols-[24px_minmax(180px,1fr)_140px_80px] gap-2 text-[10px] max-sm:grid-cols-[24px_1fr]">
-                  <span className="text-text-muted tabular-nums">#{index + 1}</span>
-                  <span className="text-text-secondary font-mono break-all">{attempt.account_email || t('request_history.not_selected')}</span>
-                  <span className={attempt.outcome === 'success' ? 'text-ok' : 'text-warn'}>{formatDiagnosticValue(attempt.outcome)}</span>
-                  <span className="text-text-muted tabular-nums">{formatDuration(attempt.duration_ms)}</span>
+                <div key={`${entry.id}:${index}`}>
+                  <div className="grid grid-cols-[24px_minmax(180px,1fr)_140px_80px] gap-2 text-[10px] max-sm:grid-cols-[24px_1fr]">
+                    <span className="text-text-muted tabular-nums">#{index + 1}</span>
+                    <span className="text-text-secondary font-mono break-all">{attempt.account_email || t('request_history.not_selected')}</span>
+                    <span className={attempt.outcome === 'success' ? 'text-ok' : 'text-warn'}>{formatDiagnosticValue(attempt.outcome)}</span>
+                    <span className="text-text-muted tabular-nums">{formatDuration(attempt.duration_ms)}</span>
+                  </div>
+                  {attempt.error && (
+                    <div className="ml-8 mt-0.5 text-[10px] text-text-muted font-mono break-all">{attempt.error}</div>
+                  )}
                 </div>
               ))}
             </div>

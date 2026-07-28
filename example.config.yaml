@@ -71,7 +71,7 @@ proxy:
     ask_mode_default: false
 timeouts:
     # Inference (streaming) request timeout in seconds
-    inference_timeout: 300
+    inference_timeout: 120
     # Long-running researcher / fast-researcher request timeout in seconds
     research_timeout: 360
     # API request timeout (models/quota check) in seconds

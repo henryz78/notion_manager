@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	utls "github.com/refraction-networking/utls"
@@ -14,6 +16,8 @@ import (
 
 	"notion-manager/internal/netutil"
 )
+
+var ErrInferenceIdleTimeout = fmt.Errorf("upstream inference idle timeout")
 
 // Chrome TLS transport using uTLS to mimic Chrome's JA3/JA4 fingerprint.
 // Uses http2.Transport for proper HTTP/2 support with custom TLS dial.
@@ -102,4 +106,86 @@ func getChromeHTTPClient(timeout time.Duration) *http.Client {
 		Transport: getChromeRoundTripper(),
 		Timeout:   timeout,
 	}
+}
+
+// doChromeRequestWithIdleTimeout limits periods with no upstream activity,
+// not the total inference duration. Long responses remain valid as long as
+// headers and body data keep arriving before each idle deadline.
+func doChromeRequestWithIdleTimeout(req *http.Request, idleTimeout time.Duration) (*http.Response, error) {
+	client := getChromeHTTPClient(0)
+	if idleTimeout <= 0 {
+		return client.Do(req)
+	}
+
+	ctx, cancel := context.WithCancel(req.Context())
+	var headerTimedOut atomic.Bool
+	timer := time.AfterFunc(idleTimeout, func() {
+		headerTimedOut.Store(true)
+		cancel()
+	})
+	resp, err := client.Do(req.Clone(ctx))
+	timer.Stop()
+	if err != nil {
+		cancel()
+		if headerTimedOut.Load() {
+			return nil, fmt.Errorf("%w waiting for response headers after %s", ErrInferenceIdleTimeout, idleTimeout)
+		}
+		return nil, err
+	}
+	if headerTimedOut.Load() {
+		resp.Body.Close()
+		cancel()
+		return nil, fmt.Errorf("%w waiting for response headers after %s", ErrInferenceIdleTimeout, idleTimeout)
+	}
+	resp.Body = &idleTimeoutReadCloser{
+		body:    resp.Body,
+		timeout: idleTimeout,
+		cancel:  cancel,
+	}
+	return resp, nil
+}
+
+type idleTimeoutReadCloser struct {
+	body      io.ReadCloser
+	timeout   time.Duration
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+}
+
+type idleReadResult struct {
+	data []byte
+	err  error
+}
+
+func (r *idleTimeoutReadCloser) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	resultCh := make(chan idleReadResult, 1)
+	go func() {
+		buf := make([]byte, len(p))
+		n, err := r.body.Read(buf)
+		resultCh <- idleReadResult{data: buf[:n], err: err}
+	}()
+
+	timer := time.NewTimer(r.timeout)
+	defer timer.Stop()
+	select {
+	case result := <-resultCh:
+		return copy(p, result.data), result.err
+	case <-timer.C:
+		_ = r.Close()
+		return 0, fmt.Errorf("%w after %s without upstream data", ErrInferenceIdleTimeout, r.timeout)
+	}
+}
+
+func (r *idleTimeoutReadCloser) Close() error {
+	var closeErr error
+	r.closeOnce.Do(func() {
+		if r.cancel != nil {
+			r.cancel()
+		}
+		closeErr = r.body.Close()
+	})
+	return closeErr
 }

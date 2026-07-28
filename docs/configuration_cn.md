@@ -59,8 +59,8 @@ Railway 需要同时满足两点：`ACCOUNTS_DIR=/app/accounts`，并且确实�
 
 | 配置项 | 仓库样例 | 代码默认 | 说明 |
 | --- | --- | --- | --- |
-| `timeouts.inference_timeout` | `300` | `300` | 普通推理超时（秒） |
-| `timeouts.research_timeout` | 未设置 | `360` | 研究模式超时（秒），作用于 `researcher` / `fast-researcher` |
+| `timeouts.inference_timeout` | `120` | `120` | 普通推理事件之间允许的最长空闲时间（秒）；持续输出不会被截断 |
+| `timeouts.research_timeout` | 未设置 | `360` | 研究事件之间允许的最长空闲时间（秒），作用于 `researcher` / `fast-researcher` |
 | `timeouts.api_timeout` | `30` | `30` | 配额 / 模型 REST 超时（秒） |
 | `timeouts.tls_dial_timeout` | `30` | `30` | TLS 拨号超时（秒） |
 | `refresh.interval_minutes` | `30` | `30` | 后台刷新间隔（分钟） |

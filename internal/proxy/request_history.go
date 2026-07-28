@@ -74,6 +74,7 @@ type RequestHistoryEntry struct {
 type RequestAttempt struct {
 	AccountEmail string `json:"account_email"`
 	Outcome      string `json:"outcome,omitempty"`
+	Error        string `json:"error,omitempty"`
 	DurationMs   int64  `json:"duration_ms"`
 	startedAt    time.Time
 }
@@ -124,6 +125,9 @@ func (s *RequestHistoryStore) Record(entry RequestHistoryEntry) {
 		return
 	}
 	entry.Error = sanitizeRequestHistoryError(entry.Error)
+	for i := range entry.AttemptDetails {
+		entry.AttemptDetails[i].Error = sanitizeRequestHistoryError(entry.AttemptDetails[i].Error)
+	}
 	if entry.ToolCount < 0 {
 		entry.ToolCount = 0
 	}
@@ -288,6 +292,9 @@ func (s *RequestHistoryStore) Load(path string) error {
 	}
 	for i := range file.Entries {
 		file.Entries[i].Error = sanitizeRequestHistoryError(file.Entries[i].Error)
+		for j := range file.Entries[i].AttemptDetails {
+			file.Entries[i].AttemptDetails[j].Error = sanitizeRequestHistoryError(file.Entries[i].AttemptDetails[j].Error)
+		}
 	}
 
 	s.mu.Lock()
@@ -546,9 +553,13 @@ func (d *RequestDiagnostic) BeginAttempt(accountEmail string) {
 	d.mu.Unlock()
 }
 
-func (d *RequestDiagnostic) FinishAttempt(outcome string) {
+func (d *RequestDiagnostic) FinishAttempt(outcome string, attemptErrors ...error) {
 	if d == nil {
 		return
+	}
+	var attemptError string
+	if len(attemptErrors) > 0 && attemptErrors[0] != nil {
+		attemptError = sanitizeRequestHistoryError(attemptErrors[0].Error())
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -558,6 +569,7 @@ func (d *RequestDiagnostic) FinishAttempt(outcome string) {
 			continue
 		}
 		attempt.Outcome = strings.TrimSpace(outcome)
+		attempt.Error = attemptError
 		if !attempt.startedAt.IsZero() {
 			attempt.DurationMs = time.Since(attempt.startedAt).Milliseconds()
 		}

@@ -175,3 +175,13 @@ func TestNewMux_RegistersBackupRoute(t *testing.T) {
 		t.Fatalf("backup route: unexpected content type %q", contentType)
 	}
 }
+
+func TestStartupAPIKeyLogValueNeverExposesKey(t *testing.T) {
+	const secret = "sk-test-secret-value"
+	if got, want := startupAPIKeyLogValue(secret), "configured (hidden)"; got != want {
+		t.Fatalf("startup API key log value = %q, want %q", got, want)
+	}
+	if got, want := startupAPIKeyLogValue(""), "not configured"; got != want {
+		t.Fatalf("empty startup API key log value = %q, want %q", got, want)
+	}
+}

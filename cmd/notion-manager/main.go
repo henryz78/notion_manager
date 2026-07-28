@@ -19,6 +19,13 @@ func requiresAPIKey(path string) bool {
 	return path == "/models" || strings.HasPrefix(path, "/v1/")
 }
 
+func startupAPIKeyLogValue(apiKey string) string {
+	if strings.TrimSpace(apiKey) == "" {
+		return "not configured"
+	}
+	return "configured (hidden)"
+}
+
 func apiKeyAuthMiddleware(apiKey string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !requiresAPIKey(r.URL.Path) {
@@ -293,7 +300,7 @@ func main() {
 	log.Printf("=== notion-manager ===")
 	log.Printf("Listening on :%s", port)
 	log.Printf("Accounts: %d", pool.Count())
-	log.Printf("API Key: %s", apiKey)
+	log.Printf("API Key: %s", startupAPIKeyLogValue(apiKey))
 	log.Printf("Dashboard: password protected")
 	log.Printf("Endpoints:")
 	log.Printf("  GET  /dashboard/                  (Dashboard UI)")
