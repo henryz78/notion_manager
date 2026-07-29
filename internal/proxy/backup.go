@@ -33,6 +33,7 @@ type dashboardBackupSettings struct {
 	UseClientSystemPrompt         bool   `json:"use_client_system_prompt"`
 	UseNotionPersonalInstructions bool   `json:"use_notion_personal_instructions"`
 	EnableToolBridge              bool   `json:"enable_tool_bridge"`
+	ToolChoicePolicy              string `json:"tool_choice_policy"`
 	DebugLogging                  bool   `json:"debug_logging"`
 	NotionProxy                   string `json:"notion_proxy"`
 }
@@ -428,6 +429,7 @@ func currentDashboardBackupSettings() dashboardBackupSettings {
 		UseClientSystemPrompt:         AppConfig.ClientSystemPromptEnabled(),
 		UseNotionPersonalInstructions: AppConfig.NotionPersonalInstructionsEnabled(),
 		EnableToolBridge:              AppConfig.ToolBridgeEnabled(),
+		ToolChoicePolicy:              AppConfig.ToolChoicePolicy(),
 		DebugLogging:                  AppConfig.Server.DebugLogging,
 		NotionProxy:                   AppConfig.NotionProxyURL(),
 	}
@@ -443,6 +445,7 @@ func currentDashboardSettingsResponse() map[string]interface{} {
 		"use_client_system_prompt":         settings.UseClientSystemPrompt,
 		"use_notion_personal_instructions": settings.UseNotionPersonalInstructions,
 		"enable_tool_bridge":               settings.EnableToolBridge,
+		"tool_choice_policy":               settings.ToolChoicePolicy,
 		"debug_logging":                    settings.DebugLogging,
 		"notion_proxy":                     settings.NotionProxy,
 	}
@@ -453,6 +456,9 @@ func backupSettingsPtr(settings dashboardBackupSettings) *dashboardBackupSetting
 }
 
 func validateDashboardBackupSettings(settings dashboardBackupSettings) error {
+	if _, ok := normalizeToolChoicePolicy(settings.ToolChoicePolicy); !ok {
+		return errors.New("backup contains an unsupported tool choice policy")
+	}
 	settings.NotionProxy = strings.TrimSpace(settings.NotionProxy)
 	if settings.NotionProxy != "" {
 		if err := netutil.ValidateProxyURL(settings.NotionProxy); err != nil {
@@ -470,6 +476,7 @@ func applyDashboardBackupSettings(settings dashboardBackupSettings) {
 	AppConfig.Proxy.UseClientSystemPrompt = settings.UseClientSystemPrompt
 	AppConfig.Proxy.UseNotionPersonalInstructions = settings.UseNotionPersonalInstructions
 	AppConfig.Proxy.EnableToolBridge = settings.EnableToolBridge
+	AppConfig.Proxy.ToolChoicePolicy, _ = normalizeToolChoicePolicy(settings.ToolChoicePolicy)
 	AppConfig.Server.DebugLogging = settings.DebugLogging
 	AppConfig.Proxy.NotionProxy = strings.TrimSpace(settings.NotionProxy)
 	SetDebugLoggingEnabled(settings.DebugLogging)
@@ -501,6 +508,8 @@ func persistDashboardBackupSettings(configPath string, settings dashboardBackupS
 	setYAMLBool(proxyNode, "use_client_system_prompt", settings.UseClientSystemPrompt)
 	setYAMLBool(proxyNode, "use_notion_personal_instructions", settings.UseNotionPersonalInstructions)
 	setYAMLBool(proxyNode, "enable_tool_bridge", settings.EnableToolBridge)
+	toolChoicePolicy, _ := normalizeToolChoicePolicy(settings.ToolChoicePolicy)
+	setYAMLString(proxyNode, "tool_choice_policy", toolChoicePolicy)
 	setYAMLString(proxyNode, "notion_proxy", strings.TrimSpace(settings.NotionProxy))
 	serverNode := getOrCreateYAMLMapping(mapping, "server")
 	setYAMLBool(serverNode, "debug_logging", settings.DebugLogging)

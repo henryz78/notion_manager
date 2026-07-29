@@ -57,6 +57,7 @@ type ProxyConfig struct {
 	UseClientSystemPrompt         bool   `yaml:"use_client_system_prompt"`
 	UseNotionPersonalInstructions bool   `yaml:"use_notion_personal_instructions"`
 	EnableToolBridge              bool   `yaml:"enable_tool_bridge"`
+	ToolChoicePolicy              string `yaml:"tool_choice_policy"`
 	EnableWebSearch               *bool  `yaml:"enable_web_search"`
 	EnableWorkspaceSearch         *bool  `yaml:"enable_workspace_search"`
 	// AskModeDefault toggles Notion's ASK mode (frontend "Answers only,
@@ -183,6 +184,7 @@ func DefaultConfig() *Config {
 			UseClientSystemPrompt:         true,
 			UseNotionPersonalInstructions: false,
 			EnableToolBridge:              true,
+			ToolChoicePolicy:              ToolChoicePolicyClient,
 			EnableWebSearch:               boolPtr(true),
 			EnableWorkspaceSearch:         boolPtr(false),
 			AskModeDefault:                boolPtr(false),
@@ -307,6 +309,9 @@ func LoadConfig(configPath string) (*Config, error) {
 	if v := os.Getenv("ENABLE_TOOL_BRIDGE"); v != "" {
 		cfg.Proxy.EnableToolBridge = strings.EqualFold(v, "true") || v == "1"
 	}
+	if v := os.Getenv("TOOL_CHOICE_POLICY"); v != "" {
+		cfg.Proxy.ToolChoicePolicy = v
+	}
 	if v := os.Getenv("INFERENCE_TIMEOUT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Timeouts.InferenceTimeout = n
@@ -374,6 +379,12 @@ func LoadConfig(configPath string) (*Config, error) {
 			log.Printf("[config] invalid notion_proxy %q: %v (falling back to direct dial)", cfg.Proxy.NotionProxy, err)
 			cfg.Proxy.NotionProxy = ""
 		}
+	}
+	if policy, ok := normalizeToolChoicePolicy(cfg.Proxy.ToolChoicePolicy); ok {
+		cfg.Proxy.ToolChoicePolicy = policy
+	} else {
+		log.Printf("[config] invalid tool_choice_policy %q (using %q)", cfg.Proxy.ToolChoicePolicy, ToolChoicePolicyClient)
+		cfg.Proxy.ToolChoicePolicy = ToolChoicePolicyClient
 	}
 
 	// Register defaults — fill any zero values that survived YAML parsing.
@@ -704,6 +715,49 @@ func (c *Config) NotionPersonalInstructionsEnabled() bool {
 // configuration files keep tools/function calling working as before.
 func (c *Config) ToolBridgeEnabled() bool {
 	return c == nil || c.Proxy.EnableToolBridge
+}
+
+const (
+	ToolChoicePolicyClient   = "client"
+	ToolChoicePolicyAuto     = "auto"
+	ToolChoicePolicyRequired = "required"
+	ToolChoicePolicyNone     = "none"
+)
+
+func normalizeToolChoicePolicy(value string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", ToolChoicePolicyClient:
+		return ToolChoicePolicyClient, true
+	case ToolChoicePolicyAuto:
+		return ToolChoicePolicyAuto, true
+	case ToolChoicePolicyRequired:
+		return ToolChoicePolicyRequired, true
+	case ToolChoicePolicyNone:
+		return ToolChoicePolicyNone, true
+	default:
+		return "", false
+	}
+}
+
+// ToolChoicePolicy returns the dashboard-selected policy. "client" preserves
+// each request's tool_choice; the other values intentionally override it.
+func (c *Config) ToolChoicePolicy() string {
+	if c == nil {
+		return ToolChoicePolicyClient
+	}
+	policy, ok := normalizeToolChoicePolicy(c.Proxy.ToolChoicePolicy)
+	if !ok {
+		return ToolChoicePolicyClient
+	}
+	return policy
+}
+
+func (c *Config) EffectiveToolChoice(clientChoice interface{}) interface{} {
+	policy := c.ToolChoicePolicy()
+	if policy == ToolChoicePolicyClient {
+		return clientChoice
+	}
+	return policy
 }
 
 // NotionProxyURL returns the upstream proxy applied to all notion-bound

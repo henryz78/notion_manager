@@ -45,6 +45,9 @@ func TestHandleAdminBackupDownloadIncludesAccountsAndDashboardSettings(t *testin
 	if backup.Settings == nil || !backup.Settings.EnableWebSearch || backup.Settings.EnableWorkspaceSearch {
 		t.Fatalf("settings=%+v", backup.Settings)
 	}
+	if backup.Settings.ToolChoicePolicy != ToolChoicePolicyClient {
+		t.Fatalf("tool choice policy=%q", backup.Settings.ToolChoicePolicy)
+	}
 	if len(backup.Accounts) != 1 {
 		t.Fatalf("accounts=%d", len(backup.Accounts))
 	}
@@ -96,6 +99,7 @@ func TestHandleAdminBackupRestoreReplacesAccountsAndPreservesRuntimeFiles(t *tes
 			UseClientSystemPrompt:         false,
 			UseNotionPersonalInstructions: true,
 			EnableToolBridge:              false,
+			ToolChoicePolicy:              ToolChoicePolicyAuto,
 			DebugLogging:                  false,
 			NotionProxy:                   "",
 		},
@@ -138,11 +142,14 @@ func TestHandleAdminBackupRestoreReplacesAccountsAndPreservesRuntimeFiles(t *tes
 	if AppConfig.ClientSystemPromptEnabled() || !AppConfig.NotionPersonalInstructionsEnabled() || AppConfig.ToolBridgeEnabled() {
 		t.Fatalf("prompt settings not restored: %+v", currentDashboardBackupSettings())
 	}
+	if AppConfig.ToolChoicePolicy() != ToolChoicePolicyAuto {
+		t.Fatalf("tool choice policy not restored: %q", AppConfig.ToolChoicePolicy())
+	}
 	persisted, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"keep-api-secret", "keep-admin-secret", "enable_workspace_search: true", "ask_mode_default: true"} {
+	for _, want := range []string{"keep-api-secret", "keep-admin-secret", "enable_workspace_search: true", "ask_mode_default: true", "tool_choice_policy: auto"} {
 		if !strings.Contains(string(persisted), want) {
 			t.Fatalf("persisted config missing %q:\n%s", want, persisted)
 		}
@@ -269,6 +276,7 @@ func setupBackupTest(t *testing.T) (string, string, *AccountPool) {
 	cfg.Proxy.UseClientSystemPrompt = true
 	cfg.Proxy.UseNotionPersonalInstructions = false
 	cfg.Proxy.EnableToolBridge = true
+	cfg.Proxy.ToolChoicePolicy = ToolChoicePolicyClient
 	cfg.Server.DebugLogging = true
 	AppConfig = cfg
 	ApplyConfig(cfg)
@@ -297,6 +305,7 @@ proxy:
   use_client_system_prompt: true
   use_notion_personal_instructions: false
   enable_tool_bridge: true
+  tool_choice_policy: client
   notion_proxy: ""
 `
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {

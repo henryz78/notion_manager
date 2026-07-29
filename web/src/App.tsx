@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import type { DashboardData, AccountInfo, AccountSummary, DeploymentVersionStatus, RefreshStatus, TokenStats } from './types'
 import { fetchDashboardData, fetchAccountSelection, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats, startAccountBatchJob, getAccountBatchJob, listAccountBatchJobs, retryAccountBatchJob, downloadBackup, restoreBackup, fetchAPIKey, fetchVersionStatus } from './api'
-import type { SearchSettings, AccountStatusFilter, AccountBatchJob, AccountBatchJobAction, AccountImportPersonalInstructionsPolicy } from './api'
+import type { SearchSettings, ToolChoicePolicy, AccountStatusFilter, AccountBatchJob, AccountBatchJobAction, AccountImportPersonalInstructionsPolicy } from './api'
 import { fmt, formatTokens, getQuotaStatusByUsage, getQuotaPct, avatarColor, avatarLetter, formatCheckedAt, formatTimestampMs, providerDisplay } from './utils'
 import { AccountMenu } from './components/AccountMenu'
 import { RegisterModal } from './components/RegisterModal'
@@ -1340,6 +1340,17 @@ export default function App() {
     }
   }
 
+  const setToolChoicePolicy = async (policy: ToolChoicePolicy) => {
+    if (!settings || promptModeSaving || settings.tool_choice_policy === policy) return
+    setPromptModeSaving(true)
+    try {
+      const updated = await updateSettings({ tool_choice_policy: policy })
+      setSettings(updated)
+    } finally {
+      setPromptModeSaving(false)
+    }
+  }
+
   // saveProxy commits the proxy input draft. We skip the round trip when
   // the value is unchanged (typical blur after focus). Backend rejects
   // unsupported schemes with HTTP 400 + JSON error; we surface the
@@ -1833,6 +1844,27 @@ export default function App() {
                     </div>
                     <div className="text-[11px] text-text-muted mt-1.5 leading-relaxed">{t('api.tool_bridge_help')}</div>
                   </button>
+                </div>
+                <div className="mt-3 pt-3 border-t border-white/[.06] flex items-center justify-between gap-4 max-md:flex-col max-md:items-stretch">
+                  <div className="min-w-0">
+                    <div className="text-[12px] font-semibold text-text-primary">{t('api.tool_choice_policy')}</div>
+                    <div className="text-[11px] text-text-muted mt-0.5 leading-relaxed">{t('api.tool_choice_policy_help')}</div>
+                  </div>
+                  <div className="grid grid-cols-4 p-0.5 rounded-md border border-white/[.07] bg-black/20 shrink-0 max-sm:grid-cols-2" role="radiogroup" aria-label={t('api.tool_choice_policy')}>
+                    {(['client', 'auto', 'required', 'none'] as ToolChoicePolicy[]).map(policy => (
+                      <button
+                        key={policy}
+                        type="button"
+                        role="radio"
+                        aria-checked={settings.tool_choice_policy === policy}
+                        disabled={promptModeSaving}
+                        onClick={() => setToolChoicePolicy(policy)}
+                        className={`h-8 min-w-[76px] px-2 rounded text-[11px] font-medium cursor-pointer transition-colors disabled:cursor-wait ${settings.tool_choice_policy === policy ? 'bg-white/10 text-white shadow-sm' : 'bg-transparent text-text-muted hover:text-text-primary'}`}
+                      >
+                        {t(`api.tool_choice_${policy}`)}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
               <div className="flex items-center gap-6 flex-wrap max-sm:flex-col max-sm:items-stretch max-sm:gap-4">

@@ -330,6 +330,7 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				"use_client_system_prompt":         AppConfig.ClientSystemPromptEnabled(),
 				"use_notion_personal_instructions": AppConfig.NotionPersonalInstructionsEnabled(),
 				"enable_tool_bridge":               AppConfig.ToolBridgeEnabled(),
+				"tool_choice_policy":               AppConfig.ToolChoicePolicy(),
 				"debug_logging":                    AppConfig.Server.DebugLogging,
 				"notion_proxy":                     AppConfig.NotionProxyURL(),
 			})
@@ -342,12 +343,21 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				UseClientSystemPrompt         *bool   `json:"use_client_system_prompt"`
 				UseNotionPersonalInstructions *bool   `json:"use_notion_personal_instructions"`
 				EnableToolBridge              *bool   `json:"enable_tool_bridge"`
+				ToolChoicePolicy              *string `json:"tool_choice_policy"`
 				DebugLogging                  *bool   `json:"debug_logging"`
 				NotionProxy                   *string `json:"notion_proxy"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 				return
+			}
+			if body.ToolChoicePolicy != nil {
+				policy, ok := normalizeToolChoicePolicy(*body.ToolChoicePolicy)
+				if !ok {
+					http.Error(w, `{"error":"tool_choice_policy must be client, auto, required, or none"}`, http.StatusBadRequest)
+					return
+				}
+				body.ToolChoicePolicy = &policy
 			}
 
 			changed := false
@@ -387,6 +397,11 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 					changed = true
 					log.Printf("[settings] enable_tool_bridge → %v", *body.EnableToolBridge)
 				}
+			}
+			if body.ToolChoicePolicy != nil && AppConfig.Proxy.ToolChoicePolicy != *body.ToolChoicePolicy {
+				AppConfig.Proxy.ToolChoicePolicy = *body.ToolChoicePolicy
+				changed = true
+				log.Printf("[settings] tool_choice_policy -> %s", *body.ToolChoicePolicy)
 			}
 			if body.DebugLogging != nil {
 				AppConfig.Server.DebugLogging = *body.DebugLogging
@@ -436,6 +451,7 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				"use_client_system_prompt":         AppConfig.ClientSystemPromptEnabled(),
 				"use_notion_personal_instructions": AppConfig.NotionPersonalInstructionsEnabled(),
 				"enable_tool_bridge":               AppConfig.ToolBridgeEnabled(),
+				"tool_choice_policy":               AppConfig.ToolChoicePolicy(),
 				"debug_logging":                    AppConfig.Server.DebugLogging,
 				"notion_proxy":                     AppConfig.NotionProxyURL(),
 			})
@@ -468,6 +484,7 @@ func persistSearchSettings(configPath string) {
 		setYAMLBool(proxyNode, "use_client_system_prompt", AppConfig.ClientSystemPromptEnabled())
 		setYAMLBool(proxyNode, "use_notion_personal_instructions", AppConfig.NotionPersonalInstructionsEnabled())
 		setYAMLBool(proxyNode, "enable_tool_bridge", AppConfig.ToolBridgeEnabled())
+		setYAMLString(proxyNode, "tool_choice_policy", AppConfig.ToolChoicePolicy())
 		setYAMLString(proxyNode, "notion_proxy", AppConfig.Proxy.NotionProxy)
 
 		serverNode := getOrCreateYAMLMapping(mapping, "server")

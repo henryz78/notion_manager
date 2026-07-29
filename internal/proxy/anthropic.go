@@ -695,6 +695,13 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			return
 		}
 
+		clientToolChoice := req.ToolChoice
+		req.ToolChoice = AppConfig.EffectiveToolChoice(clientToolChoice)
+		if AppConfig.ToolChoicePolicy() != ToolChoicePolicyClient {
+			log.Printf("[tool-choice] global policy %q overrides client mode %q",
+				AppConfig.ToolChoicePolicy(), resolveToolChoiceMode(clientToolChoice))
+		}
+
 		model := req.Model
 		usedDefaultModel := model == ""
 		if model == "" {

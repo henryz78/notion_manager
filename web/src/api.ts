@@ -503,6 +503,8 @@ export async function deleteExhaustedTrials(): Promise<DeleteExhaustedTrialsResu
 
 // --- Settings API ---
 
+export type ToolChoicePolicy = 'client' | 'auto' | 'required' | 'none'
+
 export interface SearchSettings {
   enable_web_search: boolean
   enable_workspace_search: boolean
@@ -518,6 +520,9 @@ export interface SearchSettings {
   // Controls conversion of client Tools/functions into Notion-compatible
   // prompts and parsing the resulting calls back to the client.
   enable_tool_bridge: boolean
+  // client respects each request. The remaining values are global
+  // overrides selected from the Dashboard.
+  tool_choice_policy: ToolChoicePolicy
   debug_logging: boolean
   // notion_proxy is the global upstream proxy applied to every Notion-bound
   // outbound connection. Empty string means "direct dial". Editing this
@@ -533,7 +538,7 @@ export async function fetchSettings(): Promise<SearchSettings> {
   return resp.json()
 }
 
-export async function updateSettings(settings: Partial<Pick<SearchSettings, 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'use_client_system_prompt' | 'use_notion_personal_instructions' | 'enable_tool_bridge' | 'debug_logging' | 'notion_proxy'>>): Promise<SearchSettings> {
+export async function updateSettings(settings: Partial<Pick<SearchSettings, 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'use_client_system_prompt' | 'use_notion_personal_instructions' | 'enable_tool_bridge' | 'tool_choice_policy' | 'debug_logging' | 'notion_proxy'>>): Promise<SearchSettings> {
   // Uses dashboard session cookie for auth (not API key)
   const resp = await fetch('/admin/settings', {
     method: 'PUT',

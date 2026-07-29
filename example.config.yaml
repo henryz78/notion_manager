@@ -51,6 +51,9 @@ proxy:
     use_notion_personal_instructions: false
     # Convert external Tools/functions to the Notion-compatible bridge format.
     enable_tool_bridge: true
+    # Global tool choice policy: client (respect each request), auto, required, or none.
+    # Editable at runtime from the Dashboard. Default: client.
+    tool_choice_policy: "client"
     # Enable web search (internet search) for AI responses.
     # Can be overridden per-request via X-Web-Search header.
     enable_web_search: true
