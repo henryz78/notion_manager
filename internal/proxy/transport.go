@@ -28,8 +28,9 @@ var ErrInferenceIdleTimeout = fmt.Errorf("upstream inference idle timeout")
 // are torn down by RebuildChromeTransport so a flipped setting doesn't
 // leak across the boundary.
 var (
-	chromeRoundTripperOnce sync.Once
-	chromeRoundTripperH2   *http2.Transport
+	chromeRoundTripperOnce  sync.Once
+	chromeRoundTripperH2    *http2.Transport
+	chromeHTTPClientForTest func(time.Duration) *http.Client
 )
 
 func getChromeRoundTripper() http.RoundTripper {
@@ -102,6 +103,9 @@ func dialChromeTLS(ctx context.Context, network, addr string) (net.Conn, error) 
 
 // getChromeHTTPClient returns an http.Client with Chrome TLS fingerprint
 func getChromeHTTPClient(timeout time.Duration) *http.Client {
+	if chromeHTTPClientForTest != nil {
+		return chromeHTTPClientForTest(timeout)
+	}
 	return &http.Client{
 		Transport: getChromeRoundTripper(),
 		Timeout:   timeout,

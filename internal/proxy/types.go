@@ -194,12 +194,8 @@ type UpdatedConfigMsg struct {
 	Type string `json:"type"` // always "updated-config"
 }
 
-type TranscriptMsg struct {
-	Type  string      `json:"type"`
-	Value interface{} `json:"value"`
-}
-
-// ResearcherTranscriptMsg extends TranscriptMsg with fields required by researcher mode
+// ResearcherTranscriptMsg is a transcript entry with the fields required by
+// workflow and researcher requests.
 type ResearcherTranscriptMsg struct {
 	ID        string      `json:"id"`
 	Type      string      `json:"type"`
@@ -270,6 +266,7 @@ type CallOptions struct {
 	KnownCitationURLs     *[]string             // known web result URLs for repairing truncated citations
 	KnownCitationDocs     *[]CitationCandidate  // known search result metadata for context-based citation recovery
 	KnownToolCallURLs     *map[string][]string  // tool call id -> ordered web result URLs for resolving tool citations
+	Session               *Session              // real Notion thread for this client conversation
 	RequestID             string                // top-level API request ID for log correlation
 	RequestDiagnostic     *RequestDiagnostic    // metadata-only Dashboard request trace
 }

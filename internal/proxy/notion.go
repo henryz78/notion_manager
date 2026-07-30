@@ -101,6 +101,7 @@ func SnapshotModelMap() map[string]string {
 
 // ApplyConfig applies loaded configuration to package-level variables.
 func ApplyConfig(cfg *Config) {
+	globalSessionManager.Clear()
 	NotionAPIBase = cfg.Proxy.NotionAPIBase
 	DefaultClientVersion = cfg.Proxy.ClientVersion
 	ReplaceModelMap(cfg.ModelMap)
@@ -1349,59 +1350,103 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 
 	enableWebSearch := opt.EnableWebSearch
 	attachments := opt.Attachments
+	session := opt.Session
 	var reqBody NotionInferenceRequest
-	transcript := buildFullTranscript(
-		acc,
-		messages,
-		notionModel,
-		disableBuiltinTools,
-		enableWebSearch,
-		opt.EnableWorkspaceSearch,
-		opt.UseReadOnlyMode,
-		attachments,
-		generateUUIDv4(),
-		generateUUIDv4(),
-		time.Now().Format(time.RFC3339Nano),
-		useClientSystemPrompt,
-		usePersonalInstructions,
-		personalInstructionsPageID,
-	)
 
-	createThread := true
-	threadID := generateUUIDv4()
-	if len(attachments) > 0 && attachments[0].SessionID != "" {
-		threadID = attachments[0].SessionID
-		createThread = false
-		log.Printf("[upload] using upload thread %s for inference", threadID)
-	}
-
-	reqBody = NotionInferenceRequest{
-		TraceID:                 generateUUIDv4(),
-		SpaceID:                 acc.SpaceID,
-		ThreadID:                threadID,
-		Transcript:              transcript,
-		CreateThread:            createThread,
-		IsPartialTranscript:     false,
-		GenerateTitle:           true,
-		SaveAllThreadOperations: true,
-		SetUnreadState:          false,
-		ThreadType:              "workflow",
-		AsPatchResponse:         false,
-		DebugOverrides: DebugOverrides{
-			Model:                           notionModel,
-			EmitAgentSearchExtractedResults: true,
-		},
-	}
-
-	if createThread {
-		reqBody.ThreadParentPointer = &ThreadParentPointer{
-			Table:   "space",
-			ID:      acc.SpaceID,
-			SpaceID: acc.SpaceID,
+	if session != nil && session.TurnCount > 0 {
+		newUserContent := extractLastUserMessage(messages)
+		if newUserContent == "" {
+			newUserContent = "Continue from the latest client tool result."
 		}
-	}
+		reqBody = NotionInferenceRequest{
+			TraceID:  generateUUIDv4(),
+			SpaceID:  acc.SpaceID,
+			ThreadID: session.ThreadID,
+			Transcript: buildPartialTranscript(
+				acc,
+				newUserContent,
+				notionModel,
+				disableBuiltinTools,
+				enableWebSearch,
+				opt.EnableWorkspaceSearch,
+				opt.UseReadOnlyMode,
+				session,
+				personalInstructionsPageID,
+			),
+			CreateThread:            false,
+			IsPartialTranscript:     true,
+			GenerateTitle:           false,
+			SaveAllThreadOperations: true,
+			SetUnreadState:          false,
+			ThreadType:              "workflow",
+			AsPatchResponse:         false,
+			DebugOverrides: DebugOverrides{
+				EmitAgentSearchExtractedResults: true,
+			},
+		}
+		log.Printf("[context] continuing Notion thread=%s turn=%d", session.ThreadID, session.TurnCount+1)
+	} else {
+		configID := generateUUIDv4()
+		contextID := generateUUIDv4()
+		now := time.Now().Format(time.RFC3339Nano)
+		threadID := generateUUIDv4()
+		if session != nil {
+			configID = session.ConfigID
+			contextID = session.ContextID
+			now = session.OriginalDatetime
+			threadID = session.ThreadID
+		}
 
-	log.Printf("[context] full client transcript: messages=%d thread=%s", len(messages), threadID)
+		createThread := true
+		if len(attachments) > 0 && attachments[0].SessionID != "" {
+			threadID = attachments[0].SessionID
+			createThread = false
+			if session != nil {
+				session.ThreadID = threadID
+			}
+			log.Printf("[upload] using upload thread %s for inference", threadID)
+		}
+
+		reqBody = NotionInferenceRequest{
+			TraceID:  generateUUIDv4(),
+			SpaceID:  acc.SpaceID,
+			ThreadID: threadID,
+			Transcript: buildFullTranscript(
+				acc,
+				messages,
+				notionModel,
+				disableBuiltinTools,
+				enableWebSearch,
+				opt.EnableWorkspaceSearch,
+				opt.UseReadOnlyMode,
+				attachments,
+				configID,
+				contextID,
+				now,
+				useClientSystemPrompt,
+				usePersonalInstructions,
+				personalInstructionsPageID,
+			),
+			CreateThread:            createThread,
+			IsPartialTranscript:     false,
+			GenerateTitle:           true,
+			SaveAllThreadOperations: true,
+			SetUnreadState:          false,
+			ThreadType:              "workflow",
+			AsPatchResponse:         false,
+			DebugOverrides: DebugOverrides{
+				EmitAgentSearchExtractedResults: true,
+			},
+		}
+		if createThread {
+			reqBody.ThreadParentPointer = &ThreadParentPointer{
+				Table:   "space",
+				ID:      acc.SpaceID,
+				SpaceID: acc.SpaceID,
+			}
+		}
+		log.Printf("[context] starting Notion thread=%s replay_messages=%d", threadID, len(messages))
+	}
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -1486,7 +1531,8 @@ func buildConfigValue(notionModel string, disableBuiltinTools bool, enableWebSea
 
 	configValue := map[string]interface{}{
 		"type":                       "workflow",
-		"modelFromUser":              !isSubsequentTurn,
+		"model":                      notionModel,
+		"modelFromUser":              true,
 		"enableAgentAutomations":     agentEnabled,
 		"enableAgentIntegrations":    agentEnabled,
 		"enableCustomAgents":         !effectiveDisable,
@@ -1511,7 +1557,6 @@ func buildConfigValue(notionModel string, disableBuiltinTools bool, enableWebSea
 	}
 
 	if isSubsequentTurn {
-		configValue["model"] = notionModel
 		configValue["isThreadStartedByAdmin"] = true
 	}
 
@@ -1572,13 +1617,27 @@ func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel strin
 		transcript = append(transcript, BuildAttachmentTranscript(&att))
 	}
 
+	// Current Notion no longer accepts synthetic assistant-reply records in a
+	// newly created thread. When a client sends pre-existing history (for
+	// example after a restart or account switch), preserve every role in one
+	// explicit user transcript instead of silently dropping Agent answers.
+	if replayContent, ok := buildFreshThreadReplayContent(messages, useClientSystemPrompt); ok {
+		transcript = append(transcript, ResearcherTranscriptMsg{
+			ID:        generateUUIDv4(),
+			Type:      "user",
+			Value:     [][]string{{replayContent}},
+			UserID:    acc.UserID,
+			CreatedAt: now,
+		})
+		return transcript
+	}
+
 	// Convert OpenAI messages to Notion transcript format
 	// Client system messages and Notion personal instructions are independent:
 	// enabled client system messages are prepended to the first user message,
 	// while personal instructions are activated separately through context.
 	// Tool/function-call bridge instructions already live in user messages.
 	// User messages → "user" type with id, userId, createdAt
-	// Assistant messages → "assistant-reply" type (only for first-turn full transcript)
 	var systemPrompt string
 	for _, msg := range messages {
 		switch msg.Role {
@@ -1588,42 +1647,6 @@ func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel strin
 			}
 		case "user":
 			content := msg.Content
-			if systemPrompt != "" {
-				content = systemPrompt + "\n" + content
-				systemPrompt = ""
-			}
-			transcript = append(transcript, ResearcherTranscriptMsg{
-				ID:        generateUUIDv4(),
-				Type:      "user",
-				Value:     [][]string{{content}},
-				UserID:    acc.UserID,
-				CreatedAt: now,
-			})
-		case "assistant":
-			content := msg.Content
-			if len(msg.ToolCalls) > 0 {
-				toolCalls, _ := json.Marshal(msg.ToolCalls)
-				if content != "" {
-					content += "\n\n"
-				}
-				content += "[Client tool calls preserved as read-only conversation history]\n" + string(toolCalls)
-			}
-			transcript = append(transcript, TranscriptMsg{
-				Type: "assistant-reply",
-				Value: []map[string]interface{}{
-					{
-						"type": "agent-inference",
-						"value": []map[string]string{
-							{"type": "text", "content": content},
-						},
-					},
-				},
-			})
-		case "tool":
-			content := fmt.Sprintf(
-				"[Client tool result preserved as read-only conversation history]\nname: %s\ntool_call_id: %s\nresult:\n%s",
-				msg.Name, msg.ToolCallID, msg.Content,
-			)
 			if systemPrompt != "" {
 				content = systemPrompt + "\n" + content
 				systemPrompt = ""
@@ -1649,6 +1672,114 @@ func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel strin
 		})
 	}
 
+	return transcript
+}
+
+func buildFreshThreadReplayContent(messages []ChatMessage, includeSystem bool) (string, bool) {
+	hasAssistantHistory := false
+	for _, message := range messages {
+		if message.Role == "assistant" || message.Role == "tool" {
+			hasAssistantHistory = true
+			break
+		}
+	}
+	if !hasAssistantHistory {
+		return "", false
+	}
+
+	var replay strings.Builder
+	replay.WriteString("The client is continuing an existing conversation on a fresh server thread.\n")
+	replay.WriteString("Treat the role labels below as authoritative conversation history. ")
+	replay.WriteString("Use all prior ASSISTANT answers and TOOL results when answering the final USER request.\n\n")
+	for _, message := range messages {
+		switch message.Role {
+		case "system":
+			if !includeSystem || strings.TrimSpace(message.Content) == "" {
+				continue
+			}
+			replay.WriteString("SYSTEM:\n")
+			replay.WriteString(message.Content)
+		case "user":
+			replay.WriteString("USER:\n")
+			replay.WriteString(message.Content)
+		case "assistant":
+			replay.WriteString("ASSISTANT:\n")
+			replay.WriteString(message.Content)
+			if len(message.ToolCalls) > 0 {
+				toolCalls, _ := json.Marshal(message.ToolCalls)
+				replay.WriteString("\nASSISTANT_TOOL_CALLS:\n")
+				replay.Write(toolCalls)
+			}
+		case "tool":
+			replay.WriteString("TOOL_RESULT")
+			if message.Name != "" {
+				replay.WriteString(" name=")
+				replay.WriteString(message.Name)
+			}
+			if message.ToolCallID != "" {
+				replay.WriteString(" tool_call_id=")
+				replay.WriteString(message.ToolCallID)
+			}
+			replay.WriteString(":\n")
+			replay.WriteString(message.Content)
+		default:
+			continue
+		}
+		replay.WriteString("\n\n")
+	}
+	replay.WriteString("Continue the conversation by responding to the final USER request.")
+	return replay.String(), true
+}
+
+// buildPartialTranscript mirrors the current Notion web client: it reuses the
+// original config/context entry IDs, includes one updated-config placeholder
+// per completed server turn, and appends only the new client user step.
+func buildPartialTranscript(
+	acc *Account,
+	newUserContent string,
+	notionModel string,
+	disableBuiltinTools bool,
+	enableWebSearch bool,
+	enableWorkspaceSearch *bool,
+	useReadOnlyMode bool,
+	session *Session,
+	personalInstructionsPageID string,
+) []interface{} {
+	configValue := buildConfigValue(
+		notionModel,
+		disableBuiltinTools,
+		enableWebSearch,
+		enableWorkspaceSearch,
+		useReadOnlyMode,
+		false,
+		true,
+	)
+	contextValue := buildContextValue(acc, session.OriginalDatetime, personalInstructionsPageID)
+	transcript := []interface{}{
+		ResearcherTranscriptMsg{
+			ID:    session.ConfigID,
+			Type:  "config",
+			Value: configValue,
+		},
+		ResearcherTranscriptMsg{
+			ID:    session.ContextID,
+			Type:  "context",
+			Value: contextValue,
+		},
+	}
+	for _, id := range session.UpdatedConfigIDs {
+		transcript = append(transcript, UpdatedConfigMsg{
+			ID:   id,
+			Type: "updated-config",
+		})
+	}
+	transcript = append(transcript, ResearcherTranscriptMsg{
+		ID:        generateUUIDv4(),
+		Type:      "user",
+		Value:     [][]string{{newUserContent}},
+		UserID:    acc.UserID,
+		CreatedAt: time.Now().Format(time.RFC3339Nano),
+	})
 	return transcript
 }
 
@@ -1824,10 +1955,14 @@ func FetchModels(acc *Account) ([]ModelEntry, error) {
 
 	var result struct {
 		Models []struct {
-			Model        string `json:"model"`
+			ClientModel  string `json:"clientModel"`
+			LegacyModel  string `json:"model"`
 			ModelMessage string `json:"modelMessage"`
 			ModelFamily  string `json:"modelFamily"`
 			IsDisabled   bool   `json:"isDisabled"`
+			Workflow     *struct {
+				FinalModelName string `json:"finalModelName"`
+			} `json:"workflow"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
@@ -1837,7 +1972,20 @@ func FetchModels(acc *Account) ([]ModelEntry, error) {
 	var models []ModelEntry
 	for _, m := range result.Models {
 		if !m.IsDisabled {
-			models = append(models, ModelEntry{ID: m.Model, Name: displayModelName(m.ModelMessage, m.Model, m.ModelFamily)})
+			modelID := strings.TrimSpace(m.ClientModel)
+			if modelID == "" {
+				modelID = strings.TrimSpace(m.LegacyModel)
+			}
+			if m.Workflow != nil && strings.TrimSpace(m.Workflow.FinalModelName) != "" {
+				// The current Notion model picker sends workflow.finalModelName.
+				// The top-level model is only the client/display model and can
+				// silently fall back to Auto when used for workflow inference.
+				modelID = strings.TrimSpace(m.Workflow.FinalModelName)
+			}
+			if modelID == "" {
+				continue
+			}
+			models = append(models, ModelEntry{ID: modelID, Name: displayModelName(m.ModelMessage, modelID, m.ModelFamily)})
 		}
 	}
 	return models, nil
@@ -2998,6 +3146,17 @@ func cleanAllLangTags(text string) string {
 			break
 		}
 		text = text[:start] + text[start+end+2:]
+	}
+	// The stream can split the opening marker itself into "<", "<l",
+	// "<la", and "<lan". Hold that suffix until the next cumulative event
+	// establishes whether it is Notion's internal language tag. Emitting it
+	// immediately cannot be undone and previously leaked prefixes such as
+	// "<l" into otherwise normal Claude answers.
+	if start := strings.LastIndex(text, "<"); start >= 0 {
+		suffix := text[start:]
+		if suffix != "" && strings.HasPrefix("<lang", suffix) {
+			text = text[:start]
+		}
 	}
 	return text
 }

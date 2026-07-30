@@ -789,12 +789,46 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		allowedToolNames := declaredToolNames(req.Tools)
 		enableWebSearch := effectiveWebSearch
 
-		if requestDiagnostic != nil {
-			state := "full_replay"
-			if isResearcher {
-				state = "not_applicable"
+		// Bind repeated client history to the real Notion thread. Current
+		// Notion persists server Agent replies only on that thread; rebuilding a
+		// fresh thread every request loses assistant context.
+		var fingerprint string
+		var session *Session
+		rawMessageCount := 0
+		if !isResearcher {
+			sessionSalt := extractConversationSalt(req.Metadata)
+			fingerprint = computeSessionFingerprintWithSalt(messages, sessionSalt)
+			rawMessageCount = countConversationMessages(messages)
+			session = globalSessionManager.Get(fingerprint)
+			if shouldStartFreshForAmbiguousSingleTurn(session, rawMessageCount, sessionSalt) {
+				globalSessionManager.Delete(fingerprint)
+				session = nil
+			} else if session != nil && rawMessageCount <= session.RawMessageCount {
+				// A retry, edit, or rollback must not append a duplicate user
+				// step to the stored Notion thread. Start a clean replay.
+				globalSessionManager.Delete(fingerprint)
+				session = nil
 			}
-			requestDiagnostic.SetContextMode(state)
+		}
+		if requestDiagnostic != nil {
+			switch {
+			case isResearcher:
+				requestDiagnostic.SetContextMode("not_applicable")
+			case session != nil:
+				requestDiagnostic.SetContextMode("thread_continuation")
+			default:
+				requestDiagnostic.SetContextMode("new_thread_replay")
+			}
+		}
+		invalidateSession := func(contextMode string) {
+			if isResearcher || session == nil {
+				return
+			}
+			globalSessionManager.Delete(fingerprint)
+			session = nil
+			if requestDiagnostic != nil && contextMode != "" {
+				requestDiagnostic.SetContextMode(contextMode)
+			}
 		}
 
 		// Convert Anthropic tools to internal Tool format (done once, immutable).
@@ -852,6 +886,13 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		for selection := 0; selection < selectionLimit && accountCalls < maxAccountCalls; selection++ {
 			var acc *Account
 
+			if !isResearcher && selection == 0 && session != nil {
+				acc = pool.GetByEmail(session.AccountEmail)
+				if acc == nil {
+					log.Printf("[context] stored Notion thread account is unavailable; starting a fresh thread replay")
+					invalidateSession("new_thread_account_switch")
+				}
+			}
 			if acc == nil {
 				if isResearcher {
 					if selection == 0 {
@@ -882,6 +923,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				log.Printf("[quota-live] %s skipped (exhausted on live check)", acc.UserEmail)
 				tried[acc] = true
 				pool.MarkQuotaExhausted(acc)
+				if session != nil && session.AccountEmail == acc.UserEmail {
+					invalidateSession("new_thread_account_switch")
+				}
 				continue
 			}
 			tried[acc] = true
@@ -906,10 +950,14 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			}
 
 			requestMessages := attemptMessages
+			currentSession := session
+			if !isResearcher && currentSession == nil {
+				currentSession = newConversationSession(acc.UserEmail)
+			}
 
 			accountCalls++
-			log.Printf("[req] %s model=%s messages=%d stream=%v tools=%d attachments=%d account=%s full_replay=true (attempt %d/%d) [anthropic]",
-				requestID, model, len(req.Messages), req.Stream, len(req.Tools), len(fileAttachments), acc.UserEmail, accountCalls, maxAccountCalls)
+			log.Printf("[req] %s model=%s messages=%d stream=%v tools=%d attachments=%d account=%s continuation=%v (attempt %d/%d) [anthropic]",
+				requestID, model, len(req.Messages), req.Stream, len(req.Tools), len(fileAttachments), acc.UserEmail, currentSession != nil && currentSession.TurnCount > 0, accountCalls, maxAccountCalls)
 			if requestDiagnostic != nil {
 				requestDiagnostic.BeginAttempt(acc.UserEmail)
 			}
@@ -947,9 +995,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					reqErr = handleResearcherNonStream(w, acc, requestMessages, model, requestID, hasThinking, requestDiagnostic)
 				}
 			} else if req.Stream {
-				reqErr = handleAnthropicStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, toolChoiceMode, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, requestDiagnostic)
+				reqErr = handleAnthropicStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, toolChoiceMode, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic)
 			} else {
-				reqErr = handleAnthropicNonStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, toolChoiceMode, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, requestDiagnostic)
+				reqErr = handleAnthropicNonStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, toolChoiceMode, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic)
 			}
 			if requestDiagnostic != nil {
 				requestDiagnostic.FinishAttempt(requestAttemptOutcome(reqErr), reqErr)
@@ -987,6 +1035,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				if requestDiagnostic != nil {
 					requestDiagnostic.SetContextMode("full_replay_account_switch")
 				}
+				invalidateSession("new_thread_account_switch")
 				continue
 			}
 
@@ -1004,6 +1053,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				if requestDiagnostic != nil {
 					requestDiagnostic.SetContextMode("full_replay_after_error")
 				}
+				invalidateSession("new_thread_after_error")
 				if emptyResponseCount >= maxEmptyResponseAttempts {
 					break
 				}
@@ -1022,6 +1072,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				if requestDiagnostic != nil {
 					requestDiagnostic.SetContextMode("full_replay_account_switch")
 				}
+				invalidateSession("new_thread_account_switch")
 				continue
 			}
 
@@ -1036,6 +1087,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 						} else {
 							log.Printf("[health] %s failed with auth_error, trying next account: %v", acc.UserEmail, reqErr)
 						}
+						invalidateSession("new_thread_account_switch")
 						continue
 					}
 					if shouldQuarantineAccountFailure(failure.Reason) {
@@ -1045,6 +1097,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					if requestDiagnostic != nil {
 						requestDiagnostic.SetContextMode("full_replay_after_error")
 					}
+					invalidateSession("new_thread_after_error")
 					continue
 				}
 				break
@@ -1052,6 +1105,18 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 
 			if reqErr == nil {
 				pool.ClearTemporaryUnavailable(acc)
+				if !isResearcher && currentSession != nil {
+					wasContinuation := currentSession.TurnCount > 0
+					completeConversationSession(currentSession, rawMessageCount, model)
+					globalSessionManager.Set(fingerprint, currentSession)
+					if requestDiagnostic != nil {
+						if wasContinuation {
+							requestDiagnostic.SetContextMode("thread_continuation")
+						} else {
+							requestDiagnostic.SetContextMode("new_thread")
+						}
+					}
+				}
 			}
 
 			return
@@ -1642,7 +1707,7 @@ func (stream *incrementalToolStream) FlushText() string {
 // handleAnthropicStream streams thinking and ordinary text as it arrives. Only
 // a response that begins like a tool protocol is buffered until it can be
 // validated and converted into tool_use events.
-func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, toolChoiceMode string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, requestDiagnostic *RequestDiagnostic) error {
+func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, toolChoiceMode string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic) error {
 	if !hasTools {
 		callOpts := CallOptions{
 			HasClientTools:        hasBridgedClientTools,
@@ -1651,6 +1716,7 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 			UseReadOnlyMode:       useReadOnlyMode,
 			Attachments:           attachments,
 			RequestID:             requestID,
+			Session:               session,
 			RequestDiagnostic:     requestDiagnostic,
 		}
 		return streamAnthropicTextResponse(w, acc, messages, model, requestID, hasThinking, AppConfig.Proxy.DisableNotionPrompt, outputConfig, callOpts)
@@ -1758,6 +1824,7 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 		KnownCitationDocs:     &knownCitationDocs,
 		KnownToolCallURLs:     &knownToolCallURLs,
 		RequestID:             requestID,
+		Session:               session,
 		RequestDiagnostic:     requestDiagnostic,
 	}
 	if hasThinking {
@@ -1908,7 +1975,7 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 }
 
 // handleAnthropicNonStream handles non-streaming Anthropic response
-func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, toolChoiceMode string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, requestDiagnostic *RequestDiagnostic) error {
+func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, toolChoiceMode string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic) error {
 	var fullContent strings.Builder
 	var finalUsage *UsageInfo
 	defer func() {
@@ -1933,6 +2000,7 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 		KnownCitationDocs:     &knownCitationDocs,
 		KnownToolCallURLs:     &knownToolCallURLs,
 		RequestID:             requestID,
+		Session:               session,
 		RequestDiagnostic:     requestDiagnostic,
 	}
 	if hasThinking {

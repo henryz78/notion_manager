@@ -58,6 +58,12 @@ func TestBuildConfigValueRespectsUseReadOnlyMode(t *testing.T) {
 			if cfg["type"] != "workflow" {
 				t.Fatalf("expected type=workflow, got %#v", cfg["type"])
 			}
+			if cfg["model"] != "avocado-froyo-medium" {
+				t.Fatalf("model = %#v, want selected workflow model", cfg["model"])
+			}
+			if cfg["modelFromUser"] != true {
+				t.Fatalf("modelFromUser = %#v, want true", cfg["modelFromUser"])
+			}
 		})
 	}
 }

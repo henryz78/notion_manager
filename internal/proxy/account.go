@@ -909,6 +909,7 @@ func (p *AccountPool) RemoveAccountByEmail(email string) bool {
 	for i, a := range p.accounts {
 		if strings.EqualFold(a.UserEmail, email) {
 			p.accounts = append(p.accounts[:i], p.accounts[i+1:]...)
+			globalSessionManager.DeleteByAccount(a.UserEmail)
 			return true
 		}
 	}

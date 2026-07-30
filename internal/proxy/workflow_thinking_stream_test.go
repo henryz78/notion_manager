@@ -24,6 +24,20 @@ func TestParseNDJSONStreamAcceptsLargeUpstreamEvent(t *testing.T) {
 	}
 }
 
+func TestCleanAllLangTagsHoldsSplitOpeningMarker(t *testing.T) {
+	for _, raw := range []string{"<", "<l", "<la", "<lan", "<lang", `<lang primary="en"`} {
+		if got := cleanAllLangTags(raw); got != "" {
+			t.Fatalf("cleanAllLangTags(%q) = %q, want empty until the internal tag is complete", raw, got)
+		}
+	}
+	if got := cleanAllLangTags(`<lang primary="en"/>answer`); got != "answer" {
+		t.Fatalf("complete language tag was not removed: %q", got)
+	}
+	if got := cleanAllLangTags("prefix <label>"); got != "prefix <label>" {
+		t.Fatalf("ordinary angle-bracket text changed: %q", got)
+	}
+}
+
 func TestParseNDJSONStreamClassifiesPromptTooLong(t *testing.T) {
 	err := parseNDJSONStream(bytes.NewBufferString(`{"type":"error","message":"Prompt too long."}`), "", func(string, bool, *UsageInfo) {}, nil, nil, nil, nil, nil, nil)
 	if !errors.Is(err, ErrPromptTooLong) {
