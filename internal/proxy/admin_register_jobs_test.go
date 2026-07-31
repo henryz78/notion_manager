@@ -95,16 +95,32 @@ func newRegHandlerHarness(t *testing.T) *regHandlerHarness {
 	registry.Register(fakeMicrosoft())
 
 	// Install benign defaults for the package-level Notion fetchers so
-	// the post-register quota refresh goroutine doesn't panic on tests
-	// that don't explicitly stub them. Tests that need to assert on the
-	// fetched values can replace them via withFetchers.
-	prevQ, prevM := quotaFetcher, modelsFetcher
+	// handler tests stay offline. Replace the production asynchronous
+	// wrapper with a synchronous hook: the refresh implementation is the
+	// same, but it must finish before the runner marks the job complete and
+	// before Cleanup restores these package-level seams. Without that
+	// ordering, the race detector correctly catches Cleanup writing the
+	// fetcher variables while a detached refresh still reads them.
+	prevQ, prevM, prevW := quotaFetcher, modelsFetcher, workspaceProbe
+	prevHook := postRegisterRefreshHook
 	quotaFetcher = func(*Account) (*QuotaInfo, error) {
 		return &QuotaInfo{IsEligible: true}, nil
 	}
 	modelsFetcher = func(*Account) ([]ModelEntry, error) { return nil, nil }
+	workspaceProbe = func(*Account) (WorkspaceProbeResult, error) {
+		return WorkspaceProbeResult{Count: 1}, nil
+	}
+	postRegisterRefreshHook = func(deps *RegisterJobsDeps, email string) {
+		if deps == nil || deps.Pool == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), postRegisterRefreshTimeout)
+		defer cancel()
+		_ = deps.Pool.RefreshAndPersistAccount(ctx, deps.AccountsDir, email)
+	}
 	t.Cleanup(func() {
-		quotaFetcher, modelsFetcher = prevQ, prevM
+		postRegisterRefreshHook = prevHook
+		quotaFetcher, modelsFetcher, workspaceProbe = prevQ, prevM, prevW
 	})
 
 	pool := NewAccountPool()
@@ -844,8 +860,8 @@ func TestRetryJobNoFailuresReturns400(t *testing.T) {
 //     account file atomically.
 //
 // The test stubs the package-level fetchers so we don't need a live
-// Notion server, then polls the account file for quota_info to land
-// (the refresh runs in a background goroutine after the runner finishes).
+// Notion server, then checks the persisted account file after the job
+// reaches its terminal state.
 func TestStartRegisterTriggersPostRegisterRefreshAndPersists(t *testing.T) {
 	h := newRegHandlerHarness(t)
 
@@ -887,9 +903,10 @@ func TestStartRegisterTriggersPostRegisterRefreshAndPersists(t *testing.T) {
 	}
 	h.waitJobDone(startResp.JobID)
 
-	// Poll for quota_info to appear in the per-account file. The refresh
-	// hook runs in a background goroutine after OnSuccess, so we give it
-	// up to 3 seconds to settle.
+	// Poll defensively for quota_info to appear in the per-account file.
+	// The harness runs the refresh synchronously, so this normally succeeds
+	// on the first read; the deadline keeps the assertion resilient to disk
+	// visibility delays on Windows.
 	deadline := time.Now().Add(3 * time.Second)
 	var got map[string]interface{}
 	for time.Now().Before(deadline) {
