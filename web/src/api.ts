@@ -185,6 +185,7 @@ export type AccountStatusFilter =
   | 'exhausted'
   | 'auth_invalid'
   | 'no_workspace'
+  | 'ai_disabled'
   | 'temporarily_unavailable'
   | 'personal_configured'
   | 'personal_missing'

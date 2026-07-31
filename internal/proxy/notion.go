@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,9 +25,6 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// ErrQuotaExhausted is returned when an account's AI usage limit is exceeded
-var ErrQuotaExhausted = errors.New("AI usage limit exceeded")
-
 // ErrPremiumFeatureUnavailable is returned when Notion rejects the request
 // because the current account/thread cannot use the requested premium path.
 var ErrPremiumFeatureUnavailable = errors.New("premium feature unavailable")
@@ -43,6 +41,12 @@ var ErrEmptyResponse = errors.New("empty response from inference")
 // because it exceeds the selected model's context window.
 var ErrPromptTooLong = errors.New("prompt too long")
 
+// ErrStreamResponseStarted wraps an upstream failure that happened after a
+// streaming response had already reached the client. The SSE error event is
+// already written, so outer retry/error handling must not append a second HTTP
+// response or mark the attempt successful.
+var ErrStreamResponseStarted = errors.New("stream response already started")
+
 // ErrModelNotFound is returned when a client requests a model ID that is not
 // present in the current Notion model map. Unknown names must never be sent to
 // Notion because Notion can silently fall back to a different default model.
@@ -53,7 +57,7 @@ var (
 	DefaultClientVersion = "23.13.20260313.1423"
 )
 
-var DefaultModelMap = map[string]string{
+var builtInModelMap = map[string]string{
 	"opus-4.6":         "avocado-froyo-medium",
 	"sonnet-4.6":       "almond-croissant-low",
 	"haiku-4.5":        "anthropic-haiku-4.5",
@@ -64,7 +68,19 @@ var DefaultModelMap = map[string]string{
 	"minimax-m2.5":     "fireworks-minimax-m2.5",
 }
 
-var modelMapMu sync.RWMutex
+var (
+	modelMapMu       sync.RWMutex
+	DefaultModelMap  = cloneStringMap(builtInModelMap)
+	configuredModels = cloneStringMap(builtInModelMap)
+)
+
+func cloneStringMap(source map[string]string) map[string]string {
+	clone := make(map[string]string, len(source))
+	for key, value := range source {
+		clone[key] = value
+	}
+	return clone
+}
 
 // GetModelID returns the Notion internal ID for a friendly model name (thread-safe).
 func GetModelID(name string) (string, bool) {
@@ -85,7 +101,23 @@ func SetModelID(name, id string) {
 func ReplaceModelMap(m map[string]string) {
 	modelMapMu.Lock()
 	defer modelMapMu.Unlock()
-	DefaultModelMap = m
+	configuredModels = cloneStringMap(m)
+	DefaultModelMap = cloneStringMap(m)
+}
+
+func rebuildDynamicModelMap(accounts []*Account) {
+	modelMapMu.Lock()
+	defer modelMapMu.Unlock()
+	rebuilt := cloneStringMap(configuredModels)
+	for _, account := range accounts {
+		for _, model := range account.modelsSnapshot() {
+			name := normalizeModelName(model.Name)
+			if name != "" && strings.TrimSpace(model.ID) != "" {
+				rebuilt[name] = model.ID
+			}
+		}
+	}
+	DefaultModelMap = rebuilt
 }
 
 // SnapshotModelMap returns a shallow copy of DefaultModelMap (thread-safe).
@@ -221,7 +253,7 @@ type StreamCallback func(delta string, done bool, usage *UsageInfo)
 // executeWebSearch runs a web search query via Notion's native search capability.
 // It makes a separate CallInference call with useWebSearch=true and no tool framing,
 // allowing Notion's model to use its built-in search tool (two-turn inference).
-func executeWebSearch(acc *Account, query string, model string, requestID string) (string, *UsageInfo, error) {
+func executeWebSearch(ctx context.Context, acc *Account, query string, model string, requestID string, session *Session) (string, *UsageInfo, error) {
 	var result strings.Builder
 	var finalUsage *UsageInfo
 	var knownCitationURLs []string
@@ -233,11 +265,17 @@ func executeWebSearch(acc *Account, query string, model string, requestID string
 	}
 
 	callOpts := CallOptions{
-		EnableWebSearch:   true,
-		KnownCitationURLs: &knownCitationURLs,
-		KnownCitationDocs: &knownCitationDocs,
-		KnownToolCallURLs: &knownToolCallURLs,
-		RequestID:         requestID,
+		Context:                 ctx,
+		EnableWebSearch:         true,
+		KnownCitationURLs:       &knownCitationURLs,
+		KnownCitationDocs:       &knownCitationDocs,
+		KnownToolCallURLs:       &knownToolCallURLs,
+		Session:                 session,
+		ForceThreadContinuation: session != nil,
+		RequestID:               requestID,
+	}
+	if session != nil {
+		advanceConversationServerTurnLocked(session, model)
 	}
 
 	err := CallInference(acc, messages, model, false, func(delta string, done bool, usage *UsageInfo) {
@@ -252,6 +290,9 @@ func executeWebSearch(acc *Account, query string, model string, requestID string
 	text := result.String()
 	if err == nil && text != "" {
 		text = cleanCitationsWithContext(text, knownToolCallURLs, knownCitationURLs, knownCitationDocs)
+	}
+	if err == nil && strings.TrimSpace(text) == "" {
+		err = ErrEmptyResponse
 	}
 
 	return text, finalUsage, err
@@ -1291,8 +1332,9 @@ func StripAskModeSuffix(model string) (string, bool) {
 
 // CallInference sends a request to Notion's runInferenceTranscript API
 // and streams the response via callback.
-// Every request uses the complete client transcript. This keeps the public API
-// stateless and makes retries or account switches see exactly the same history.
+// A verified conversation session continues the real Notion thread with a
+// partial transcript so server Agent replies remain visible. New conversations,
+// edited histories, and account failover replay the complete client transcript.
 func CallInference(acc *Account, messages []ChatMessage, model string, disableBuiltinTools bool, cb StreamCallback, opts ...CallOptions) error {
 	var opt CallOptions
 	if len(opts) > 0 {
@@ -1353,8 +1395,8 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 	session := opt.Session
 	var reqBody NotionInferenceRequest
 
-	if session != nil && session.TurnCount > 0 {
-		newUserContent := extractLastUserMessage(messages)
+	if session != nil && (session.TurnCount > 0 || opt.ForceThreadContinuation) {
+		newUserContent := buildPartialContinuationContent(messages)
 		if newUserContent == "" {
 			newUserContent = "Continue from the latest client tool result."
 		}
@@ -1370,6 +1412,7 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 				enableWebSearch,
 				opt.EnableWorkspaceSearch,
 				opt.UseReadOnlyMode,
+				attachments,
 				session,
 				personalInstructionsPageID,
 			),
@@ -1454,7 +1497,11 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 	}
 	LogNotionRequestJSON(requestID, fmt.Sprintf("POST /runInferenceTranscript account=%s model=%s", acc.UserEmail, notionModel), reqBody)
 
-	req, err := http.NewRequest("POST", NotionAPIBase+"/runInferenceTranscript", bytes.NewReader(bodyBytes))
+	requestContext := opt.Context
+	if requestContext == nil {
+		requestContext = context.Background()
+	}
+	req, err := http.NewRequestWithContext(requestContext, "POST", NotionAPIBase+"/runInferenceTranscript", bytes.NewReader(bodyBytes))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -1742,19 +1789,24 @@ func buildPartialTranscript(
 	enableWebSearch bool,
 	enableWorkspaceSearch *bool,
 	useReadOnlyMode bool,
+	attachments []UploadedAttachment,
 	session *Session,
 	personalInstructionsPageID string,
 ) []interface{} {
+	hasAttachments := len(attachments) > 0
 	configValue := buildConfigValue(
 		notionModel,
 		disableBuiltinTools,
 		enableWebSearch,
 		enableWorkspaceSearch,
 		useReadOnlyMode,
-		false,
+		hasAttachments,
 		true,
 	)
 	contextValue := buildContextValue(acc, session.OriginalDatetime, personalInstructionsPageID)
+	if hasAttachments {
+		contextValue["surface"] = "workflows"
+	}
 	transcript := []interface{}{
 		ResearcherTranscriptMsg{
 			ID:    session.ConfigID,
@@ -1772,6 +1824,9 @@ func buildPartialTranscript(
 			ID:   id,
 			Type: "updated-config",
 		})
+	}
+	for _, attachment := range attachments {
+		transcript = append(transcript, BuildAttachmentTranscript(&attachment))
 	}
 	transcript = append(transcript, ResearcherTranscriptMsg{
 		ID:        generateUUIDv4(),
@@ -2027,14 +2082,19 @@ func setNotionHeadersJSON(req *http.Request, acc *Account) {
 	}
 }
 
-// CheckQuota calls both V1 and V2 Notion quota APIs:
-//   - V1 (getAIUsageEligibility): isEligible, basic credits, researchModeUsage
-//   - V2 (getAIUsageEligibilityV2): premium credits (monthlyAllocated, etc.)
-func CheckQuota(acc *Account) (*QuotaInfo, error) {
+// CheckQuotaV1 reads the authoritative routing eligibility. User requests use
+// only this endpoint; private V2 diagnostics must never sit on their critical
+// path.
+func CheckQuotaV1(acc *Account) (*QuotaInfo, error) {
+	if acc == nil {
+		return nil, fmt.Errorf("nil account")
+	}
+	if AppConfig == nil {
+		return nil, fmt.Errorf("application config is not initialized")
+	}
 	body, _ := json.Marshal(map[string]string{"spaceId": acc.SpaceID})
 	client := getChromeHTTPClient(AppConfig.APITimeoutDuration())
 
-	// --- V1: get isEligible + researchModeUsage ---
 	reqV1, err := http.NewRequest("POST", NotionAPIBase+"/getAIUsageEligibility", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create V1 request: %w", err)
@@ -2046,7 +2106,10 @@ func CheckQuota(acc *Account) (*QuotaInfo, error) {
 		return nil, fmt.Errorf("V1 request: %w", err)
 	}
 	defer respV1.Body.Close()
-	bodyV1, _ := io.ReadAll(respV1.Body)
+	bodyV1, err := io.ReadAll(respV1.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read V1 response: %w", err)
+	}
 	if respV1.StatusCode != 200 {
 		return nil, fmt.Errorf("V1 API error %d: %s", respV1.StatusCode, string(bodyV1[:min(len(bodyV1), 300)]))
 	}
@@ -2054,27 +2117,88 @@ func CheckQuota(acc *Account) (*QuotaInfo, error) {
 	if err := json.Unmarshal(bodyV1, &v1); err != nil {
 		return nil, fmt.Errorf("parse V1 response: %w", err)
 	}
+	var v1Schema map[string]json.RawMessage
+	if err := json.Unmarshal(bodyV1, &v1Schema); err != nil {
+		return nil, fmt.Errorf("parse V1 schema: %w", err)
+	}
+	var eligible bool
+	if raw, ok := v1Schema["isEligible"]; !ok || json.Unmarshal(raw, &eligible) != nil {
+		return nil, fmt.Errorf("invalid V1 response schema: missing boolean isEligible")
+	}
+	return &QuotaInfo{
+		IsEligible:        v1.IsEligible,
+		SpaceUsage:        v1.SpaceUsage,
+		SpaceLimit:        v1.SpaceLimit,
+		UserUsage:         v1.UserUsage,
+		UserLimit:         v1.UserLimit,
+		LastUsageAtMs:     v1.LastSpaceUsageAtMs,
+		ResearchModeUsage: v1.ResearchModeUsage,
+	}, nil
+}
 
-	// --- V2: get premium credits ---
+func preservePremiumDiagnostics(info, previous *QuotaInfo) {
+	if info == nil || previous == nil {
+		return
+	}
+	info.HasPremium = previous.HasPremium
+	info.PremiumBalance = previous.PremiumBalance
+	info.PremiumUsage = previous.PremiumUsage
+	info.PremiumLimit = previous.PremiumLimit
+}
+
+// CheckQuota combines authoritative V1 eligibility with best-effort V2
+// dashboard diagnostics. A V2 failure preserves the last known diagnostics
+// rather than replacing them with misleading zero values.
+func CheckQuota(acc *Account) (*QuotaInfo, error) {
+	info, err := CheckQuotaV1(acc)
+	if err != nil {
+		return nil, err
+	}
+	previous := acc.quotaInfoSnapshot()
+	client := getChromeHTTPClient(AppConfig.APITimeoutDuration())
+
+	// --- V2: diagnostic-only premium credit fields ---
+	// V1 is the routing authority. V2 is a private, evolving schema used only
+	// for dashboard diagnostics, so its failure must not discard a valid V1
+	// eligibility result or make an account unavailable.
 	body2, _ := json.Marshal(map[string]string{"spaceId": acc.SpaceID})
 	reqV2, err := http.NewRequest("POST", NotionAPIBase+"/getAIUsageEligibilityV2", bytes.NewReader(body2))
 	if err != nil {
-		return nil, fmt.Errorf("create V2 request: %w", err)
+		log.Printf("[quota] %s V2 diagnostics unavailable: create request: %v", acc.UserEmail, err)
+		preservePremiumDiagnostics(info, previous)
+		return info, nil
 	}
 	setNotionHeadersJSON(reqV2, acc)
 
 	respV2, err := client.Do(reqV2)
 	if err != nil {
-		return nil, fmt.Errorf("V2 request: %w", err)
+		log.Printf("[quota] %s V2 diagnostics unavailable: request: %v", acc.UserEmail, err)
+		preservePremiumDiagnostics(info, previous)
+		return info, nil
 	}
 	defer respV2.Body.Close()
-	bodyV2, _ := io.ReadAll(respV2.Body)
+	bodyV2, readErr := io.ReadAll(respV2.Body)
+	if readErr != nil {
+		log.Printf("[quota] %s V2 diagnostics unavailable: read response: %v", acc.UserEmail, readErr)
+		preservePremiumDiagnostics(info, previous)
+		return info, nil
+	}
 	if respV2.StatusCode != 200 {
-		return nil, fmt.Errorf("V2 API error %d: %s", respV2.StatusCode, string(bodyV2[:min(len(bodyV2), 300)]))
+		log.Printf("[quota] %s V2 diagnostics unavailable: API error %d", acc.UserEmail, respV2.StatusCode)
+		preservePremiumDiagnostics(info, previous)
+		return info, nil
 	}
 	var v2 quotaV2Response
 	if err := json.Unmarshal(bodyV2, &v2); err != nil {
-		return nil, fmt.Errorf("parse V2 response: %w", err)
+		log.Printf("[quota] %s V2 diagnostics unavailable: parse response: %v", acc.UserEmail, err)
+		preservePremiumDiagnostics(info, previous)
+		return info, nil
+	}
+	var v2Schema map[string]json.RawMessage
+	if err := json.Unmarshal(bodyV2, &v2Schema); err != nil || len(v2Schema["premiumCredits"]) == 0 {
+		log.Printf("[quota] %s V2 diagnostics unavailable: incompatible response schema", acc.UserEmail)
+		preservePremiumDiagnostics(info, previous)
+		return info, nil
 	}
 
 	monthlyUsage := v2.PremiumCredits.PerSource.MonthlyAllocated.UsageTotal
@@ -2084,20 +2208,10 @@ func CheckQuota(acc *Account) (*QuotaInfo, error) {
 	// define this private schema, so monthlyAllocated.limit-usageTotal must not
 	// be silently substituted and presented as an official remaining balance.
 
-	// Merge V1 + V2 into QuotaInfo
-	info := &QuotaInfo{
-		IsEligible:        v1.IsEligible,
-		SpaceUsage:        v1.SpaceUsage,
-		SpaceLimit:        v1.SpaceLimit,
-		UserUsage:         v1.UserUsage,
-		UserLimit:         v1.UserLimit,
-		LastUsageAtMs:     v1.LastSpaceUsageAtMs,
-		ResearchModeUsage: v1.ResearchModeUsage,
-		// Premium credits from V2
-		PremiumBalance: premiumRemaining,
-		PremiumUsage:   monthlyUsage,
-		PremiumLimit:   monthlyLimit,
-	}
+	// Merge the optional V2 diagnostics into the authoritative V1 result.
+	info.PremiumBalance = premiumRemaining
+	info.PremiumUsage = monthlyUsage
+	info.PremiumLimit = monthlyLimit
 	info.HasPremium = info.PremiumLimit > 0 ||
 		v2.PremiumCredits.PerSource.MonthlyCommitted.Limit > 0 ||
 		v2.PremiumCredits.PerSource.YearlyElastic.Limit > 0 ||
@@ -2106,9 +2220,92 @@ func CheckQuota(acc *Account) (*QuotaInfo, error) {
 	return info, nil
 }
 
-// CheckUserWorkspace probes /api/v3/loadUserContent and returns the number
-// of accessible workspaces (`user_root.space_views` length) for this
-// account.
+type WorkspaceProbeResult struct {
+	Count          int
+	PlanType       string
+	AIEnabled      bool
+	AIEnabledKnown bool
+}
+
+type notionSpaceViewPointer struct {
+	SpaceID string `json:"spaceId"`
+	ID      string `json:"id"`
+}
+
+type notionWorkspaceMetadata struct {
+	ID        string
+	Name      string
+	PlanType  string
+	AIEnabled bool
+}
+
+func decodeNotionWorkspaceMetadata(raw json.RawMessage, fallbackID string) (notionWorkspaceMetadata, bool) {
+	var value struct {
+		Value struct {
+			Value *struct {
+				ID       string `json:"id"`
+				Name     string `json:"name"`
+				PlanType string `json:"plan_type"`
+				Settings struct {
+					EnableAIFeature  *bool `json:"enable_ai_feature"`
+					DisableAIFeature *bool `json:"disable_ai_feature"`
+				} `json:"settings"`
+			} `json:"value"`
+			ID       string `json:"id"`
+			Name     string `json:"name"`
+			PlanType string `json:"plan_type"`
+			Settings struct {
+				EnableAIFeature  *bool `json:"enable_ai_feature"`
+				DisableAIFeature *bool `json:"disable_ai_feature"`
+			} `json:"settings"`
+		} `json:"value"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return notionWorkspaceMetadata{}, false
+	}
+	metadata := notionWorkspaceMetadata{AIEnabled: true}
+	if value.Value.Value != nil {
+		metadata.ID = value.Value.Value.ID
+		metadata.Name = value.Value.Value.Name
+		metadata.PlanType = value.Value.Value.PlanType
+		settings := value.Value.Value.Settings
+		metadata.AIEnabled = (settings.EnableAIFeature == nil || *settings.EnableAIFeature) &&
+			(settings.DisableAIFeature == nil || !*settings.DisableAIFeature)
+	} else {
+		metadata.ID = value.Value.ID
+		metadata.Name = value.Value.Name
+		metadata.PlanType = value.Value.PlanType
+		settings := value.Value.Settings
+		metadata.AIEnabled = (settings.EnableAIFeature == nil || *settings.EnableAIFeature) &&
+			(settings.DisableAIFeature == nil || !*settings.DisableAIFeature)
+	}
+	if metadata.ID == "" {
+		metadata.ID = fallbackID
+	}
+	return metadata, metadata.ID != ""
+}
+
+// workspacePreference ranks an accessible workspace deterministically. An
+// AI-enabled included-AI plan wins over a complimentary plan; any AI-enabled
+// workspace wins over one where AI is explicitly disabled.
+func workspacePreference(metadata notionWorkspaceMetadata) int {
+	score := 0
+	if metadata.AIEnabled {
+		score += 100
+	}
+	if planIncludesFullNotionAI(metadata.PlanType) {
+		score += 20
+	} else if isComplimentaryPlanType(metadata.PlanType) {
+		score += 10
+	}
+	return score
+}
+
+// CheckUserWorkspaceProfile probes /api/v3/loadUserContent and refreshes both
+// accessibility and the authoritative plan of the currently selected
+// workspace. It intentionally does not switch SpaceID while requests may be in
+// flight; a removed selected workspace is reported as Count=0 and can be fixed
+// by re-importing the account.
 //
 // Background: when an account's Notion onboarding never completed (or the
 // workspace was reaped), Notion still returns a user_root record but with
@@ -2120,55 +2317,125 @@ func CheckQuota(acc *Account) (*QuotaInfo, error) {
 // 0 with err==nil is a real, sticky signal — not a transient. Callers
 // should persist the result so a restart doesn't have to re-probe every
 // account.
-func CheckUserWorkspace(acc *Account) (int, error) {
+func CheckUserWorkspaceProfile(acc *Account) (WorkspaceProbeResult, error) {
+	if acc == nil {
+		return WorkspaceProbeResult{}, fmt.Errorf("nil account")
+	}
+	if AppConfig == nil {
+		return WorkspaceProbeResult{}, fmt.Errorf("application config is not initialized")
+	}
 	body := []byte(`{}`)
 	req, err := http.NewRequest("POST", NotionAPIBase+"/loadUserContent", bytes.NewReader(body))
 	if err != nil {
-		return 0, fmt.Errorf("create request: %w", err)
+		return WorkspaceProbeResult{}, fmt.Errorf("create request: %w", err)
 	}
 	setNotionHeadersJSON(req, acc)
 
 	client := getChromeHTTPClient(AppConfig.APITimeoutDuration())
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("send request: %w", err)
+		return WorkspaceProbeResult{}, fmt.Errorf("send request: %w", err)
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return WorkspaceProbeResult{}, fmt.Errorf("read response: %w", err)
+	}
 	if resp.StatusCode != 200 {
-		return 0, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody[:min(len(respBody), 300)]))
+		return WorkspaceProbeResult{}, fmt.Errorf("API error %d: %s", resp.StatusCode, string(respBody[:min(len(respBody), 300)]))
 	}
 
-	// We only care about user_root.{userId}.value.value.space_views; using
-	// json.RawMessage keeps us tolerant to schema drift on every other
-	// field.
+	var schema map[string]json.RawMessage
+	if err := json.Unmarshal(respBody, &schema); err != nil {
+		return WorkspaceProbeResult{}, fmt.Errorf("parse response schema: %w", err)
+	}
+	var recordMapSchema map[string]json.RawMessage
+	if raw := schema["recordMap"]; len(raw) == 0 || json.Unmarshal(raw, &recordMapSchema) != nil || len(recordMapSchema["user_root"]) == 0 {
+		return WorkspaceProbeResult{}, fmt.Errorf("invalid workspace response schema: missing recordMap.user_root")
+	}
+
 	var parsed struct {
 		RecordMap struct {
-			UserRoot map[string]struct {
-				Value struct {
-					Value struct {
-						SpaceViews []string `json:"space_views"`
-					} `json:"value"`
-				} `json:"value"`
-			} `json:"user_root"`
+			UserRoot map[string]json.RawMessage `json:"user_root"`
+			Space    map[string]json.RawMessage `json:"space"`
 		} `json:"recordMap"`
 	}
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return 0, fmt.Errorf("parse response: %w", err)
+		return WorkspaceProbeResult{}, fmt.Errorf("parse response: %w", err)
 	}
-	// Prefer the user_root keyed by this account's UserID. If Notion ever
-	// switches to a different keying we still fall back to "any non-empty
-	// space_views in the response" so a transient mismatch doesn't false-
-	// positive an otherwise healthy account.
-	if entry, ok := parsed.RecordMap.UserRoot[acc.UserID]; ok {
-		return len(entry.Value.Value.SpaceViews), nil
+
+	type rootValue struct {
+		Value struct {
+			Value *struct {
+				SpaceViews        []json.RawMessage        `json:"space_views"`
+				SpaceViewPointers []notionSpaceViewPointer `json:"space_view_pointers"`
+			} `json:"value"`
+			SpaceViews        []json.RawMessage        `json:"space_views"`
+			SpaceViewPointers []notionSpaceViewPointer `json:"space_view_pointers"`
+		} `json:"value"`
 	}
-	for _, entry := range parsed.RecordMap.UserRoot {
-		if n := len(entry.Value.Value.SpaceViews); n > 0 {
-			return n, nil
+
+	decodeRoot := func(raw json.RawMessage) ([]json.RawMessage, []notionSpaceViewPointer, bool) {
+		var root rootValue
+		if err := json.Unmarshal(raw, &root); err != nil {
+			return nil, nil, false
+		}
+		if root.Value.Value != nil {
+			return root.Value.Value.SpaceViews, root.Value.Value.SpaceViewPointers, true
+		}
+		return root.Value.SpaceViews, root.Value.SpaceViewPointers, true
+	}
+
+	var views []json.RawMessage
+	var pointers []notionSpaceViewPointer
+	if raw, ok := parsed.RecordMap.UserRoot[acc.UserID]; ok {
+		views, pointers, _ = decodeRoot(raw)
+	} else {
+		for _, raw := range parsed.RecordMap.UserRoot {
+			candidateViews, candidatePointers, ok := decodeRoot(raw)
+			if ok && (len(candidateViews) > 0 || len(candidatePointers) > 0) {
+				views, pointers = candidateViews, candidatePointers
+				break
+			}
 		}
 	}
-	return 0, nil
+
+	count := len(views)
+	if len(pointers) > count {
+		count = len(pointers)
+	}
+	if count == 0 {
+		return WorkspaceProbeResult{}, nil
+	}
+
+	_, selectedSpacePresent := parsed.RecordMap.Space[acc.SpaceID]
+	selectedAccessible := len(pointers) == 0 && selectedSpacePresent
+	for _, pointer := range pointers {
+		if pointer.SpaceID == acc.SpaceID {
+			selectedAccessible = true
+			break
+		}
+	}
+	if !selectedAccessible {
+		return WorkspaceProbeResult{}, nil
+	}
+
+	result := WorkspaceProbeResult{Count: count}
+	if raw, ok := parsed.RecordMap.Space[acc.SpaceID]; ok {
+		if metadata, ok := decodeNotionWorkspaceMetadata(raw, acc.SpaceID); ok {
+			result.PlanType = metadata.PlanType
+			result.AIEnabled = metadata.AIEnabled
+			result.AIEnabledKnown = true
+		}
+	}
+	return result, nil
+}
+
+// CheckUserWorkspace preserves the former count-only API for callers outside
+// the account refresh pipeline.
+func CheckUserWorkspace(acc *Account) (int, error) {
+	result, err := CheckUserWorkspaceProfile(acc)
+	return result.Count, err
 }
 
 func decompressBody(resp *http.Response) (io.Reader, func(), error) {
@@ -2617,6 +2884,7 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 	lineCount := 0
 	eventTypeCounts := make(map[string]int)
 	emittedThinkingChars := 0
+	sawTerminalEvent := false
 
 	// Peak input context and accumulated output across distinct inference steps.
 	// Summing step inputs measures total compute, not the context presented to any model call.
@@ -2627,6 +2895,9 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 	patchValueTypes := make(map[string]string)
 	// Counter: "/s/N" → how many value entries added so far
 	patchValueCounts := make(map[string]int)
+	// A patch step that launches an internal search/tool is not terminal when
+	// that step reports usage; a later synthesis step must still answer.
+	patchInternalToolSteps := make(map[string]bool)
 	// Accumulated thinking content from patch operations
 	var patchThinkingContent string
 	var patchThinkingSignature string
@@ -2684,8 +2955,11 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 		}
 	}
 
-	// emitDelta computes the clean text delta since last emit
-	emitDelta := func() {
+	// emitDelta computes the clean text delta since last emit. While the
+	// stream is still open, possible split "<lang" prefixes are held back.
+	// At a terminal event they are preserved if they never formed a complete
+	// internal tag, so legitimate answer text cannot disappear at EOF.
+	emitDelta := func(final bool) {
 		recordObservedCitationFragments(rawText, &observedCitationFragments, &pendingCitationFragment)
 		var citationKnownURLs []string
 		if knownCitationURLs != nil {
@@ -2693,6 +2967,12 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 		}
 		rewritten := rewriteInternalCitationsWithObserved(rawText, observedCitationFragments, citationKnownURLs)
 		cleaned := cleanAllLangTags(trimTrailingIncompleteCitation(rewritten))
+		if final {
+			// At a confirmed terminal event, an unfinished citation-looking
+			// suffix may be legitimate literal text. Only hold it while more
+			// cumulative rewrites are still possible.
+			cleaned = cleanCompleteLangTags(rewritten)
+		}
 		if cleaned == sentClean {
 			return
 		}
@@ -2722,7 +3002,7 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 
 		var event NDJSONEvent
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			continue
+			return fmt.Errorf("malformed notion NDJSON event at line %d: %w", lineCount, err)
 		}
 		eventTypeCounts[event.Type]++
 
@@ -2820,7 +3100,7 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 					}
 				}
 				if len(docs) > 0 {
-					emitDelta()
+					emitDelta(false)
 				}
 			}
 
@@ -2850,7 +3130,7 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 			if len(urls) > 0 {
 				toolCallSearchURLs[searchEvt.ToolCallID] = urls
 				appendKnownCitationURLs(knownCitationURLs, urls)
-				emitDelta()
+				emitDelta(false)
 			}
 			if state := searchToolStates[searchEvt.ToolCallID]; state != nil && !state.completed {
 				emitThinking(formatSearchStatusLines("**Search Complete**", state.queryLines))
@@ -2864,8 +3144,9 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 		case "agent-inference":
 			var step AgentInferenceEvent
 			if err := json.Unmarshal([]byte(line), &step); err != nil {
-				continue
+				return fmt.Errorf("malformed agent-inference event at line %d: %w", lineCount, err)
 			}
+			hasPendingInternalTool := false
 			for _, entry := range step.Value {
 				switch entry.Type {
 				case "thinking":
@@ -2889,9 +3170,9 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 					// agent-inference text is cumulative, but Notion can rewrite earlier
 					// citation bytes (for example a partial URL becomes view://...), which
 					// makes the raw text shorter while still being newer content.
-					if cleanAllLangTags(newContent) != cleanAllLangTags(rawText) {
+					if newContent != rawText {
 						rawText = newContent
-						emitDelta()
+						emitDelta(false)
 					}
 				case "tool_use":
 					// Detect search tool by name OR by input structure (handles
@@ -2907,6 +3188,7 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 							}
 						}
 						if isSearchEntry {
+							hasPendingInternalTool = true
 							state := searchToolStates[entry.ID]
 							if state == nil {
 								state = &searchToolState{}
@@ -2931,6 +3213,10 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 				}
 			}
 			if step.FinishedAt != nil {
+				// A finished inference step that launched Notion's internal
+				// search is not the end of the request; a later inference step
+				// must synthesize the final answer.
+				sawTerminalEvent = !hasPendingInternalTool
 				// Finalize thinking block for this step (only the latest cumulative content)
 				if thinkingBlocks != nil {
 					if ts, ok := agentThinking[step.ID]; ok && ts.content != "" {
@@ -2945,7 +3231,7 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 					}
 				}
 				// Final emit to flush any remaining text
-				emitDelta()
+				emitDelta(sawTerminalEvent)
 				// Report the largest model input in this request. A workflow may run
 				// several inference steps, whose input contexts must not be summed.
 				usageStepID := step.ID
@@ -2966,20 +3252,22 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 		case "patch":
 			var patch PatchEvent
 			if err := json.Unmarshal([]byte(line), &patch); err != nil {
-				continue
+				return fmt.Errorf("malformed patch event at line %d: %w", lineCount, err)
 			}
 			for _, op := range patch.V {
 				// Track value entry types when new entries are added
 				if op.O == "a" && strings.Contains(op.P, "/value/-") {
-					var entry struct {
-						Type string `json:"type"`
-					}
+					var entry AgentValueEntry
 					if json.Unmarshal(op.V, &entry) == nil && entry.Type != "" {
 						statePrefix := op.P[:strings.Index(op.P, "/value/")]
 						idx := patchValueCounts[statePrefix]
 						path := fmt.Sprintf("%s/value/%d", statePrefix, idx)
 						patchValueTypes[path] = entry.Type
 						patchValueCounts[statePrefix] = idx + 1
+						if entry.Type == "tool_use" &&
+							(entry.Name == "search" || len(extractSearchToolQueryLinesFromEntry(entry)) > 0) {
+							patchInternalToolSteps[statePrefix] = true
+						}
 					}
 				}
 
@@ -3026,9 +3314,12 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 					}
 					var tokens int
 					if json.Unmarshal(op.V, &tokens) == nil {
+						stepPrefix := strings.TrimSuffix(op.P, "/outputTokens")
+						sawTerminalEvent = !patchInternalToolSteps[stepPrefix]
 						seenUsagePatchPaths[op.P] = true
 						totalUsage.CompletionTokens += tokens
 						totalUsage.TotalTokens = totalUsage.PromptTokens + totalUsage.CompletionTokens
+						emitDelta(sawTerminalEvent)
 						cb("", true, &totalUsage)
 					}
 					continue
@@ -3059,10 +3350,10 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 						switch op.O {
 						case "x":
 							rawText += text
-							emitDelta()
+							emitDelta(false)
 						case "p":
 							rawText = handlePatchReplace(rawText, text)
-							emitDelta()
+							emitDelta(false)
 						}
 					}
 				}
@@ -3088,6 +3379,13 @@ func parseNDJSONStream(reader io.Reader, requestID string, cb StreamCallback, na
 		return err
 	}
 
+	if !sawTerminalEvent {
+		if sentClean == "" && !thinkingStarted && len(seenNativeToolUseIDs) == 0 {
+			return fmt.Errorf("%w: upstream closed before a terminal event", ErrEmptyResponse)
+		}
+		return fmt.Errorf("notion stream truncated before terminal event: %w", io.ErrUnexpectedEOF)
+	}
+	emitDelta(true)
 	closeThinking()
 	LogNotionResponseJSON(requestID, "runInferenceTranscript stream summary", map[string]interface{}{
 		"line_count":            lineCount,
@@ -3131,9 +3429,9 @@ func handlePatchReplace(current, replacement string) string {
 	return current + replacement
 }
 
-// cleanAllLangTags removes all complete <lang .../> tags from text.
-// Incomplete tags at the end are also stripped (they'll be completed in a future delta).
-func cleanAllLangTags(text string) string {
+// cleanCompleteLangTags removes complete internal <lang .../> tags while
+// preserving any incomplete literal suffix at the end of a finished answer.
+func cleanCompleteLangTags(text string) string {
 	for {
 		start := strings.Index(text, "<lang")
 		if start < 0 {
@@ -3141,11 +3439,20 @@ func cleanAllLangTags(text string) string {
 		}
 		end := strings.Index(text[start:], "/>")
 		if end < 0 {
-			// Incomplete tag at end — strip it; will be completed later
-			text = text[:start]
 			break
 		}
 		text = text[:start] + text[start+end+2:]
+	}
+	return text
+}
+
+// cleanAllLangTags is the streaming form of cleanCompleteLangTags. It also
+// holds a possible split opening marker until a later cumulative event proves
+// whether the suffix is an internal language tag or ordinary answer text.
+func cleanAllLangTags(text string) string {
+	text = cleanCompleteLangTags(text)
+	if start := strings.LastIndex(text, "<lang"); start >= 0 {
+		text = text[:start]
 	}
 	// The stream can split the opening marker itself into "<", "<l",
 	// "<la", and "<lan". Hold that suffix until the next cumulative event
@@ -3530,7 +3837,11 @@ func callResearcherInference(acc *Account, messages []ChatMessage, cb StreamCall
 	}
 	LogNotionRequestJSON(requestID, fmt.Sprintf("POST /runInferenceTranscript researcher account=%s", acc.UserEmail), reqBody)
 
-	req, err := http.NewRequest("POST", NotionAPIBase+"/runInferenceTranscript", bytes.NewReader(bodyBytes))
+	requestContext := opt.Context
+	if requestContext == nil {
+		requestContext = context.Background()
+	}
+	req, err := http.NewRequestWithContext(requestContext, "POST", NotionAPIBase+"/runInferenceTranscript", bytes.NewReader(bodyBytes))
 	if err != nil {
 		return fmt.Errorf("create researcher request: %w", err)
 	}
@@ -3725,7 +4036,7 @@ func parseResearcherStream(reader io.Reader, requestID string, cb StreamCallback
 
 		var event NDJSONEvent
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			continue
+			return fmt.Errorf("malformed notion researcher NDJSON event at line %d: %w", lineCount, err)
 		}
 		eventTypeCounts[event.Type]++
 
@@ -3821,23 +4132,22 @@ func parseResearcherStream(reader io.Reader, requestID string, cb StreamCallback
 			}
 
 		case "researcher-report":
-			// First report event — close thinking phase
+			var report ResearcherReportEvent
+			if err := json.Unmarshal([]byte(line), &report); err != nil {
+				return fmt.Errorf("malformed researcher-report event at line %d: %w", lineCount, err)
+			}
+			if report.Value == "" {
+				continue
+			}
+
+			// Value is a text delta — buffer and strip [step-xxx,artifact,N] citations
 			if reportEventCount == 0 {
 				closeThinking()
 				log.Printf("[researcher] thinking phase complete (%d chars), starting report", len(thinkingContent))
 			}
 			reportEventCount++
-
-			var report ResearcherReportEvent
-			if err := json.Unmarshal([]byte(line), &report); err != nil {
-				continue
-			}
-
-			// Value is a text delta — buffer and strip [step-xxx,artifact,N] citations
-			if report.Value != "" {
-				reportBuf.WriteString(report.Value)
-				flushReportBuf(false)
-			}
+			reportBuf.WriteString(report.Value)
+			flushReportBuf(false)
 
 		case "error":
 			var errEvt struct {
@@ -3858,8 +4168,11 @@ func parseResearcherStream(reader io.Reader, requestID string, cb StreamCallback
 	if err := scanner.Err(); err != nil {
 		return err
 	}
+	if reportEventCount == 0 {
+		return fmt.Errorf("%w: researcher stream closed before any report event", ErrEmptyResponse)
+	}
 
-	// Ensure thinking is closed even if no report events arrived
+	// Close thinking before flushing the completed report.
 	closeThinking()
 
 	// Flush any remaining buffered report text (final flush strips citations without holding back)

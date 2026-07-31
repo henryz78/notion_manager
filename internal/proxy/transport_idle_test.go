@@ -1,11 +1,19 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"io"
+	"net/http"
 	"testing"
 	"time"
 )
+
+type idleTimeoutRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f idleTimeoutRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 type delayedChunkReadCloser struct {
 	chunks [][]byte
@@ -50,6 +58,26 @@ func TestIdleTimeoutStopsSilentResponse(t *testing.T) {
 	defer writer.Close()
 	body := &idleTimeoutReadCloser{body: reader, timeout: 30 * time.Millisecond}
 	_, err := body.Read(make([]byte, 1))
+	if !errors.Is(err, ErrInferenceIdleTimeout) {
+		t.Fatalf("error=%v want ErrInferenceIdleTimeout", err)
+	}
+}
+
+func TestIdleTimeoutClassifiesResponseHeaderTimeout(t *testing.T) {
+	previousClientOverride := chromeHTTPClientForTest
+	chromeHTTPClientForTest = func(time.Duration) *http.Client {
+		return &http.Client{Transport: idleTimeoutRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		})}
+	}
+	defer func() { chromeHTTPClientForTest = previousClientOverride }()
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.invalid/inference", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = doChromeRequestWithIdleTimeout(req, 20*time.Millisecond)
 	if !errors.Is(err, ErrInferenceIdleTimeout) {
 		t.Fatalf("error=%v want ErrInferenceIdleTimeout", err)
 	}

@@ -83,7 +83,7 @@ Or download a pre-built binary from [Releases](https://github.com/SleepingBag945
 ### Multi-account pool
 
 - Load any number of account JSON files from `accounts/`
-- Prefer Business/Enterprise, then live premium signals, without adding undocumented private counters together
+- Prefer Team/Business/Enterprise included-AI plans; private V2 credit fields remain diagnostics and never change routing
 - Live per-request quota check (cached for `refresh.live_check_seconds`) so an account that just exhausted doesn't poison the next call
 - Skip exhausted / no-workspace accounts automatically
 - Persist refreshed quota and discovered models back into account JSON files

@@ -21,10 +21,23 @@ import (
 // transport pinned to www.notion.so, which can't be repointed at httptest
 // URLs).
 var (
-	quotaFetcher   = CheckQuota
-	modelsFetcher  = FetchModels
-	workspaceProbe = CheckUserWorkspace
+	quotaFetcher        = CheckQuota
+	routingQuotaFetcher = CheckQuotaV1
+	modelsFetcher       = FetchModels
+	workspaceProbe      = CheckUserWorkspaceProfile
+	accountFileLocks    sync.Map // absolute account path -> *sync.Mutex
 )
+
+func lockAccountFilePath(path string) (func(), error) {
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve account path: %w", err)
+	}
+	lockValue, _ := accountFileLocks.LoadOrStore(absolutePath, &sync.Mutex{})
+	fileLock := lockValue.(*sync.Mutex)
+	fileLock.Lock()
+	return fileLock.Unlock, nil
+}
 
 const (
 	defaultAccountFailureCooldown = 2 * time.Minute
@@ -45,23 +58,36 @@ type AccountPool struct {
 	maintenanceRestoring bool
 
 	// Refresh state (protected by refreshMu)
-	refreshMu      sync.RWMutex
-	refreshing     bool
-	refreshDone    int
-	refreshTotal   int
-	lastRefreshAt  *time.Time
-	lastRefreshErr string
+	refreshMu     sync.RWMutex
+	refreshing    bool
+	refreshDone   int
+	refreshTotal  int
+	lastRefreshAt *time.Time
 
-	// Per-account live quota refresh state (key: account pointer)
-	// Used to deduplicate concurrent live quota checks for the same account.
-	liveQuotaMu       sync.Mutex
-	liveQuotaInflight map[*Account]bool
+	// Per-account live quota refresh state. A routing check is singleflight:
+	// synchronous callers wait for the in-flight V1 result, while asynchronous
+	// callers simply coalesce. Generations also prevent a slower, older
+	// background/diagnostic response from overwriting a newer routing result.
+	liveQuotaMu      sync.Mutex
+	liveQuotaFlights map[*Account]*quotaRefreshFlight
+	quotaGeneration  map[*Account]uint64
+	quotaApplied     map[*Account]uint64
 }
 
 func NewAccountPool() *AccountPool {
 	return &AccountPool{
-		liveQuotaInflight: make(map[*Account]bool),
+		liveQuotaFlights: make(map[*Account]*quotaRefreshFlight),
+		quotaGeneration:  make(map[*Account]uint64),
+		quotaApplied:     make(map[*Account]uint64),
 	}
+}
+
+type quotaRefreshFlight struct {
+	done       chan struct{}
+	generation uint64
+	err        error
+	eligible   bool
+	hasResult  bool
 }
 
 func (p *AccountPool) beginAccountMutation() (func(), bool) {
@@ -178,6 +204,75 @@ type accountPersonalInstructionsSnapshot struct {
 	Configured *bool
 	CheckedAt  *time.Time
 	Error      string
+}
+
+type accountProfileSnapshot struct {
+	PlanType           string
+	SpaceCount         int
+	WorkspaceCheckedAt *time.Time
+	AIEnabled          *bool
+}
+
+type accountPersistSnapshot struct {
+	Models               []ModelEntry
+	Quota                accountQuotaSnapshot
+	PersonalInstructions accountPersonalInstructionsSnapshot
+	Health               accountHealthSnapshot
+	Profile              accountProfileSnapshot
+}
+
+func (acc *Account) profileSnapshot() accountProfileSnapshot {
+	if acc == nil {
+		return accountProfileSnapshot{}
+	}
+	acc.mu.RLock()
+	defer acc.mu.RUnlock()
+	return accountProfileSnapshot{
+		PlanType:           acc.PlanType,
+		SpaceCount:         acc.SpaceCount,
+		WorkspaceCheckedAt: cloneTimePtr(acc.WorkspaceCheckedAt),
+		AIEnabled:          cloneBoolPtr(acc.WorkspaceAIEnabled),
+	}
+}
+
+func (acc *Account) planTypeSnapshot() string {
+	return acc.profileSnapshot().PlanType
+}
+
+func (acc *Account) persistSnapshot() accountPersistSnapshot {
+	if acc == nil {
+		return accountPersistSnapshot{}
+	}
+	acc.mu.RLock()
+	defer acc.mu.RUnlock()
+	return accountPersistSnapshot{
+		Models: cloneModelEntries(acc.Models),
+		Quota: accountQuotaSnapshot{
+			Info:                 cloneQuotaInfo(acc.QuotaInfo),
+			CheckedAt:            cloneTimePtr(acc.QuotaCheckedAt),
+			ExhaustedAt:          cloneTimePtr(acc.QuotaExhaustedAt),
+			PermanentlyExhausted: acc.PermanentlyExhausted,
+		},
+		PersonalInstructions: accountPersonalInstructionsSnapshot{
+			Configured: cloneBoolPtr(acc.PersonalInstructionsConfigured),
+			CheckedAt:  cloneTimePtr(acc.PersonalInstructionsCheckedAt),
+			Error:      acc.PersonalInstructionsCheckError,
+		},
+		Health: accountHealthSnapshot{
+			TemporaryUnavailableUntil: cloneTimePtr(acc.TemporaryUnavailableUntil),
+			LastFailureReason:         acc.LastFailureReason,
+			LastFailureAt:             cloneTimePtr(acc.LastFailureAt),
+			AuthFailureCount:          acc.AuthFailureCount,
+			AuthInvalid:               acc.AuthInvalid,
+			ManuallyDisabled:          acc.ManuallyDisabled,
+		},
+		Profile: accountProfileSnapshot{
+			PlanType:           acc.PlanType,
+			SpaceCount:         acc.SpaceCount,
+			WorkspaceCheckedAt: cloneTimePtr(acc.WorkspaceCheckedAt),
+			AIEnabled:          cloneBoolPtr(acc.WorkspaceAIEnabled),
+		},
+	}
 }
 
 func cloneBoolPtr(value *bool) *bool {
@@ -358,7 +453,7 @@ func (p *AccountPool) LoadFromDir(dir string) error {
 		loadPersistedWorkspace(data, &acc)
 		registerModelEntries(acc.Models)
 		p.accounts = append(p.accounts, &acc)
-		log.Printf("[account] loaded: %s (%s) [%s]", acc.UserName, acc.UserEmail, acc.PlanType)
+		log.Printf("[account] loaded: %s (%s) [%s]", acc.UserName, acc.UserEmail, acc.planTypeSnapshot())
 	}
 
 	if len(p.accounts) == 0 {
@@ -469,8 +564,8 @@ func (p *AccountPool) Next() *Account {
 // NextForResearch returns the next usable account for research mode. Current
 // public docs only guarantee Research Mode on Business and Enterprise and do
 // not publish a numeric trial limit, so routing must not hard-code "/3".
-// Full-AI plans (or accounts with a live premium signal) are preferred; trial
-// accounts remain a fallback and the real request result decides eligibility.
+// Included-AI plans are preferred; trial accounts remain a fallback and the
+// real request result decides eligibility.
 func (p *AccountPool) NextForResearch() *Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -485,8 +580,7 @@ func (p *AccountPool) NextForResearch() *Account {
 		if p.isUnusable(acc) {
 			continue
 		}
-		quota := acc.quotaInfoSnapshot()
-		if planIncludesFullNotionAI(acc.PlanType) || (quota != nil && quota.HasPremium) {
+		if planIncludesFullNotionAI(acc.planTypeSnapshot()) {
 			return acc
 		}
 		if fallback == nil {
@@ -530,9 +624,8 @@ func (p *AccountPool) pickNextRoundRobin(exclude map[*Account]bool) *Account {
 //
 // Selection rules:
 //  1. Skip exhausted/excluded accounts.
-//  2. Prefer Business/Enterprise, then a live premium signal, then other
-//     eligible trial accounts. Private Space/User/Premium counters are not
-//     added together because their public semantics are undocumented.
+//  2. Prefer included-AI paid plans, then other eligible trial accounts.
+//     Private Space/User/Premium counters are not used as plan evidence.
 //  3. If no scored account is available (e.g. all accounts are unrefreshed),
 //     fall back to the first usable account in rotation order so freshly
 //     loaded accounts can still serve traffic before the first refresh
@@ -594,6 +687,14 @@ func (p *AccountPool) NextBestExcluding(exclude map[*Account]bool) *Account {
 // Trial accounts are retained and rechecked by RefreshAll so a later plan
 // upgrade can recover them. No account file is deleted solely for exhaustion.
 func (p *AccountPool) MarkQuotaExhausted(acc *Account) {
+	if acc == nil {
+		return
+	}
+	if planIncludesFullNotionAI(acc.planTypeSnapshot()) {
+		acc.clearQuotaExhausted()
+		log.Printf("[quota] ignored legacy Basic exhaustion for included-AI plan %s (%s)", acc.UserName, acc.UserEmail)
+		return
+	}
 	if !acc.markQuotaExhausted(time.Now(), false) {
 		return // already marked
 	}
@@ -689,6 +790,9 @@ func (p *AccountPool) isManuallyDisabled(acc *Account) bool {
 }
 
 func (p *AccountPool) isQuotaExhausted(acc *Account) bool {
+	if acc != nil && planIncludesFullNotionAI(acc.planTypeSnapshot()) {
+		return false
+	}
 	quota := acc.quotaSnapshot()
 	if quota.PermanentlyExhausted {
 		return true
@@ -708,35 +812,51 @@ func (p *AccountPool) isQuotaExhausted(acc *Account) bool {
 // as unknown / usable so the pool can still serve traffic on the first
 // boot and the next refresh tick promotes/demotes them.
 func (p *AccountPool) hasNoWorkspace(acc *Account) bool {
-	return acc != nil && acc.WorkspaceCheckedAt != nil && acc.SpaceCount == 0
+	profile := acc.profileSnapshot()
+	return acc != nil && profile.WorkspaceCheckedAt != nil && profile.SpaceCount == 0
+}
+
+func (p *AccountPool) hasAIDisabled(acc *Account) bool {
+	profile := acc.profileSnapshot()
+	return profile.WorkspaceCheckedAt != nil && profile.AIEnabled != nil && !*profile.AIEnabled
 }
 
 // isUnusable folds manual disable, quota, workspace, cooldown, and auth
 // state into a single "do not select" predicate used by every picker.
 func (p *AccountPool) isUnusable(acc *Account) bool {
-	return p.isManuallyDisabled(acc) || p.isQuotaExhausted(acc) || p.hasNoWorkspace(acc) || p.isTemporarilyUnavailable(acc) || p.isAuthInvalid(acc)
+	return p.isManuallyDisabled(acc) || p.isQuotaExhausted(acc) || p.hasNoWorkspace(acc) || p.hasAIDisabled(acc) || p.isTemporarilyUnavailable(acc) || p.isAuthInvalid(acc)
 }
 
-// applyWorkspaceCount records the latest probe result. Caller must NOT
-// hold p.mu. Returns the previous SpaceCount and whether the snapshot
-// changed so callers can decide to log only on transitions.
-func (p *AccountPool) applyWorkspaceCount(acc *Account, count int) (prev int, changed bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// applyWorkspaceProfile records the latest workspace probe and authoritative
+// plan for the currently selected workspace. The selected SpaceID is not
+// changed under active traffic; if it disappeared, Count is zero and the
+// account is excluded until it is re-imported.
+func (p *AccountPool) applyWorkspaceProfile(acc *Account, result WorkspaceProbeResult) (prev int, changed bool, planChanged bool) {
+	if acc == nil {
+		return 0, false, false
+	}
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
 	prev = acc.SpaceCount
 	hadCheck := acc.WorkspaceCheckedAt != nil
+	oldPlan := acc.PlanType
 	now := time.Now()
-	acc.SpaceCount = count
+	acc.SpaceCount = result.Count
 	acc.WorkspaceCheckedAt = &now
-	changed = !hadCheck || prev != count
-	return prev, changed
-}
-
-// MarkPermanentlyExhausted marks a complimentary/trial account unavailable.
-// RefreshAll still rechecks it so upgrading the Notion plan can recover it.
-func (p *AccountPool) MarkPermanentlyExhausted(acc *Account) {
-	acc.markQuotaExhausted(time.Now(), true)
-	log.Printf("[quota] marked %s (%s) as trial exhausted (retained for future re-check)", acc.UserName, acc.UserEmail)
+	if result.AIEnabledKnown {
+		enabled := result.AIEnabled
+		acc.WorkspaceAIEnabled = &enabled
+	}
+	if strings.TrimSpace(result.PlanType) != "" {
+		acc.PlanType = result.PlanType
+	}
+	if planIncludesFullNotionAI(acc.PlanType) {
+		acc.QuotaExhaustedAt = nil
+		acc.PermanentlyExhausted = false
+	}
+	changed = !hadCheck || prev != result.Count
+	planChanged = !strings.EqualFold(strings.TrimSpace(oldPlan), strings.TrimSpace(acc.PlanType))
+	return prev, changed, planChanged
 }
 
 // quotaApplyResult describes how applyQuotaInfo changed the account state.
@@ -745,7 +865,7 @@ type quotaApplyResult struct {
 	Recovered    bool // was previously exhausted, now eligible
 	NowExhausted bool // is currently not eligible
 	NowPermanent bool // free-plan account that is now permanently exhausted
-	WasPermanent bool // was already permanently flagged before this update
+	Unlimited    bool // included-AI paid plan; legacy Basic counters are advisory only
 	BasicLeft    int  // basic remaining after the update (0 if info nil)
 	HasPremium   bool
 }
@@ -757,7 +877,7 @@ type quotaApplyResult struct {
 func (p *AccountPool) applyQuotaInfo(acc *Account, info *QuotaInfo) quotaApplyResult {
 	acc.mu.Lock()
 	defer acc.mu.Unlock()
-	res := quotaApplyResult{WasPermanent: acc.PermanentlyExhausted}
+	res := quotaApplyResult{}
 	now := time.Now()
 	acc.QuotaInfo = cloneQuotaInfo(info)
 	acc.QuotaCheckedAt = &now
@@ -766,7 +886,8 @@ func (p *AccountPool) applyQuotaInfo(acc *Account, info *QuotaInfo) quotaApplyRe
 	}
 	res.BasicLeft = basicRemaining(info)
 	res.HasPremium = info.HasPremium
-	if info.IsEligible {
+	res.Unlimited = planIncludesFullNotionAI(acc.PlanType)
+	if info.IsEligible || res.Unlimited {
 		if acc.QuotaExhaustedAt != nil {
 			res.Recovered = true
 		}
@@ -783,13 +904,116 @@ func (p *AccountPool) applyQuotaInfo(acc *Account, info *QuotaInfo) quotaApplyRe
 	if acc.QuotaExhaustedAt == nil {
 		acc.QuotaExhaustedAt = &now
 	}
-	isTrial := !planIncludesFullNotionAI(acc.PlanType) &&
-		!(info.HasPremium || info.PremiumLimit > 0 || info.PremiumBalance > 0)
+	isTrial := isComplimentaryPlanType(acc.PlanType) || strings.TrimSpace(acc.PlanType) == ""
 	if isTrial {
 		acc.PermanentlyExhausted = true
 		res.NowPermanent = true
 	}
 	return res
+}
+
+func (p *AccountPool) nextQuotaGeneration(acc *Account) uint64 {
+	p.liveQuotaMu.Lock()
+	defer p.liveQuotaMu.Unlock()
+	if p.quotaGeneration == nil {
+		p.quotaGeneration = make(map[*Account]uint64)
+	}
+	p.quotaGeneration[acc]++
+	return p.quotaGeneration[acc]
+}
+
+func (p *AccountPool) applyQuotaInfoIfCurrent(acc *Account, info *QuotaInfo, generation uint64) (quotaApplyResult, bool) {
+	p.liveQuotaMu.Lock()
+	defer p.liveQuotaMu.Unlock()
+	if p.quotaApplied == nil {
+		p.quotaApplied = make(map[*Account]uint64)
+	}
+	if generation <= p.quotaApplied[acc] {
+		return quotaApplyResult{}, false
+	}
+	p.quotaApplied[acc] = generation
+	return p.applyQuotaInfo(acc, info), true
+}
+
+func (p *AccountPool) beginRoutingQuotaFlight(acc *Account) (*quotaRefreshFlight, bool) {
+	p.liveQuotaMu.Lock()
+	defer p.liveQuotaMu.Unlock()
+	if flight := p.liveQuotaFlights[acc]; flight != nil {
+		return flight, false
+	}
+	if p.liveQuotaFlights == nil {
+		p.liveQuotaFlights = make(map[*Account]*quotaRefreshFlight)
+	}
+	if p.quotaGeneration == nil {
+		p.quotaGeneration = make(map[*Account]uint64)
+	}
+	p.quotaGeneration[acc]++
+	flight := &quotaRefreshFlight{
+		done:       make(chan struct{}),
+		generation: p.quotaGeneration[acc],
+	}
+	p.liveQuotaFlights[acc] = flight
+	return flight, true
+}
+
+func (p *AccountPool) finishRoutingQuotaFlight(acc *Account, flight *quotaRefreshFlight, info *QuotaInfo, err error) {
+	p.liveQuotaMu.Lock()
+	flight.err = err
+	if err == nil && info != nil {
+		flight.eligible = info.IsEligible
+		flight.hasResult = true
+	}
+	if p.liveQuotaFlights[acc] == flight {
+		delete(p.liveQuotaFlights, acc)
+	}
+	close(flight.done)
+	p.liveQuotaMu.Unlock()
+}
+
+// refreshAccountQuotaNow performs an authoritative V1 routing check. V2
+// diagnostics are deliberately excluded: a private dashboard-only endpoint
+// must never delay a user request. The returned error lets destructive callers
+// distinguish a confirmed exhausted account from a failed re-check.
+func (p *AccountPool) refreshAccountQuotaNow(acc *Account) (bool, error) {
+	if acc == nil {
+		return false, fmt.Errorf("nil account")
+	}
+	if planIncludesFullNotionAI(acc.planTypeSnapshot()) {
+		return true, nil
+	}
+
+	flight, leader := p.beginRoutingQuotaFlight(acc)
+	if !leader {
+		<-flight.done
+		if flight.err == nil && flight.hasResult {
+			return flight.eligible, nil
+		}
+		quota := acc.quotaSnapshot()
+		if flight.err != nil {
+			if quota.Info != nil {
+				return quota.Info.IsEligible, flight.err
+			}
+			return !p.isQuotaExhausted(acc), flight.err
+		}
+		if quota.Info != nil {
+			return quota.Info.IsEligible, nil
+		}
+		return !p.isQuotaExhausted(acc), nil
+	}
+
+	info, err := routingQuotaFetcher(acc)
+	if err == nil {
+		_, _ = p.applyQuotaInfoIfCurrent(acc, info, flight.generation)
+	}
+	p.finishRoutingQuotaFlight(acc, flight, info, err)
+	if err != nil {
+		quota := acc.quotaSnapshot()
+		if quota.Info != nil {
+			return quota.Info.IsEligible, err
+		}
+		return !p.isQuotaExhausted(acc), err
+	}
+	return info != nil && info.IsEligible, nil
 }
 
 // RefreshAccountQuota performs a live quota check for a single account.
@@ -805,6 +1029,12 @@ func (p *AccountPool) RefreshAccountQuota(acc *Account, minInterval time.Duratio
 	if acc == nil {
 		return false
 	}
+	// Included-AI workspace plans are not governed by the legacy Basic
+	// eligibility counters. Do not make a user request wait for diagnostic
+	// quota endpoints that cannot change the routing decision.
+	if planIncludesFullNotionAI(acc.planTypeSnapshot()) {
+		return true
+	}
 	// Cached fast path: avoid hammering Notion on tight retry loops.
 	quota := acc.quotaSnapshot()
 	if minInterval > 0 && quota.CheckedAt != nil && time.Since(*quota.CheckedAt) < minInterval {
@@ -813,44 +1043,21 @@ func (p *AccountPool) RefreshAccountQuota(acc *Account, minInterval time.Duratio
 		}
 		return !p.isQuotaExhaustedRLock(acc)
 	}
-	// Mark this account as having an in-flight live check so async callers
-	// do not pile on. We intentionally still proceed even if another check
-	// is running so the synchronous caller gets a fresh decision.
-	p.liveQuotaMu.Lock()
-	p.liveQuotaInflight[acc] = true
-	p.liveQuotaMu.Unlock()
-	defer func() {
-		p.liveQuotaMu.Lock()
-		delete(p.liveQuotaInflight, acc)
-		p.liveQuotaMu.Unlock()
-	}()
-
-	info, err := quotaFetcher(acc)
+	eligible, err := p.refreshAccountQuotaNow(acc)
 	if err != nil {
 		log.Printf("[quota-live] %s check failed: %v (using cached state)", acc.UserEmail, err)
-		// On error, trust the cached snapshot — return current eligibility.
-		quota := acc.quotaSnapshot()
-		if quota.Info != nil {
-			return quota.Info.IsEligible
+		return eligible
+	}
+	quota = acc.quotaSnapshot()
+	if quota.Info != nil {
+		if eligible {
+			log.Printf("[quota-live] %s eligible (basic remaining ~%d)", acc.UserEmail, basicRemaining(quota.Info))
+		} else {
+			log.Printf("[quota-live] %s NOT eligible — disabled (space %d/%d, user %d/%d)",
+				acc.UserEmail, quota.Info.SpaceUsage, quota.Info.SpaceLimit, quota.Info.UserUsage, quota.Info.UserLimit)
 		}
-		return !p.isQuotaExhaustedRLock(acc)
 	}
-
-	res := p.applyQuotaInfo(acc, info)
-	switch {
-	case res.Recovered:
-		log.Printf("[quota-live] %s recovered (basic remaining ~%d, premium=%v)",
-			acc.UserEmail, res.BasicLeft, res.HasPremium)
-	case res.NowPermanent:
-		log.Printf("[quota-live] %s NOT eligible — disabling permanently (free plan)", acc.UserEmail)
-	case res.NowExhausted:
-		log.Printf("[quota-live] %s NOT eligible — disabled (space %d/%d, user %d/%d)",
-			acc.UserEmail, info.SpaceUsage, info.SpaceLimit, info.UserUsage, info.UserLimit)
-	default:
-		log.Printf("[quota-live] %s eligible (basic remaining ~%d, premium=%v)",
-			acc.UserEmail, res.BasicLeft, res.HasPremium)
-	}
-	return info.IsEligible
+	return eligible
 }
 
 // RefreshAccountQuotaAsync triggers a live quota check in the background.
@@ -861,33 +1068,18 @@ func (p *AccountPool) RefreshAccountQuotaAsync(acc *Account) {
 	if acc == nil {
 		return
 	}
-	p.liveQuotaMu.Lock()
-	if p.liveQuotaInflight[acc] {
-		p.liveQuotaMu.Unlock()
+	if planIncludesFullNotionAI(acc.planTypeSnapshot()) {
 		return
 	}
-	p.liveQuotaInflight[acc] = true
-	p.liveQuotaMu.Unlock()
 
 	go func() {
-		defer func() {
-			p.liveQuotaMu.Lock()
-			delete(p.liveQuotaInflight, acc)
-			p.liveQuotaMu.Unlock()
-		}()
-		info, err := quotaFetcher(acc)
+		eligible, err := p.refreshAccountQuotaNow(acc)
 		if err != nil {
 			log.Printf("[quota-live-async] %s check failed: %v", acc.UserEmail, err)
 			return
 		}
-		res := p.applyQuotaInfo(acc, info)
-		switch {
-		case res.NowPermanent:
-			log.Printf("[quota-live-async] %s NOT eligible — disabled permanently (free plan)", acc.UserEmail)
-		case res.NowExhausted:
-			log.Printf("[quota-live-async] %s NOT eligible — disabled (basic %d left)", acc.UserEmail, res.BasicLeft)
-		case res.Recovered:
-			log.Printf("[quota-live-async] %s recovered (basic %d left)", acc.UserEmail, res.BasicLeft)
+		if !eligible {
+			log.Printf("[quota-live-async] %s NOT eligible", acc.UserEmail)
 		}
 	}()
 }
@@ -905,14 +1097,22 @@ func (p *AccountPool) isQuotaExhaustedRLock(acc *Account) bool {
 // for the file lifecycle (used by the dashboard delete endpoint).
 func (p *AccountPool) RemoveAccountByEmail(email string) bool {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	for i, a := range p.accounts {
 		if strings.EqualFold(a.UserEmail, email) {
 			p.accounts = append(p.accounts[:i], p.accounts[i+1:]...)
+			remaining := append([]*Account(nil), p.accounts...)
+			p.mu.Unlock()
+			p.liveQuotaMu.Lock()
+			delete(p.liveQuotaFlights, a)
+			delete(p.quotaGeneration, a)
+			delete(p.quotaApplied, a)
+			p.liveQuotaMu.Unlock()
+			rebuildDynamicModelMap(remaining)
 			globalSessionManager.DeleteByAccount(a.UserEmail)
 			return true
 		}
 	}
+	p.mu.Unlock()
 	return false
 }
 
@@ -943,7 +1143,24 @@ func (p *AccountPool) GetByEmail(email string) *Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for _, acc := range p.accounts {
-		if acc.UserEmail == email && !p.isUnusable(acc) {
+		if strings.EqualFold(acc.UserEmail, email) && !p.isUnusable(acc) {
+			return acc
+		}
+	}
+	return nil
+}
+
+// getByEmailAnyState looks up an account identity without applying routing
+// health filters. Destructive operations use it to revalidate unavailable
+// accounts before deleting their files.
+func (p *AccountPool) getByEmailAnyState(email string) *Account {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, acc := range p.accounts {
+		if strings.EqualFold(acc.UserEmail, email) {
 			return acc
 		}
 	}
@@ -993,9 +1210,6 @@ func (p *AccountPool) GetRefreshStatus() map[string]interface{} {
 	if p.lastRefreshAt != nil {
 		status["last_refresh_at"] = p.lastRefreshAt.Format(time.RFC3339)
 	}
-	if p.lastRefreshErr != "" {
-		status["error"] = p.lastRefreshErr
-	}
 	return status
 }
 
@@ -1034,7 +1248,6 @@ func (p *AccountPool) beginRefresh() (func(), bool) {
 	}
 	p.refreshing = true
 	p.refreshDone = 0
-	p.lastRefreshErr = ""
 	p.refreshMu.Unlock()
 	return releaseMutation, true
 }
@@ -1080,46 +1293,68 @@ func (p *AccountPool) refreshAll(accountsDir string, releaseMutation func()) {
 			defer wg.Done()
 			defer func() { <-sem }() // release semaphore slot
 
-			// 1. Check quota — applyQuotaInfo handles state transitions and
-			// ensures every write happens under p.mu so concurrent selectors
-			// always observe a consistent view.
+			// 1. Refresh workspace accessibility and plan first. Quota policy
+			// must use the current plan, not the value captured at import time.
+			workspace, err := workspaceProbe(acc)
+			if err != nil {
+				log.Printf("[refresh] %s (%s): workspace probe failed: %v", acc.UserName, acc.UserEmail, err)
+			} else {
+				prev, changed, planChanged := p.applyWorkspaceProfile(acc, workspace)
+				if planChanged {
+					log.Printf("[refresh] %s (%s): plan refreshed to %s", acc.UserName, acc.UserEmail, acc.planTypeSnapshot())
+				}
+				switch {
+				case workspace.Count == 0 && (changed || prev == 0):
+					log.Printf("[refresh] %s (%s): NO WORKSPACE — excluded from pool (selected workspace is no longer accessible)", acc.UserName, acc.UserEmail)
+					workspaceLost.Add(1)
+				case workspace.Count > 0 && changed:
+					log.Printf("[refresh] %s (%s): %d workspace(s) accessible", acc.UserName, acc.UserEmail, workspace.Count)
+				}
+			}
+
+			// 2. Check quota. Generations ensure that a slower older response
+			// cannot overwrite a newer live-routing result.
+			quotaGeneration := p.nextQuotaGeneration(acc)
 			info, err := quotaFetcher(acc)
 			if err != nil {
 				log.Printf("[refresh] %s (%s): quota check failed: %v", acc.UserName, acc.UserEmail, err)
 				failedChecks.Add(1)
 			} else {
-				res := p.applyQuotaInfo(acc, info)
-				premiumInfo := ""
-				if info.HasPremium {
-					premiumInfo = fmt.Sprintf(", premium %d/%d", info.PremiumUsage, info.PremiumLimit)
-				}
-				if info.ResearchModeUsage > 0 {
-					premiumInfo += fmt.Sprintf(", research=%d", info.ResearchModeUsage)
-				}
-				switch {
-				case res.NowPermanent:
-					log.Printf("[refresh] %s (%s): NOT eligible — disabled permanently (free plan, space %d/%d, user %d/%d)",
-						acc.UserName, acc.UserEmail, info.SpaceUsage, info.SpaceLimit, info.UserUsage, info.UserLimit)
-					disabledNow.Add(1)
-				case res.NowExhausted:
-					log.Printf("[refresh] %s (%s): NOT eligible — disabled (space %d/%d, user %d/%d%s)",
-						acc.UserName, acc.UserEmail, info.SpaceUsage, info.SpaceLimit, info.UserUsage, info.UserLimit, premiumInfo)
-					disabledNow.Add(1)
-				case res.Recovered:
-					log.Printf("[refresh] %s (%s): RECOVERED (space %d/%d, user %d/%d, remaining ~%d%s)",
-						acc.UserName, acc.UserEmail, info.SpaceUsage, info.SpaceLimit, info.UserUsage, info.UserLimit, res.BasicLeft, premiumInfo)
-					recoveredNow.Add(1)
-				default:
-					log.Printf("[refresh] %s (%s): eligible (space %d/%d, user %d/%d, remaining ~%d%s)",
-						acc.UserName, acc.UserEmail, info.SpaceUsage, info.SpaceLimit, info.UserUsage, info.UserLimit, res.BasicLeft, premiumInfo)
+				res, applied := p.applyQuotaInfoIfCurrent(acc, info, quotaGeneration)
+				if !applied {
+					log.Printf("[refresh] %s (%s): discarded stale quota response", acc.UserName, acc.UserEmail)
+				} else {
+					premiumInfo := ""
+					if info.HasPremium {
+						premiumInfo = fmt.Sprintf(", premium %d/%d", info.PremiumUsage, info.PremiumLimit)
+					}
+					if info.ResearchModeUsage > 0 {
+						premiumInfo += fmt.Sprintf(", research=%d", info.ResearchModeUsage)
+					}
+					switch {
+					case res.Unlimited:
+						log.Printf("[refresh] %s (%s): included-AI plan — legacy Basic %d/%d ignored (current unlimited mode%s)",
+							acc.UserName, acc.UserEmail, info.SpaceUsage, info.SpaceLimit, premiumInfo)
+					case res.NowPermanent:
+						log.Printf("[refresh] %s (%s): NOT eligible — disabled permanently (free plan, space %d/%d, user %d/%d)",
+							acc.UserName, acc.UserEmail, info.SpaceUsage, info.SpaceLimit, info.UserUsage, info.UserLimit)
+						disabledNow.Add(1)
+					case res.NowExhausted:
+						log.Printf("[refresh] %s (%s): NOT eligible — disabled (space %d/%d, user %d/%d%s)",
+							acc.UserName, acc.UserEmail, info.SpaceUsage, info.SpaceLimit, info.UserUsage, info.UserLimit, premiumInfo)
+						disabledNow.Add(1)
+					case res.Recovered:
+						log.Printf("[refresh] %s (%s): RECOVERED (space %d/%d, user %d/%d, remaining ~%d%s)",
+							acc.UserName, acc.UserEmail, info.SpaceUsage, info.SpaceLimit, info.UserUsage, info.UserLimit, res.BasicLeft, premiumInfo)
+						recoveredNow.Add(1)
+					default:
+						log.Printf("[refresh] %s (%s): eligible (space %d/%d, user %d/%d, remaining ~%d%s)",
+							acc.UserName, acc.UserEmail, info.SpaceUsage, info.SpaceLimit, info.UserUsage, info.UserLimit, res.BasicLeft, premiumInfo)
+					}
 				}
 			}
 
-			p.refreshMu.Lock()
-			p.refreshDone++
-			p.refreshMu.Unlock()
-
-			// 2. Fetch models
+			// 3. Fetch models
 			models, err := modelsFetcher(acc)
 			if err != nil {
 				log.Printf("[refresh] %s (%s): model fetch failed: %v", acc.UserName, acc.UserEmail, err)
@@ -1128,23 +1363,9 @@ func (p *AccountPool) refreshAll(accountsDir string, releaseMutation func()) {
 				log.Printf("[refresh] %s (%s): fetched %d models", acc.UserName, acc.UserEmail, len(models))
 			}
 
-			// 3. Probe workspace. An account whose user_root has zero
-			// space_views is the silent failure mode that makes /ai
-			// hang forever — exclude these from selection so the user
-			// never opens a dead account from the dashboard.
-			count, err := workspaceProbe(acc)
-			if err != nil {
-				log.Printf("[refresh] %s (%s): workspace probe failed: %v", acc.UserName, acc.UserEmail, err)
-			} else {
-				prev, changed := p.applyWorkspaceCount(acc, count)
-				switch {
-				case count == 0 && (changed || prev == 0):
-					log.Printf("[refresh] %s (%s): NO WORKSPACE — excluded from pool (loadUserContent.user_root.space_views is empty)", acc.UserName, acc.UserEmail)
-					workspaceLost.Add(1)
-				case count > 0 && changed:
-					log.Printf("[refresh] %s (%s): %d workspace(s) accessible", acc.UserName, acc.UserEmail, count)
-				}
-			}
+			p.refreshMu.Lock()
+			p.refreshDone++
+			p.refreshMu.Unlock()
 		}(acc)
 	}
 	wg.Wait()
@@ -1275,79 +1496,8 @@ func (p *AccountPool) SaveAccounts(dir string) {
 	p.mu.RUnlock()
 
 	for _, acc := range accs {
-		models := acc.modelsSnapshot()
-		quota := acc.quotaSnapshot()
-		personalInstructions := acc.personalInstructionsSnapshot()
-		health := acc.healthSnapshot()
-		// Find the matching file by user_email
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, entry := range entries {
-			if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-				continue
-			}
-			path := filepath.Join(dir, entry.Name())
-			data, err := os.ReadFile(path)
-			if err != nil {
-				continue
-			}
-			var existing map[string]interface{}
-			if err := json.Unmarshal(data, &existing); err != nil {
-				continue
-			}
-			email, _ := existing["user_email"].(string)
-			if email != acc.UserEmail {
-				continue
-			}
-
-			// Update models
-			if len(models) > 0 {
-				var modelEntries []map[string]string
-				for _, m := range models {
-					modelEntries = append(modelEntries, map[string]string{"id": m.ID, "name": m.Name})
-				}
-				existing["available_models"] = modelEntries
-			}
-
-			// Update quota info
-			if quota.Info != nil {
-				existing["quota_info"] = map[string]interface{}{
-					"is_eligible":         quota.Info.IsEligible,
-					"space_usage":         quota.Info.SpaceUsage,
-					"space_limit":         quota.Info.SpaceLimit,
-					"user_usage":          quota.Info.UserUsage,
-					"user_limit":          quota.Info.UserLimit,
-					"last_usage_at":       quota.Info.LastUsageAtMs,
-					"research_mode_usage": quota.Info.ResearchModeUsage,
-					"has_premium":         quota.Info.HasPremium,
-					"premium_balance":     quota.Info.PremiumBalance,
-					"premium_usage":       quota.Info.PremiumUsage,
-					"premium_limit":       quota.Info.PremiumLimit,
-				}
-			}
-			if quota.CheckedAt != nil {
-				existing["quota_checked_at"] = quota.CheckedAt.Format(time.RFC3339)
-			}
-
-			// Workspace probe — only persist when we have a real
-			// observation (WorkspaceCheckedAt set) so a never-probed
-			// account doesn't accidentally get pinned at space_count=0.
-			if acc.WorkspaceCheckedAt != nil {
-				existing["space_count"] = acc.SpaceCount
-				existing["workspace_checked_at"] = acc.WorkspaceCheckedAt.Format(time.RFC3339)
-			}
-			writePersonalInstructionsState(existing, personalInstructions)
-			writeManualDisabledState(existing, health.ManuallyDisabled)
-
-			// Write back
-			out, err := json.MarshalIndent(existing, "", "  ")
-			if err != nil {
-				continue
-			}
-			os.WriteFile(path, append(out, '\n'), 0644)
-			break
+		if err := saveAccountFile(dir, acc); err != nil {
+			log.Printf("[account] save %s failed: %v", acc.UserEmail, err)
 		}
 	}
 }
@@ -1356,11 +1506,9 @@ func (p *AccountPool) SaveAccounts(dir string) {
 // freshest quota_info / quota_checked_at / available_models, while
 // preserving every other field (token, ids, browser/device, registered_via).
 //
-// The write is atomic (tmp + os.Rename) so a crash mid-save can't leave
-// LoadFromDir staring at a half-written JSON. Callers should hold no
-// AccountPool lock — we read acc fields directly so concurrent updates by
-// applyQuotaInfo are protected by Go's safe-map / pointer guarantees on
-// the small primitives we copy.
+// The write is serialized per account path and atomic (unique temp file +
+// os.Rename). The Account snapshot is captured under acc.mu, so concurrent
+// quota/model/profile refreshes cannot race with persistence.
 //
 // Returns an error if no on-disk file matches acc.UserEmail; that is a
 // real-world signal someone deleted the account file out from under us.
@@ -1401,37 +1549,59 @@ func saveAccountFile(dir string, acc *Account) error {
 	if matchPath == "" {
 		return fmt.Errorf("no account file matches %s", acc.UserEmail)
 	}
+	unlockFile, err := lockAccountFilePath(matchPath)
+	if err != nil {
+		return err
+	}
+	defer unlockFile()
 
-	if len(acc.Models) > 0 {
-		modelEntries := make([]map[string]string, 0, len(acc.Models))
-		for _, m := range acc.Models {
+	// Re-read after acquiring the path lock so concurrent writers cannot lose
+	// fields that were committed while this caller was locating the file.
+	latest, err := os.ReadFile(matchPath)
+	if err != nil {
+		return fmt.Errorf("read account file: %w", err)
+	}
+	if err := json.Unmarshal(latest, &existing); err != nil {
+		return fmt.Errorf("parse account file: %w", err)
+	}
+
+	state := acc.persistSnapshot()
+	if len(state.Models) > 0 {
+		modelEntries := make([]map[string]string, 0, len(state.Models))
+		for _, m := range state.Models {
 			modelEntries = append(modelEntries, map[string]string{"id": m.ID, "name": m.Name})
 		}
 		existing["available_models"] = modelEntries
 	}
-	if acc.QuotaInfo != nil {
+	if state.Quota.Info != nil {
 		existing["quota_info"] = map[string]interface{}{
-			"is_eligible":         acc.QuotaInfo.IsEligible,
-			"space_usage":         acc.QuotaInfo.SpaceUsage,
-			"space_limit":         acc.QuotaInfo.SpaceLimit,
-			"user_usage":          acc.QuotaInfo.UserUsage,
-			"user_limit":          acc.QuotaInfo.UserLimit,
-			"last_usage_at":       acc.QuotaInfo.LastUsageAtMs,
-			"research_mode_usage": acc.QuotaInfo.ResearchModeUsage,
-			"has_premium":         acc.QuotaInfo.HasPremium,
-			"premium_balance":     acc.QuotaInfo.PremiumBalance,
-			"premium_usage":       acc.QuotaInfo.PremiumUsage,
-			"premium_limit":       acc.QuotaInfo.PremiumLimit,
+			"is_eligible":         state.Quota.Info.IsEligible,
+			"space_usage":         state.Quota.Info.SpaceUsage,
+			"space_limit":         state.Quota.Info.SpaceLimit,
+			"user_usage":          state.Quota.Info.UserUsage,
+			"user_limit":          state.Quota.Info.UserLimit,
+			"last_usage_at":       state.Quota.Info.LastUsageAtMs,
+			"research_mode_usage": state.Quota.Info.ResearchModeUsage,
+			"has_premium":         state.Quota.Info.HasPremium,
+			"premium_balance":     state.Quota.Info.PremiumBalance,
+			"premium_usage":       state.Quota.Info.PremiumUsage,
+			"premium_limit":       state.Quota.Info.PremiumLimit,
 		}
 	}
-	if acc.QuotaCheckedAt != nil {
-		existing["quota_checked_at"] = acc.QuotaCheckedAt.Format(time.RFC3339)
+	if state.Quota.CheckedAt != nil {
+		existing["quota_checked_at"] = state.Quota.CheckedAt.Format(time.RFC3339)
 	}
-	writePersonalInstructionsState(existing, acc.personalInstructionsSnapshot())
-	writeManualDisabledState(existing, acc.healthSnapshot().ManuallyDisabled)
-	if acc.WorkspaceCheckedAt != nil {
-		existing["space_count"] = acc.SpaceCount
-		existing["workspace_checked_at"] = acc.WorkspaceCheckedAt.Format(time.RFC3339)
+	existing["plan_type"] = state.Profile.PlanType
+	writePersonalInstructionsState(existing, state.PersonalInstructions)
+	writeManualDisabledState(existing, state.Health.ManuallyDisabled)
+	if state.Profile.WorkspaceCheckedAt != nil {
+		existing["space_count"] = state.Profile.SpaceCount
+		existing["workspace_checked_at"] = state.Profile.WorkspaceCheckedAt.Format(time.RFC3339)
+		if state.Profile.AIEnabled != nil {
+			existing["workspace_ai_enabled"] = *state.Profile.AIEnabled
+		} else {
+			delete(existing, "workspace_ai_enabled")
+		}
 	}
 
 	out, err := json.MarshalIndent(existing, "", "  ")
@@ -1439,14 +1609,32 @@ func saveAccountFile(dir string, acc *Account) error {
 		return fmt.Errorf("marshal: %w", err)
 	}
 	out = append(out, '\n')
-	tmp := matchPath + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+	tmpFile, err := os.CreateTemp(filepath.Dir(matchPath), "."+filepath.Base(matchPath)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create tmp: %w", err)
+	}
+	tmp := tmpFile.Name()
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if err := tmpFile.Chmod(0o600); err != nil {
+		_ = tmpFile.Close()
+		return fmt.Errorf("chmod tmp: %w", err)
+	}
+	if _, err := tmpFile.Write(out); err != nil {
+		_ = tmpFile.Close()
 		return fmt.Errorf("write tmp: %w", err)
 	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("close tmp: %w", err)
+	}
 	if err := os.Rename(tmp, matchPath); err != nil {
-		_ = os.Remove(tmp)
 		return fmt.Errorf("rename: %w", err)
 	}
+	cleanupTmp = false
 	return nil
 }
 
@@ -1492,11 +1680,14 @@ func (p *AccountPool) RefreshAndPersistAccount(ctx context.Context, accountsDir,
 		return fmt.Errorf("account not in pool: %s", email)
 	}
 
+	quotaGeneration := p.nextQuotaGeneration(acc)
 	info, err := quotaFetcher(acc)
 	if err != nil {
 		return fmt.Errorf("quota check: %w", err)
 	}
-	p.applyQuotaInfo(acc, info)
+	if _, applied := p.applyQuotaInfoIfCurrent(acc, info, quotaGeneration); !applied {
+		log.Printf("[post-register] %s: discarded stale quota response", acc.UserEmail)
+	}
 
 	models, mErr := modelsFetcher(acc)
 	if mErr != nil {
@@ -1508,11 +1699,11 @@ func (p *AccountPool) RefreshAndPersistAccount(ctx context.Context, accountsDir,
 	// Workspace probe is best-effort. If it fails we still persist the
 	// quota so the dashboard sees real numbers; the next /admin/refresh
 	// retry will re-probe.
-	if count, wErr := workspaceProbe(acc); wErr != nil {
+	if workspace, wErr := workspaceProbe(acc); wErr != nil {
 		log.Printf("[post-register] %s: workspace probe failed: %v", acc.UserEmail, wErr)
 	} else {
-		p.applyWorkspaceCount(acc, count)
-		if count == 0 {
+		p.applyWorkspaceProfile(acc, workspace)
+		if workspace.Count == 0 {
 			log.Printf("[post-register] %s: NO WORKSPACE detected immediately after registration — account will be excluded from the pool", acc.UserEmail)
 		}
 	}
@@ -1523,8 +1714,9 @@ func (p *AccountPool) RefreshAndPersistAccount(ctx context.Context, accountsDir,
 	if err := saveAccountFile(accountsDir, acc); err != nil {
 		return fmt.Errorf("persist: %w", err)
 	}
+	profile := acc.profileSnapshot()
 	log.Printf("[post-register] %s: quota refreshed and persisted (eligible=%v, space %d/%d, workspaces=%d)",
-		acc.UserEmail, info.IsEligible, info.SpaceUsage, info.SpaceLimit, acc.SpaceCount)
+		acc.UserEmail, info.IsEligible, info.SpaceUsage, info.SpaceLimit, profile.SpaceCount)
 	return nil
 }
 
@@ -1547,17 +1739,22 @@ func (p *AccountPool) GetAccountDetails() []map[string]interface{} {
 	for _, acc := range p.accounts {
 		quota := acc.quotaSnapshot()
 		health := acc.healthSnapshot()
+		profile := acc.profileSnapshot()
+		aiDisabled := profile.AIEnabled != nil && !*profile.AIEnabled
+		unlimited := planIncludesFullNotionAI(profile.PlanType) && !aiDisabled
 		models := acc.modelsSnapshot()
 		personalInstructions := acc.personalInstructionsSnapshot()
 		entry := map[string]interface{}{
-			"email":        acc.UserEmail,
-			"name":         acc.UserName,
-			"plan":         acc.PlanType,
-			"space":        acc.SpaceName,
-			"exhausted":    p.isQuotaExhausted(acc),
-			"permanent":    quota.PermanentlyExhausted,
-			"no_workspace": p.hasNoWorkspace(acc),
-			"disabled":     health.ManuallyDisabled,
+			"email":           acc.UserEmail,
+			"name":            acc.UserName,
+			"plan":            profile.PlanType,
+			"space":           acc.SpaceName,
+			"exhausted":       p.isQuotaExhausted(acc),
+			"permanent":       quota.PermanentlyExhausted && !unlimited,
+			"no_workspace":    p.hasNoWorkspace(acc),
+			"ai_disabled":     aiDisabled,
+			"disabled":        health.ManuallyDisabled,
+			"quota_unlimited": unlimited,
 			// token_v2 is exposed only behind dashboard auth (the caller of
 			// HandleAdminAccounts already gates on session). The dashboard
 			// shows a "copy token" action and uses it for nothing else.
@@ -1579,9 +1776,9 @@ func (p *AccountPool) GetAccountDetails() []map[string]interface{} {
 		if health.AuthFailureCount > 0 {
 			entry["auth_failures"] = health.AuthFailureCount
 		}
-		if acc.WorkspaceCheckedAt != nil {
-			entry["space_count"] = acc.SpaceCount
-			entry["workspace_checked_at"] = acc.WorkspaceCheckedAt.Format(time.RFC3339)
+		if profile.WorkspaceCheckedAt != nil {
+			entry["space_count"] = profile.SpaceCount
+			entry["workspace_checked_at"] = profile.WorkspaceCheckedAt.Format(time.RFC3339)
 		}
 		if acc.RegisteredVia != "" {
 			entry["registered_via"] = acc.RegisteredVia
@@ -1640,14 +1837,19 @@ func (p *AccountPool) GetQuotaSummary() []map[string]interface{} {
 	for _, acc := range p.accounts {
 		quota := acc.quotaSnapshot()
 		health := acc.healthSnapshot()
+		profile := acc.profileSnapshot()
+		aiDisabled := profile.AIEnabled != nil && !*profile.AIEnabled
+		unlimited := planIncludesFullNotionAI(profile.PlanType) && !aiDisabled
 		entry := map[string]interface{}{
-			"email":        acc.UserEmail,
-			"name":         acc.UserName,
-			"plan":         acc.PlanType,
-			"exhausted":    p.isQuotaExhausted(acc),
-			"permanent":    quota.PermanentlyExhausted,
-			"no_workspace": p.hasNoWorkspace(acc),
-			"disabled":     health.ManuallyDisabled,
+			"email":           acc.UserEmail,
+			"name":            acc.UserName,
+			"plan":            profile.PlanType,
+			"exhausted":       p.isQuotaExhausted(acc),
+			"permanent":       quota.PermanentlyExhausted && !unlimited,
+			"no_workspace":    p.hasNoWorkspace(acc),
+			"ai_disabled":     aiDisabled,
+			"disabled":        health.ManuallyDisabled,
+			"quota_unlimited": unlimited,
 		}
 		if health.TemporaryUnavailableUntil != nil {
 			entry["temporarily_unavailable"] = health.TemporaryUnavailableUntil.After(time.Now())
@@ -1665,9 +1867,9 @@ func (p *AccountPool) GetQuotaSummary() []map[string]interface{} {
 		if health.AuthFailureCount > 0 {
 			entry["auth_failures"] = health.AuthFailureCount
 		}
-		if acc.WorkspaceCheckedAt != nil {
-			entry["space_count"] = acc.SpaceCount
-			entry["workspace_checked_at"] = acc.WorkspaceCheckedAt.Format(time.RFC3339)
+		if profile.WorkspaceCheckedAt != nil {
+			entry["space_count"] = profile.SpaceCount
+			entry["workspace_checked_at"] = profile.WorkspaceCheckedAt.Format(time.RFC3339)
 		}
 		if quota.Info != nil {
 			entry["eligible"] = quota.Info.IsEligible
@@ -1704,6 +1906,7 @@ func loadPersistedWorkspace(data []byte, acc *Account) {
 	var raw struct {
 		SpaceCount         *int    `json:"space_count"`
 		WorkspaceCheckedAt *string `json:"workspace_checked_at"`
+		WorkspaceAIEnabled *bool   `json:"workspace_ai_enabled"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return
@@ -1716,6 +1919,7 @@ func loadPersistedWorkspace(data []byte, acc *Account) {
 		return
 	}
 	acc.WorkspaceCheckedAt = &t
+	acc.WorkspaceAIEnabled = cloneBoolPtr(raw.WorkspaceAIEnabled)
 	if raw.SpaceCount != nil {
 		acc.SpaceCount = *raw.SpaceCount
 	}
@@ -1795,19 +1999,18 @@ func basicRemaining(info *QuotaInfo) int {
 // Higher = more preferred when picking the "best" account.
 //
 //   - Unknown quota: -1 (fallback until refreshed).
-//   - Business/Enterprise: 3.
-//   - Other plans with a live premium signal: 2.
+//   - Included-AI paid plans: 2.
 //   - Other eligible trial accounts: 1.
 func accountQuotaPriority(acc *Account) int {
+	if acc == nil {
+		return -1
+	}
+	if planIncludesFullNotionAI(acc.planTypeSnapshot()) {
+		return 2
+	}
 	quota := acc.quotaInfoSnapshot()
 	if quota == nil {
 		return -1
-	}
-	if planIncludesFullNotionAI(acc.PlanType) {
-		return 3
-	}
-	if quota.HasPremium {
-		return 2
 	}
 	return 1
 }

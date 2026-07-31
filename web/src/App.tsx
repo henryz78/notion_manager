@@ -541,11 +541,6 @@ function hasPremiumAccess(account: AccountInfo): boolean {
   return !!account.has_premium || (account.premium_limit || 0) > 0 || (account.premium_balance || 0) > 0
 }
 
-function planIncludesFullNotionAI(plan: string): boolean {
-  const normalized = (plan || '').trim().toLowerCase()
-  return normalized === 'business' || normalized === 'enterprise'
-}
-
 function getSpaceQuota(account: AccountInfo) {
   const usage = account.space_usage ?? account.usage ?? 0
   const limit = account.space_limit ?? account.limit ?? 0
@@ -689,14 +684,16 @@ function AccountCard({
   const userQuota = getUserQuota(account)
   const sameBasicQuota = isSameQuota(spaceQuota, userQuota)
   const premium = hasPremiumAccess(account)
-  const fullNotionAI = planIncludesFullNotionAI(account.plan)
+  const fullNotionAI = !!account.quota_unlimited
   const noWorkspace = !!account.no_workspace
+  const aiDisabled = !!account.ai_disabled
   const authInvalid = !!account.auth_invalid
   const manuallyDisabled = !!account.disabled
   const temporarilyUnavailable = !authInvalid && !!account.temporarily_unavailable
-  const status = manuallyDisabled || account.permanent || account.exhausted || noWorkspace || authInvalid || temporarilyUnavailable
+  const quotaBlocked = !fullNotionAI && (account.permanent || account.exhausted)
+  const status = manuallyDisabled || quotaBlocked || noWorkspace || aiDisabled || authInvalid || temporarilyUnavailable
     ? 'exhausted'
-    : mergeQuotaStatus([
+    : fullNotionAI ? 'ok' : mergeQuotaStatus([
       getQuotaStatusByUsage(spaceQuota.usage, spaceQuota.limit),
       getQuotaStatusByUsage(userQuota.usage, userQuota.limit),
     ])
@@ -707,8 +704,8 @@ function AccountCard({
   // immediately sees the account is unhealthy. Click-through is blocked
   // because Notion's /ai SPA hangs indefinitely on these accounts (the
   // root-cause this fix is for).
-  const cardBg = account.permanent ? 'bg-bg-exhausted border-white/[0.03] opacity-55'
-    : manuallyDisabled || account.exhausted || noWorkspace || authInvalid || temporarilyUnavailable ? 'bg-bg-exhausted border-white/[0.03]'
+  const cardBg = quotaBlocked && account.permanent ? 'bg-bg-exhausted border-white/[0.03] opacity-55'
+    : manuallyDisabled || quotaBlocked || noWorkspace || aiDisabled || authInvalid || temporarilyUnavailable ? 'bg-bg-exhausted border-white/[0.03]'
     : 'bg-bg-card hover:bg-bg-card-hover border-white/[0.03] hover:border-white/[0.07]'
 
   const handleClick = () => {
@@ -726,6 +723,10 @@ function AccountCard({
       alert(t('account.no_workspace_alert'))
       return
     }
+    if (aiDisabled) {
+      alert(t('account.ai_disabled_alert'))
+      return
+    }
     if (temporarilyUnavailable) {
       alert(t('account.temporary_alert', { reason: account.last_failure_reason || 'temporary_failure' }))
       return
@@ -735,9 +736,9 @@ function AccountCard({
 
   return (
     <div
-      className={`rounded-lg p-4 border max-sm:p-3 ${manuallyDisabled || authInvalid || noWorkspace || temporarilyUnavailable ? 'cursor-not-allowed' : 'cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30'} transition-all duration-200 ${selected ? 'ring-1 ring-notion-blue border-notion-blue/60' : ''} ${cardBg}`}
+      className={`rounded-lg p-4 border max-sm:p-3 ${manuallyDisabled || authInvalid || noWorkspace || aiDisabled || temporarilyUnavailable ? 'cursor-not-allowed' : 'cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30'} transition-all duration-200 ${selected ? 'ring-1 ring-notion-blue border-notion-blue/60' : ''} ${cardBg}`}
       onClick={handleClick}
-      title={manuallyDisabled ? t('account.manual_disabled_tooltip') : authInvalid ? t('account.auth_invalid_tooltip') : noWorkspace ? t('account.no_workspace_tooltip') : temporarilyUnavailable ? t('account.temporary_tooltip', { reason: account.last_failure_reason || 'temporary_failure' }) : undefined}
+      title={manuallyDisabled ? t('account.manual_disabled_tooltip') : authInvalid ? t('account.auth_invalid_tooltip') : noWorkspace ? t('account.no_workspace_tooltip') : aiDisabled ? t('account.ai_disabled_tooltip') : temporarilyUnavailable ? t('account.temporary_tooltip', { reason: account.last_failure_reason || 'temporary_failure' }) : undefined}
     >
       {/* Header */}
       <div className="flex items-center gap-2.5 mb-2.5">
@@ -809,6 +810,7 @@ function AccountCard({
         {manuallyDisabled && <Badge variant="warning">{t('account.manually_disabled')}</Badge>}
         {authInvalid && <Badge variant="warning">{t('account.cookie_invalid')}</Badge>}
         {noWorkspace && <Badge variant="warning">{t('account.no_workspace')}</Badge>}
+        {aiDisabled && <Badge variant="warning">{t('account.ai_disabled')}</Badge>}
         {temporarilyUnavailable && (
           <Badge variant="warning">{t('account.temporarily_skipped', { reason: account.last_failure_reason || 'failure' })}</Badge>
         )}
@@ -823,7 +825,12 @@ function AccountCard({
       </div>
 
       {/* Quotas */}
-      {sameBasicQuota ? (
+      {fullNotionAI ? (
+        <div className="mb-1.5 flex items-center justify-between rounded-md bg-ok/5 px-2.5 py-2 text-[11px]">
+          <span className="text-text-muted">{t('account.ai_allowance')}</span>
+          <span className="font-semibold text-ok">{t('account.unlimited_now')}</span>
+        </div>
+      ) : sameBasicQuota ? (
         <QuotaBar label="Basic raw" usage={spaceQuota.usage} limit={spaceQuota.limit} />
       ) : (
         <>
@@ -833,7 +840,7 @@ function AccountCard({
       )}
       {premium && <QuotaBar label="Premium monthlyAllocated raw" labelClass="text-[#7eb8ff]" usage={account.premium_usage} limit={account.premium_limit} />}
       <div className="flex flex-wrap gap-3 mt-2 text-[10px] text-text-muted">
-        <span>{t('account.basic_estimated', { count: fmt(account.remaining || 0) })}</span>
+        {!fullNotionAI && <span>{t('account.basic_estimated', { count: fmt(account.remaining || 0) })}</span>}
         {premium && <span>{t('account.premium_raw', { count: fmt(account.premium_balance || 0) })}</span>}
       </div>
 
@@ -882,6 +889,7 @@ const accountStatusFilterOptions: Array<{ value: AccountStatusFilter; labelKey: 
   { value: 'exhausted', labelKey: 'common.quota_exhausted' },
   { value: 'auth_invalid', labelKey: 'common.cookie_invalid' },
   { value: 'no_workspace', labelKey: 'common.no_workspace' },
+  { value: 'ai_disabled', labelKey: 'common.ai_disabled' },
   { value: 'temporarily_unavailable', labelKey: 'common.temporary' },
   { value: 'personal_configured', labelKey: 'common.instructions_configured' },
   { value: 'personal_missing', labelKey: 'common.instructions_missing' },
@@ -1478,9 +1486,10 @@ export default function App() {
     const exhausted = data.total - data.available
     const exhaustedOnly = s?.exhausted_only ?? 0
     const noWorkspace = s?.no_workspace ?? 0
+    const aiDisabled = s?.ai_disabled ?? 0
     const authInvalid = s?.auth_invalid ?? 0
     const disabled = s?.disabled ?? 0
-    const otherUnavailable = Math.max(0, exhausted - exhaustedOnly - noWorkspace - authInvalid - disabled)
+    const otherUnavailable = Math.max(0, exhausted - exhaustedOnly - noWorkspace - aiDisabled - authInvalid - disabled)
     const availableRate = data.total > 0 ? Math.round((data.available / data.total) * 100) : 0
     const sameBasicQuota = isSameQuota(
       { usage: s?.total_space_usage ?? 0, limit: s?.total_space_limit ?? 0 },
@@ -1490,6 +1499,7 @@ export default function App() {
       exhausted,
       exhaustedOnly,
       noWorkspace,
+      aiDisabled,
       authInvalid,
       disabled,
       otherUnavailable,
@@ -1501,6 +1511,7 @@ export default function App() {
       totalPremiumBalance: s?.total_premium_balance ?? 0,
       totalPremiumLimit: s?.total_premium_limit ?? 0,
       premiumAccounts: s?.premium_accounts ?? 0,
+      unlimitedAccounts: s?.unlimited_accounts ?? 0,
       sameBasicQuota,
     }
   }, [data])
@@ -1541,6 +1552,7 @@ export default function App() {
       t('stats.available_count', { count: data!.available }),
       summary.exhaustedOnly > 0 ? t('stats.exhausted_count', { count: summary.exhaustedOnly }) : null,
       summary.noWorkspace > 0 ? t('stats.no_workspace_count', { count: summary.noWorkspace }) : null,
+      summary.aiDisabled > 0 ? t('stats.ai_disabled_count', { count: summary.aiDisabled }) : null,
       summary.authInvalid > 0 ? t('stats.auth_invalid_count', { count: summary.authInvalid }) : null,
       summary.disabled > 0 ? t('stats.disabled_count', { count: summary.disabled }) : null,
       summary.otherUnavailable > 0 ? t('stats.temporary_count', { count: summary.otherUnavailable }) : null,
@@ -1574,9 +1586,13 @@ export default function App() {
             />
             <StatCard
               label={t('stats.basic_estimated')} value={fmt(summary.totalRemaining)}
-              sub={summary.sameBasicQuota
-                ? t('stats.basic_same')
-                : t('stats.basic_split', { space: fmt(summary.totalSpaceRemaining), user: fmt(summary.totalUserRemaining) })}
+              sub={summary.unlimitedAccounts > 0
+                ? summary.sameBasicQuota
+                  ? t('stats.basic_same_with_unlimited', { count: summary.unlimitedAccounts })
+                  : t('stats.basic_split_with_unlimited', { space: fmt(summary.totalSpaceRemaining), user: fmt(summary.totalUserRemaining), count: summary.unlimitedAccounts })
+                : summary.sameBasicQuota
+                  ? t('stats.basic_same')
+                  : t('stats.basic_split', { space: fmt(summary.totalSpaceRemaining), user: fmt(summary.totalUserRemaining) })}
             />
             <StatCard
               label={t('stats.premium_raw')} value={fmt(summary.totalPremiumBalance)}

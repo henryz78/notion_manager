@@ -14,9 +14,11 @@ import (
 type AccountSummary struct {
 	ExhaustedOnly       int   `json:"exhausted_only"`
 	NoWorkspace         int   `json:"no_workspace"`
+	AIDisabled          int   `json:"ai_disabled"`
 	AuthInvalid         int   `json:"auth_invalid"`
 	Disabled            int   `json:"disabled"`
 	PremiumAccounts     int   `json:"premium_accounts"`
+	UnlimitedAccounts   int   `json:"unlimited_accounts"`
 	ExhaustedTrials     int   `json:"exhausted_trials"`
 	PersonalConfigured  int   `json:"personal_instructions_configured"`
 	PersonalMissing     int   `json:"personal_instructions_missing"`
@@ -44,10 +46,14 @@ func summarizeAccounts(accounts []map[string]interface{}) AccountSummary {
 		exh := mapBool(a, "exhausted")
 		perm := mapBool(a, "permanent")
 		nws := mapBool(a, "no_workspace")
+		aiDisabled := mapBool(a, "ai_disabled")
 		authInvalid := mapBool(a, "auth_invalid")
 		disabled := mapBool(a, "disabled")
 		if nws {
 			s.NoWorkspace++
+		}
+		if aiDisabled {
+			s.AIDisabled++
 		}
 		if authInvalid {
 			s.AuthInvalid++
@@ -55,7 +61,7 @@ func summarizeAccounts(accounts []map[string]interface{}) AccountSummary {
 		if disabled {
 			s.Disabled++
 		}
-		if (exh || perm) && !nws && !authInvalid && !disabled {
+		if (exh || perm) && !nws && !aiDisabled && !authInvalid && !disabled {
 			s.ExhaustedOnly++
 		}
 		switch {
@@ -71,17 +77,23 @@ func summarizeAccounts(accounts []map[string]interface{}) AccountSummary {
 		if hasPremiumMap(a) {
 			s.PremiumAccounts++
 		}
+		unlimited := mapBool(a, "quota_unlimited")
+		if unlimited {
+			s.UnlimitedAccounts++
+		}
 		if isExhaustedComplimentaryMap(a) {
 			s.ExhaustedTrials++
 		}
 		s.TotalResearchUsage += mapInt(a, "research_usage")
-		s.TotalRemaining += mapInt(a, "remaining")
-		s.TotalSpaceUsage += mapInt(a, "space_usage")
-		s.TotalSpaceLimit += mapInt(a, "space_limit")
-		s.TotalSpaceRemaining += mapInt(a, "space_remaining")
-		s.TotalUserUsage += mapInt(a, "user_usage")
-		s.TotalUserLimit += mapInt(a, "user_limit")
-		s.TotalUserRemaining += mapInt(a, "user_remaining")
+		if !unlimited {
+			s.TotalRemaining += mapInt(a, "remaining")
+			s.TotalSpaceUsage += mapInt(a, "space_usage")
+			s.TotalSpaceLimit += mapInt(a, "space_limit")
+			s.TotalSpaceRemaining += mapInt(a, "space_remaining")
+			s.TotalUserUsage += mapInt(a, "user_usage")
+			s.TotalUserLimit += mapInt(a, "user_limit")
+			s.TotalUserRemaining += mapInt(a, "user_remaining")
+		}
 		s.TotalPremiumBalance += int64(mapInt(a, "premium_balance"))
 		s.TotalPremiumLimit += int64(mapInt(a, "premium_limit"))
 	}
@@ -89,10 +101,10 @@ func summarizeAccounts(accounts []map[string]interface{}) AccountSummary {
 }
 
 func isExhaustedComplimentaryMap(a map[string]interface{}) bool {
-	if !isComplimentaryPlanType(mapString(a, "plan")) || hasPremiumMap(a) {
+	if !isComplimentaryPlanType(mapString(a, "plan")) {
 		return false
 	}
-	if mapBool(a, "auth_invalid") || mapBool(a, "temporarily_unavailable") || mapBool(a, "no_workspace") {
+	if mapBool(a, "auth_invalid") || mapBool(a, "temporarily_unavailable") || mapBool(a, "no_workspace") || mapBool(a, "ai_disabled") {
 		return false
 	}
 	return mapBool(a, "exhausted") || mapBool(a, "permanent")
@@ -138,6 +150,7 @@ func accountMatchesStatus(account map[string]interface{}, status string) bool {
 			!mapBool(account, "exhausted") &&
 			!mapBool(account, "permanent") &&
 			!mapBool(account, "no_workspace") &&
+			!mapBool(account, "ai_disabled") &&
 			!mapBool(account, "auth_invalid") &&
 			!mapBool(account, "temporarily_unavailable")
 	case "disabled":
@@ -148,6 +161,8 @@ func accountMatchesStatus(account map[string]interface{}, status string) bool {
 		return mapBool(account, "auth_invalid")
 	case "no_workspace":
 		return mapBool(account, "no_workspace")
+	case "ai_disabled":
+		return mapBool(account, "ai_disabled")
 	case "temporarily_unavailable":
 		return mapBool(account, "temporarily_unavailable")
 	case "personal_configured":
@@ -183,7 +198,7 @@ func matchAccountQuery(a map[string]interface{}, qLower string) bool {
 //  3. Auth-invalid accounts to the bottom.
 //  4. Accounts with no accessible workspace to the bottom.
 //  5. Quota-exhausted accounts to the bottom.
-//  6. Full Notion AI plans, then a live premium signal, then trial plans.
+//  6. Included-AI paid plans, then trial plans.
 //  7. Stable fallback by name (lower-cased). Private quota counters are not
 //     used for ordering because their public semantics are undocumented.
 func sortAccountDetails(accounts []map[string]interface{}) {
@@ -219,9 +234,6 @@ func sortAccountDetails(accounts []map[string]interface{}) {
 
 func notionAITierMap(a map[string]interface{}) int {
 	if planIncludesFullNotionAI(mapString(a, "plan")) {
-		return 2
-	}
-	if hasPremiumMap(a) {
 		return 1
 	}
 	return 0

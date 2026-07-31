@@ -649,6 +649,19 @@ func HandleAdminDeleteAccount(deps *RegisterJobsDeps) http.HandlerFunc {
 // matches and drops the corresponding pool entry. Returns os.ErrNotExist if
 // no file matches; that's mapped to a 404 by the handler.
 func deleteAccountByEmail(pool *AccountPool, dir, email string) error {
+	expectedToken := ""
+	if pool != nil {
+		if current := pool.getByEmailAnyState(email); current != nil {
+			expectedToken = current.TokenV2
+		}
+	}
+	return deleteAccountByIdentity(pool, dir, email, expectedToken)
+}
+
+// deleteAccountByIdentity optionally binds a destructive cleanup to the token
+// that was live when the account was selected. A concurrent re-import with the
+// same email must never cause a stale cleanup job to delete the replacement.
+func deleteAccountByIdentity(pool *AccountPool, dir, email, expectedToken string) error {
 	accountDeleteMu.Lock()
 	defer accountDeleteMu.Unlock()
 
@@ -671,12 +684,46 @@ func deleteAccountByEmail(pool *AccountPool, dir, email string) error {
 			continue
 		}
 		if got, _ := raw["user_email"].(string); strings.EqualFold(got, email) {
+			if expectedToken != "" {
+				if token, _ := raw["token_v2"].(string); token != expectedToken {
+					continue
+				}
+			}
 			target = path
 			break
 		}
 	}
 	if target == "" {
 		return os.ErrNotExist
+	}
+	unlockFile, err := lockAccountFilePath(target)
+	if err != nil {
+		return err
+	}
+	defer unlockFile()
+	// Revalidate after taking the same path lock used by saveAccountFile.
+	// A concurrent save/delete must never remove a newly replaced account.
+	latest, err := os.ReadFile(target)
+	if err != nil {
+		return err
+	}
+	var latestRaw map[string]interface{}
+	if err := json.Unmarshal(latest, &latestRaw); err != nil {
+		return err
+	}
+	if got, _ := latestRaw["user_email"].(string); !strings.EqualFold(got, email) {
+		return os.ErrNotExist
+	}
+	if expectedToken != "" {
+		if got, _ := latestRaw["token_v2"].(string); got != expectedToken {
+			return fmt.Errorf("account identity changed during deletion; replacement retained")
+		}
+		if pool != nil {
+			current := pool.getByEmailAnyState(email)
+			if current == nil || current.TokenV2 != expectedToken {
+				return fmt.Errorf("account identity changed during deletion; replacement retained")
+			}
+		}
 	}
 	if err := os.Remove(target); err != nil {
 		return err

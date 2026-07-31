@@ -166,6 +166,7 @@ func handleBackupRestore(w http.ResponseWriter, r *http.Request, pool *AccountPo
 	}
 
 	applyDashboardBackupSettings(*backup.Settings)
+	globalSessionManager.Clear()
 	log.Printf("[backup] restored %d account(s) and dashboard settings", len(restoredAccounts))
 
 	w.Header().Set("Content-Type", "application/json")
@@ -350,11 +351,11 @@ func replaceAccountFilesAndPool(pool *AccountPool, accountsDir string, accounts 
 	pool.index.Store(0)
 	pool.mu.Unlock()
 	pool.liveQuotaMu.Lock()
-	pool.liveQuotaInflight = make(map[*Account]bool)
+	pool.liveQuotaFlights = make(map[*Account]*quotaRefreshFlight)
+	pool.quotaGeneration = make(map[*Account]uint64)
+	pool.quotaApplied = make(map[*Account]uint64)
 	pool.liveQuotaMu.Unlock()
-	for _, acc := range accounts {
-		registerModelEntries(acc.Models)
-	}
+	rebuildDynamicModelMap(accounts)
 	return nil
 }
 
@@ -479,6 +480,7 @@ func applyDashboardBackupSettings(settings dashboardBackupSettings) {
 	AppConfig.Proxy.ToolChoicePolicy, _ = normalizeToolChoicePolicy(settings.ToolChoicePolicy)
 	AppConfig.Server.DebugLogging = settings.DebugLogging
 	AppConfig.Proxy.NotionProxy = strings.TrimSpace(settings.NotionProxy)
+	setRuntimeNotionProxy(AppConfig, AppConfig.Proxy.NotionProxy)
 	SetDebugLoggingEnabled(settings.DebugLogging)
 	if AppConfig.Proxy.NotionProxy != previousProxy {
 		RebuildChromeTransport()

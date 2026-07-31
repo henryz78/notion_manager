@@ -10,6 +10,8 @@ export interface AccountInfo {
   space: string
   exhausted: boolean
   permanent: boolean
+  quota_unlimited?: boolean
+  ai_disabled?: boolean
   // no_workspace is true when the backend probed loadUserContent and found
   // that user_root.space_views is empty — the /ai SPA gets stuck on a
   // skeleton screen for these accounts. Dashboard treats them as
@@ -114,9 +116,11 @@ export interface RefreshStatus {
 export interface AccountSummary {
   exhausted_only: number
   no_workspace: number
+  ai_disabled: number
   auth_invalid: number
   disabled: number
   premium_accounts: number
+  unlimited_accounts: number
   exhausted_trials: number
   personal_instructions_configured: number
   personal_instructions_missing: number

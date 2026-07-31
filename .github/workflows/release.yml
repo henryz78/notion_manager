@@ -34,6 +34,7 @@ jobs:
       - name: Run Go checks
         run: |
           go test ./...
+          go test -race ./internal/proxy
           go vet ./...
 
   build:

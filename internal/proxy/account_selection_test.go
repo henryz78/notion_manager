@@ -69,7 +69,7 @@ func TestGetBestAccountReturnsNilWhenOnlyIneligibleAccounts(t *testing.T) {
 	pool := &AccountPool{
 		accounts: []*Account{
 			{
-				PlanType:  "business",
+				PlanType:  "personal",
 				UserEmail: "blocked@example.com",
 				QuotaInfo: &QuotaInfo{
 					IsEligible:     false,
@@ -251,6 +251,32 @@ func TestIsQuotaExhaustedUsesEligibilityFlag(t *testing.T) {
 
 	if got := pool.isQuotaExhausted(pool.accounts[0]); !got {
 		t.Fatalf("expected account with is_eligible=false to be exhausted")
+	}
+}
+
+func TestGetAccountDetailsMarksTeamQuotaUnlimited(t *testing.T) {
+	now := time.Now()
+	acc := &Account{
+		UserEmail:            "team@example.com",
+		PlanType:             "team",
+		QuotaInfo:            &QuotaInfo{IsEligible: false, SpaceLimit: 75, SpaceUsage: 999},
+		QuotaExhaustedAt:     &now,
+		PermanentlyExhausted: true,
+	}
+	pool := &AccountPool{accounts: []*Account{acc}}
+
+	details := pool.GetAccountDetails()
+	if len(details) != 1 {
+		t.Fatalf("details len=%d want 1", len(details))
+	}
+	if details[0]["quota_unlimited"] != true {
+		t.Fatalf("quota_unlimited missing: %#v", details[0])
+	}
+	if details[0]["exhausted"] != false || details[0]["permanent"] != false {
+		t.Fatalf("legacy Basic state must not disable Team plan: %#v", details[0])
+	}
+	if got := pool.GetBestAccount(); got != acc {
+		t.Fatalf("Team account should remain selectable, got %#v", got)
 	}
 }
 
@@ -491,7 +517,7 @@ func TestBasicRemainingUsesMostConstrainedQuota(t *testing.T) {
 	}
 }
 
-func TestIsFreePlanTreatsPersonalWithPremiumAsPaid(t *testing.T) {
+func TestIsFreePlanDoesNotTreatPremiumCreditsAsPlanEvidence(t *testing.T) {
 	acc := &Account{
 		PlanType: "personal",
 		QuotaInfo: &QuotaInfo{
@@ -501,14 +527,20 @@ func TestIsFreePlanTreatsPersonalWithPremiumAsPaid(t *testing.T) {
 		},
 	}
 
-	if isFreePlan(acc) {
-		t.Fatal("expected personal account with premium credits to be treated as paid")
+	if !isFreePlan(acc) {
+		t.Fatal("Personal plan must remain a complimentary plan despite private Premium fields")
 	}
 }
 
 func TestCurrentNotionAIPlanClassification(t *testing.T) {
 	if !isFreePlan(&Account{PlanType: "plus", QuotaInfo: &QuotaInfo{}}) {
-		t.Fatal("Plus without a live premium signal should be treated as a complimentary trial")
+		t.Fatal("Plus should be treated as a complimentary trial")
+	}
+	if !isFreePlan(&Account{PlanType: "plus", QuotaInfo: &QuotaInfo{HasPremium: true, PremiumBalance: 300}}) {
+		t.Fatal("Plus Premium diagnostics must not be treated as workspace-plan evidence")
+	}
+	if isFreePlan(&Account{PlanType: "team", QuotaInfo: &QuotaInfo{}}) {
+		t.Fatal("Team should be treated as an included-AI paid plan")
 	}
 	if isFreePlan(&Account{PlanType: "business", QuotaInfo: &QuotaInfo{}}) {
 		t.Fatal("Business should be treated as including full Notion AI")

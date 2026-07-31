@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -144,18 +146,22 @@ type anthropicSSEFrame struct {
 }
 
 type anthropicStreamBridgeWriter struct {
-	header  http.Header
-	status  int
-	mu      sync.Mutex
-	buffer  strings.Builder
-	errBody bytes.Buffer
-	frames  chan string
+	header    http.Header
+	status    int
+	mu        sync.Mutex
+	buffer    strings.Builder
+	errBody   bytes.Buffer
+	frames    chan string
+	aborted   chan struct{}
+	abortOnce sync.Once
+	closeOnce sync.Once
 }
 
 func newAnthropicStreamBridgeWriter() *anthropicStreamBridgeWriter {
 	return &anthropicStreamBridgeWriter{
-		header: make(http.Header),
-		frames: make(chan string, 64),
+		header:  make(http.Header),
+		frames:  make(chan string, 64),
+		aborted: make(chan struct{}),
 	}
 }
 
@@ -198,7 +204,11 @@ func (w *anthropicStreamBridgeWriter) Write(p []byte) (int, error) {
 	w.mu.Unlock()
 
 	for _, frame := range frames {
-		w.frames <- frame
+		select {
+		case w.frames <- frame:
+		case <-w.aborted:
+			return 0, context.Canceled
+		}
 	}
 	return len(p), nil
 }
@@ -206,14 +216,25 @@ func (w *anthropicStreamBridgeWriter) Write(p []byte) (int, error) {
 func (w *anthropicStreamBridgeWriter) Flush() {}
 
 func (w *anthropicStreamBridgeWriter) Close() {
-	w.mu.Lock()
-	leftover := strings.TrimSpace(w.buffer.String())
-	w.buffer.Reset()
-	w.mu.Unlock()
-	if leftover != "" {
-		w.frames <- leftover
-	}
-	close(w.frames)
+	w.closeOnce.Do(func() {
+		w.mu.Lock()
+		leftover := strings.TrimSpace(w.buffer.String())
+		w.buffer.Reset()
+		w.mu.Unlock()
+		if leftover != "" {
+			select {
+			case w.frames <- leftover:
+			case <-w.aborted:
+			}
+		}
+		close(w.frames)
+	})
+}
+
+func (w *anthropicStreamBridgeWriter) Abort() {
+	w.abortOnce.Do(func() {
+		close(w.aborted)
+	})
 }
 
 func (w *anthropicStreamBridgeWriter) Status() int {
@@ -396,6 +417,18 @@ func (t *openAIChatStreamTranscoder) HandleFrame(frame anthropicSSEFrame) error 
 			t.flusher.Flush()
 		}
 		return err
+	case "error":
+		t.done = true
+		errorPayload, _ := payload["error"].(map[string]interface{})
+		if errorPayload == nil {
+			errorPayload = map[string]interface{}{
+				"type":    "api_error",
+				"message": "upstream stream interrupted",
+			}
+		}
+		// An interrupted OpenAI Chat stream must end with an explicit error
+		// object, not a normal finish_reason or [DONE] marker.
+		return sendOpenAISSE(t.w, t.flusher, map[string]interface{}{"error": errorPayload})
 	}
 	return nil
 }
@@ -823,6 +856,27 @@ func (t *openAIResponsesStreamTranscoder) HandleFrame(frame anthropicSSEFrame) e
 		})
 	case "message_stop":
 		return nil
+	case "error":
+		if err := t.ensureCreated(); err != nil {
+			return err
+		}
+		if t.completedSent {
+			return nil
+		}
+		t.completedSent = true
+		errorPayload, _ := payload["error"].(map[string]interface{})
+		if errorPayload == nil {
+			errorPayload = map[string]interface{}{
+				"type":    "api_error",
+				"message": "upstream stream interrupted",
+			}
+		}
+		response := t.buildFinalResponseObject()
+		response["status"] = "failed"
+		response["error"] = errorPayload
+		return t.emit("response.failed", map[string]interface{}{
+			"response": response,
+		})
 	}
 	return nil
 }
@@ -835,8 +889,14 @@ func HandleOpenAIChatCompletions(pool *AccountPool) http.HandlerFunc {
 			return
 		}
 
+		r.Body = http.MaxBytesReader(w, r.Body, maxAnthropicRequestBodyBytes)
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request body exceeds 64 MiB", "invalid_request_error", "")
+				return
+			}
 			writeOpenAIError(w, http.StatusBadRequest, "failed to read request body: "+err.Error(), "invalid_request_error", "")
 			return
 		}
@@ -895,8 +955,14 @@ func HandleOpenAIResponses(pool *AccountPool) http.HandlerFunc {
 			return
 		}
 
+		r.Body = http.MaxBytesReader(w, r.Body, maxAnthropicRequestBodyBytes)
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request body exceeds 64 MiB", "invalid_request_error", "")
+				return
+			}
 			writeOpenAIError(w, http.StatusBadRequest, "failed to read request body: "+err.Error(), "invalid_request_error", "")
 			return
 		}
@@ -948,8 +1014,16 @@ func HandleOpenAIResponses(pool *AccountPool) http.HandlerFunc {
 }
 
 func streamAnthropicAsOpenAIChat(w http.ResponseWriter, r *http.Request, anthropicHandler http.HandlerFunc, anthropicReq *AnthropicRequest, responseID string, created int64, includeUsage bool) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeOpenAIError(w, http.StatusInternalServerError, "streaming not supported", "api_error", "")
+		return
+	}
+	streamContext, cancel := context.WithCancel(r.Context())
+	defer cancel()
 	bridge := newAnthropicStreamBridgeWriter()
-	innerReq, err := newAnthropicBridgeRequest(r, anthropicReq)
+	defer bridge.Abort()
+	innerReq, err := newAnthropicBridgeRequest(r.WithContext(streamContext), anthropicReq)
 	if err != nil {
 		writeOpenAIError(w, http.StatusInternalServerError, err.Error(), "api_error", "")
 		return
@@ -959,11 +1033,6 @@ func streamAnthropicAsOpenAIChat(w http.ResponseWriter, r *http.Request, anthrop
 		bridge.Close()
 	}()
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeOpenAIError(w, http.StatusInternalServerError, "streaming not supported", "api_error", "")
-		return
-	}
 	transcoder := newOpenAIChatStreamTranscoder(w, flusher, responseID, anthropicReq.Model, created, includeUsage)
 	headersSent := false
 	frameCount := 0
@@ -998,8 +1067,16 @@ func streamAnthropicAsOpenAIChat(w http.ResponseWriter, r *http.Request, anthrop
 }
 
 func streamAnthropicAsOpenAIResponses(w http.ResponseWriter, r *http.Request, anthropicHandler http.HandlerFunc, anthropicReq *AnthropicRequest, responseID string, created int64) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeOpenAIError(w, http.StatusInternalServerError, "streaming not supported", "api_error", "")
+		return
+	}
+	streamContext, cancel := context.WithCancel(r.Context())
+	defer cancel()
 	bridge := newAnthropicStreamBridgeWriter()
-	innerReq, err := newAnthropicBridgeRequest(r, anthropicReq)
+	defer bridge.Abort()
+	innerReq, err := newAnthropicBridgeRequest(r.WithContext(streamContext), anthropicReq)
 	if err != nil {
 		writeOpenAIError(w, http.StatusInternalServerError, err.Error(), "api_error", "")
 		return
@@ -1009,11 +1086,6 @@ func streamAnthropicAsOpenAIResponses(w http.ResponseWriter, r *http.Request, an
 		bridge.Close()
 	}()
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeOpenAIError(w, http.StatusInternalServerError, "streaming not supported", "api_error", "")
-		return
-	}
 	transcoder := newOpenAIResponsesStreamTranscoder(w, flusher, responseID, anthropicReq.Model, created)
 	headersSent := false
 	frameCount := 0
@@ -1451,9 +1523,18 @@ func convertOpenAIResponsesInputToAnthropic(instructions string, input interface
 		systemParts = append(systemParts, trimmed)
 	}
 	var anthropicMsgs []AnthropicMessage
-	flushPendingUser := func(parts []interface{}) {
-		if len(parts) > 0 {
-			anthropicMsgs = append(anthropicMsgs, AnthropicMessage{Role: "user", Content: parts})
+	var pendingUserParts []interface{}
+	var pendingAssistantParts []interface{}
+	flushPendingUser := func() {
+		if len(pendingUserParts) > 0 {
+			anthropicMsgs = append(anthropicMsgs, AnthropicMessage{Role: "user", Content: pendingUserParts})
+			pendingUserParts = nil
+		}
+	}
+	flushPendingAssistant := func() {
+		if len(pendingAssistantParts) > 0 {
+			anthropicMsgs = append(anthropicMsgs, AnthropicMessage{Role: "assistant", Content: pendingAssistantParts})
+			pendingAssistantParts = nil
 		}
 	}
 
@@ -1463,7 +1544,6 @@ func convertOpenAIResponsesInputToAnthropic(instructions string, input interface
 	case map[string]interface{}:
 		return convertOpenAIResponsesInputToAnthropic(instructions, []interface{}{v})
 	case []interface{}:
-		var pendingUserParts []interface{}
 		for _, raw := range v {
 			item, ok := raw.(map[string]interface{})
 			if !ok {
@@ -1473,8 +1553,8 @@ func convertOpenAIResponsesInputToAnthropic(instructions string, input interface
 			itemType := stringValue(item["type"])
 			switch {
 			case role != "":
-				flushPendingUser(pendingUserParts)
-				pendingUserParts = nil
+				flushPendingUser()
+				flushPendingAssistant()
 				msg, err := convertGenericOpenAIMessageToAnthropic(role, item)
 				if err != nil {
 					return nil, nil, err
@@ -1487,22 +1567,30 @@ func convertOpenAIResponsesInputToAnthropic(instructions string, input interface
 				}
 				anthropicMsgs = append(anthropicMsgs, msg)
 			case itemType == "message":
-				flushPendingUser(pendingUserParts)
-				pendingUserParts = nil
+				flushPendingUser()
+				flushPendingAssistant()
 				msg, err := convertGenericOpenAIMessageToAnthropic(stringValue(item["role"]), item)
 				if err != nil {
 					return nil, nil, err
 				}
 				anthropicMsgs = append(anthropicMsgs, msg)
+			case itemType == "function_call":
+				flushPendingUser()
+				content, err := convertOpenAIFunctionCallToAnthropicContent(item)
+				if err != nil {
+					return nil, nil, err
+				}
+				pendingAssistantParts = append(pendingAssistantParts, content)
 			case itemType == "function_call_output":
-				flushPendingUser(pendingUserParts)
-				pendingUserParts = nil
+				flushPendingUser()
+				flushPendingAssistant()
 				content, err := convertOpenAIToolOutputToAnthropicContent(item)
 				if err != nil {
 					return nil, nil, err
 				}
 				anthropicMsgs = append(anthropicMsgs, AnthropicMessage{Role: "user", Content: content})
 			case isOpenAIInputContentType(itemType):
+				flushPendingAssistant()
 				blocks, err := convertOpenAIContentItemsToAnthropicBlocks([]interface{}{item}, true)
 				if err != nil {
 					return nil, nil, err
@@ -1512,7 +1600,8 @@ func convertOpenAIResponsesInputToAnthropic(instructions string, input interface
 				return nil, nil, fmt.Errorf("unsupported responses input item type %q", itemType)
 			}
 		}
-		flushPendingUser(pendingUserParts)
+		flushPendingUser()
+		flushPendingAssistant()
 	default:
 		return nil, nil, fmt.Errorf("unsupported input type %T", input)
 	}
@@ -1522,6 +1611,45 @@ func convertOpenAIResponsesInputToAnthropic(instructions string, input interface
 		system = strings.Join(systemParts, "\n\n")
 	}
 	return system, anthropicMsgs, nil
+}
+
+func convertOpenAIFunctionCallToAnthropicContent(item map[string]interface{}) (interface{}, error) {
+	callID := strings.TrimSpace(stringValue(item["call_id"]))
+	if callID == "" {
+		callID = strings.TrimSpace(stringValue(item["id"]))
+	}
+	if callID == "" {
+		return nil, fmt.Errorf("function_call.call_id is required")
+	}
+	name := strings.TrimSpace(stringValue(item["name"]))
+	if name == "" {
+		return nil, fmt.Errorf("function_call.name is required")
+	}
+
+	arguments := "{}"
+	switch value := item["arguments"].(type) {
+	case nil:
+	case string:
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			arguments = trimmed
+		}
+	default:
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("function_call %s has invalid arguments: %w", name, err)
+		}
+		arguments = string(encoded)
+	}
+	if !json.Valid([]byte(arguments)) {
+		return nil, fmt.Errorf("function_call %s has invalid JSON arguments", name)
+	}
+
+	return map[string]interface{}{
+		"type":  "tool_use",
+		"id":    callID,
+		"name":  name,
+		"input": json.RawMessage(arguments),
+	}, nil
 }
 
 func convertGenericOpenAIMessageToAnthropic(role string, item map[string]interface{}) (AnthropicMessage, error) {

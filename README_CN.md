@@ -83,7 +83,7 @@ export OPENAI_API_KEY=<your-api-key>
 ### 1. 多账号池与自动故障转移
 
 - 从 `accounts/` 目录加载任意数量的账号 JSON
-- 优先选择 Business / Enterprise，其次参考实时 premium 信号，不再把未公开定义的私有计数直接相加排序
+- 优先选择 Team / Business / Enterprise 等包含 AI 的套餐；V2 私有积分字段仅作诊断，不参与套餐识别或路由
 - **请求级实时额度校验**（默认 5s 缓存，由 `refresh.live_check_seconds` 控制）：刚被打满的账号不会污染下一次调用
 - 自动跳过额度耗尽 / 没有 workspace 的账号
 - 试用额度用完的账号会保留并继续复查，后续升级套餐后可自动恢复

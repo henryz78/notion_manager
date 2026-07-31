@@ -268,6 +268,97 @@ func TestStartRequiresAuth(t *testing.T) {
 	}
 }
 
+func TestDeleteAccountByIdentityRetainsSameEmailReplacement(t *testing.T) {
+	dir := t.TempDir()
+	replacement := &Account{
+		TokenV2:   "new-token",
+		UserID:    "new-user",
+		UserEmail: "same-email@example.com",
+		SpaceID:   "new-space",
+		PlanType:  "team",
+	}
+	filename, err := SaveAccountToFile(replacement, dir)
+	if err != nil {
+		t.Fatalf("save replacement account: %v", err)
+	}
+	pool := newPool(replacement)
+
+	err = deleteAccountByIdentity(pool, dir, replacement.UserEmail, "old-token")
+	if err == nil {
+		t.Fatal("stale identity deletion unexpectedly removed the replacement")
+	}
+
+	path := filepath.Join(dir, filename)
+	raw, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("replacement account file was removed: %v", readErr)
+	}
+	var saved struct {
+		TokenV2 string `json:"token_v2"`
+	}
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatalf("replacement account file is invalid: %v", err)
+	}
+	if saved.TokenV2 != replacement.TokenV2 {
+		t.Fatalf("replacement token changed: got %q want %q", saved.TokenV2, replacement.TokenV2)
+	}
+	if current := pool.GetByEmail(replacement.UserEmail); current == nil || current.TokenV2 != replacement.TokenV2 {
+		t.Fatalf("replacement account was removed from pool: %#v", current)
+	}
+}
+
+func TestDeleteAccountByIdentityCanDeleteUnavailableAccount(t *testing.T) {
+	dir := t.TempDir()
+	account := &Account{
+		TokenV2:          "real-token",
+		UserID:           "user-id",
+		UserEmail:        "disabled@example.com",
+		SpaceID:          "space-id",
+		ManuallyDisabled: true,
+	}
+	filename, err := SaveAccountToFile(account, dir)
+	if err != nil {
+		t.Fatalf("save unavailable account: %v", err)
+	}
+	pool := newPool(account)
+
+	if err := deleteAccountByIdentity(pool, dir, account.UserEmail, account.TokenV2); err != nil {
+		t.Fatalf("delete unavailable account: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, filename)); !os.IsNotExist(err) {
+		t.Fatalf("unavailable account file still exists: %v", err)
+	}
+	if pool.Count() != 0 {
+		t.Fatalf("pool count=%d, want 0", pool.Count())
+	}
+}
+
+func TestDeleteAccountByEmailBindsUnavailableAccountIdentity(t *testing.T) {
+	dir := t.TempDir()
+	account := &Account{
+		TokenV2:          "current-token",
+		UserID:           "user-id",
+		UserEmail:        "disabled-email-delete@example.com",
+		SpaceID:          "space-id",
+		ManuallyDisabled: true,
+	}
+	filename, err := SaveAccountToFile(account, dir)
+	if err != nil {
+		t.Fatalf("save unavailable account: %v", err)
+	}
+	pool := newPool(account)
+
+	if err := deleteAccountByEmail(pool, dir, account.UserEmail); err != nil {
+		t.Fatalf("delete unavailable account by email: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, filename)); !os.IsNotExist(err) {
+		t.Fatalf("unavailable account file still exists: %v", err)
+	}
+	if pool.Count() != 0 {
+		t.Fatalf("pool count=%d, want 0", pool.Count())
+	}
+}
+
 func TestEventsStreamSSE(t *testing.T) {
 	h := newRegHandlerHarness(t)
 

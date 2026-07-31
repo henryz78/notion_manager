@@ -259,3 +259,45 @@ func TestSummarizeAccountsAggregates(t *testing.T) {
 		t.Errorf("premium totals: balance=%d limit=%d", s.TotalPremiumBalance, s.TotalPremiumLimit)
 	}
 }
+
+func TestSummarizeAccountsExcludesUnlimitedPlansFromBasicTotals(t *testing.T) {
+	accounts := []map[string]interface{}{
+		account("free", "free@x", map[string]interface{}{
+			"remaining": 25, "space_usage": 50, "space_limit": 75,
+			"space_remaining": 25, "user_usage": 50, "user_limit": 75, "user_remaining": 25,
+		}),
+		account("paid", "paid@x", map[string]interface{}{
+			"plan": "team", "quota_unlimited": true,
+			"remaining": 0, "space_usage": 999, "space_limit": 75,
+			"space_remaining": 0, "user_usage": 999, "user_limit": 75, "user_remaining": 0,
+		}),
+	}
+
+	s := summarizeAccounts(accounts)
+	if s.UnlimitedAccounts != 1 {
+		t.Fatalf("UnlimitedAccounts: want 1 got %d", s.UnlimitedAccounts)
+	}
+	if s.TotalRemaining != 25 || s.TotalSpaceUsage != 50 || s.TotalSpaceLimit != 75 ||
+		s.TotalUserUsage != 50 || s.TotalUserLimit != 75 {
+		t.Fatalf("legacy paid counters leaked into Basic totals: %+v", s)
+	}
+}
+
+func TestAIDisabledAccountsAreSeparatedFromAvailableAndUnlimited(t *testing.T) {
+	disabled := account("paid", "paid@x", map[string]interface{}{
+		"plan": "team", "quota_unlimited": false, "ai_disabled": true,
+	})
+	available := account("free", "free@x", map[string]interface{}{})
+	accounts := []map[string]interface{}{disabled, available}
+
+	summary := summarizeAccounts(accounts)
+	if summary.AIDisabled != 1 || summary.UnlimitedAccounts != 0 {
+		t.Fatalf("AI-disabled summary = %+v", summary)
+	}
+	if got := filterAccountDetailsByStatus(accounts, "available"); len(got) != 1 || mapString(got[0], "email") != "free@x" {
+		t.Fatalf("available filter included AI-disabled account: %#v", got)
+	}
+	if got := filterAccountDetailsByStatus(accounts, "ai_disabled"); len(got) != 1 || mapString(got[0], "email") != "paid@x" {
+		t.Fatalf("ai_disabled filter = %#v", got)
+	}
+}

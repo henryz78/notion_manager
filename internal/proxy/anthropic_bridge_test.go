@@ -255,6 +255,18 @@ func TestParseToolCallsDoesNotTreatMalformedSentinelAsAction(t *testing.T) {
 	}
 }
 
+func TestParseToolCallsDoesNotTreatOrdinaryNamedJSONAsAction(t *testing.T) {
+	content := `{"name":"Alice","answer":"ordinary JSON"}`
+	toolCalls, remaining, ok := parseToolCalls(content)
+	if ok || len(toolCalls) != 0 || remaining != content {
+		t.Fatalf("ordinary named JSON became a tool call: calls=%+v remaining=%q ok=%v", toolCalls, remaining, ok)
+	}
+	prepared := prepareToolBridgeResponse(content, nil, map[string]struct{}{"lookup": {}}, nil)
+	if prepared.HasCalls || prepared.Remaining != content {
+		t.Fatalf("ordinary named JSON was removed by bridge preparation: %+v", prepared)
+	}
+}
+
 func TestPrepareToolBridgeResponsePreservesDeclaredDoneTool(t *testing.T) {
 	prepared := prepareToolBridgeResponse(
 		`{"name":"done","arguments":{"value":"client action"}}`,

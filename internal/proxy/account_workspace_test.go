@@ -102,12 +102,12 @@ func TestApplyWorkspaceCountStampsAndSignalsChange(t *testing.T) {
 	pool := NewAccountPool()
 	acc := &Account{UserEmail: "u@example.com"}
 
-	prev, changed := pool.applyWorkspaceCount(acc, 0)
+	prev, changed, _ := pool.applyWorkspaceProfile(acc, WorkspaceProbeResult{Count: 0})
 	if !changed || prev != 0 || acc.SpaceCount != 0 || acc.WorkspaceCheckedAt == nil {
 		t.Fatalf("first probe should set checked_at and report changed=true; got prev=%d changed=%v acc=%+v", prev, changed, acc)
 	}
 
-	prev, changed = pool.applyWorkspaceCount(acc, 0)
+	prev, changed, _ = pool.applyWorkspaceProfile(acc, WorkspaceProbeResult{Count: 0})
 	if changed {
 		t.Fatalf("re-probing the same value must not report changed=true (would spam logs)")
 	}
@@ -115,7 +115,7 @@ func TestApplyWorkspaceCountStampsAndSignalsChange(t *testing.T) {
 		t.Fatalf("prev = %d, want 0", prev)
 	}
 
-	prev, changed = pool.applyWorkspaceCount(acc, 3)
+	prev, changed, _ = pool.applyWorkspaceProfile(acc, WorkspaceProbeResult{Count: 3})
 	if !changed || prev != 0 || acc.SpaceCount != 3 {
 		t.Fatalf("0→3 transition not recorded: prev=%d changed=%v space_count=%d", prev, changed, acc.SpaceCount)
 	}
@@ -141,7 +141,9 @@ func TestRefreshAndPersistAccountSavesWorkspace(t *testing.T) {
 		},
 	)
 	defer restoreFetch()
-	restoreProbe := withWorkspaceProbe(t, func(*Account) (int, error) { return 0, nil })
+	restoreProbe := withWorkspaceProbe(t, func(*Account) (WorkspaceProbeResult, error) {
+		return WorkspaceProbeResult{}, nil
+	})
 	defer restoreProbe()
 
 	if err := pool.RefreshAndPersistAccount(context.Background(), dir, email); err != nil {
@@ -185,8 +187,8 @@ func TestRefreshAndPersistAccountSurvivesProbeError(t *testing.T) {
 		func(*Account) ([]ModelEntry, error) { return nil, nil },
 	)
 	defer restoreFetch()
-	restoreProbe := withWorkspaceProbe(t, func(*Account) (int, error) {
-		return 0, errors.New("notion 503")
+	restoreProbe := withWorkspaceProbe(t, func(*Account) (WorkspaceProbeResult, error) {
+		return WorkspaceProbeResult{}, errors.New("notion 503")
 	})
 	defer restoreProbe()
 

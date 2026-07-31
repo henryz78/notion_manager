@@ -313,7 +313,7 @@ func (m *AccountBatchManager) execute(action string, account *Account) accountBa
 		}
 		return accountBatchExecution{status: "success", message: "已启用"}
 	case AccountBatchDelete:
-		if err := deleteAccountByEmail(m.pool, m.accountsDir, account.UserEmail); err != nil {
+		if err := deleteAccountByIdentity(m.pool, m.accountsDir, account.UserEmail, account.TokenV2); err != nil {
 			return accountBatchExecution{status: "failed", message: err.Error()}
 		}
 		return accountBatchExecution{status: "success", message: "已删除"}
@@ -334,7 +334,7 @@ func (m *AccountBatchManager) execute(action string, account *Account) accountBa
 			}
 			return accountBatchExecution{status: "skipped", message: "已设置，保留账号", configured: &configured}
 		}
-		if err := deleteAccountByEmail(m.pool, m.accountsDir, account.UserEmail); err != nil {
+		if err := deleteAccountByIdentity(m.pool, m.accountsDir, account.UserEmail, account.TokenV2); err != nil {
 			return accountBatchExecution{status: "failed", message: err.Error(), configured: &configured}
 		}
 		return accountBatchExecution{status: "success", message: "未设置，已删除", configured: &configured}
@@ -342,7 +342,14 @@ func (m *AccountBatchManager) execute(action string, account *Account) accountBa
 		if !isExhaustedComplimentaryAccount(account) {
 			return accountBatchExecution{status: "skipped", message: "不符合清理条件，已保留"}
 		}
-		if err := deleteAccountByEmail(m.pool, m.accountsDir, account.UserEmail); err != nil {
+		confirmed, err := confirmExhaustedComplimentaryAccount(m.pool, account)
+		if err != nil {
+			return accountBatchExecution{status: "failed", message: err.Error()}
+		}
+		if !confirmed {
+			return accountBatchExecution{status: "skipped", message: "实时复核后仍可用，已保留"}
+		}
+		if err := deleteAccountByIdentity(m.pool, m.accountsDir, account.UserEmail, account.TokenV2); err != nil {
 			return accountBatchExecution{status: "failed", message: err.Error()}
 		}
 		return accountBatchExecution{status: "success", message: "已删除用完试用额度的账号"}

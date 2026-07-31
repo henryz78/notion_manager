@@ -13,6 +13,8 @@ import (
 	"time"
 )
 
+var attachmentUploader = UploadFileToNotion
+
 // UploadFileToNotion executes the full 5-step Notion file upload flow:
 //
 //	Step 1: getUploadFileUrlForAssistantChatTranscriptUpload → get presigned S3 URL
@@ -21,9 +23,17 @@ import (
 //	Step 4: getTasks polling → wait for processing completion
 //	Step 5: (optional) getSignedFileUrls → get accessible URL
 //
+// sessionID is the inference thread that will receive the attachment.
+// createThread must be true only on the first turn, where the upload endpoint
+// creates that thread before inference. Continuations upload directly into the
+// existing thread with createThread=false.
+//
 // Returns an UploadedAttachment with the attachment:UUID:filename URL for transcript injection.
-func UploadFileToNotion(acc *Account, file *FileAttachment) (*UploadedAttachment, error) {
-	sessionID := generateUUIDv4()
+func UploadFileToNotion(acc *Account, file *FileAttachment, sessionID string, createThread bool) (*UploadedAttachment, error) {
+	if sessionID == "" {
+		sessionID = generateUUIDv4()
+		createThread = true
+	}
 	client := getChromeHTTPClient(30 * time.Second)
 
 	// Generate UUID-based filename preserving original extension
@@ -39,7 +49,7 @@ func UploadFileToNotion(acc *Account, file *FileAttachment) (*UploadedAttachment
 		Name:         uuidFileName,
 		ContentType:  file.ContentType,
 		ContentLen:   len(file.Data),
-		CreateThread: true,
+		CreateThread: createThread,
 		Pointer: NotionAssistantChatPointer{
 			SpaceID: acc.SpaceID,
 			Table:   "thread",

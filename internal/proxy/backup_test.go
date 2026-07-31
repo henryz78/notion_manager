@@ -66,6 +66,10 @@ func TestHandleAdminBackupDownloadIncludesAccountsAndDashboardSettings(t *testin
 
 func TestHandleAdminBackupRestoreReplacesAccountsAndPreservesRuntimeFiles(t *testing.T) {
 	accountsDir, configPath, pool := setupBackupTest(t)
+	globalSessionManager.Clear()
+	t.Cleanup(globalSessionManager.Clear)
+	sessionKey := "backup-restore-invalidation"
+	globalSessionManager.Set(sessionKey, newConversationSession("old@example.com"))
 	writeBackupTestAccount(t, accountsDir, "old.json", "old@example.com", "old-user", "old-space", "old-token", "old-cookie")
 	statePath := filepath.Join(accountsDir, ".token_stats.json")
 	stateData := []byte(`{"requests":42}`)
@@ -116,6 +120,9 @@ func TestHandleAdminBackupRestoreReplacesAccountsAndPreservesRuntimeFiles(t *tes
 	}
 	if pool.Count() != 1 || pool.GetAccountByEmail("new@example.com") == nil || pool.GetAccountByEmail("old@example.com") != nil {
 		t.Fatalf("pool was not replaced: %+v", pool.GetAccountDetails())
+	}
+	if globalSessionManager.Get(sessionKey) != nil {
+		t.Fatal("successful backup restore did not clear existing sessions")
 	}
 	if !pool.GetAccountByEmail("new@example.com").ManuallyDisabled {
 		t.Fatal("restored disabled state was lost")

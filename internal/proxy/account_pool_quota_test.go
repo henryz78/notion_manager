@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -58,7 +59,7 @@ func TestNextBestExcludingUsesServiceTiers(t *testing.T) {
 		t.Fatalf("expected first NextBest to be 'a', got %#v", first)
 	}
 
-	// After excluding 'a', the live premium signal wins over trial-only 'c'.
+	// After excluding 'a', equal-tier trial accounts keep rotation order.
 	tried := map[*Account]bool{a: true}
 	second := pool.NextBestExcluding(tried)
 	if second == nil || second.UserEmail != "b@example.com" {
@@ -127,7 +128,7 @@ func TestNextBestSkipsExhaustedAccounts(t *testing.T) {
 	}
 }
 
-func TestAccountQuotaPriorityUsesServiceTierWithoutCounterArithmetic(t *testing.T) {
+func TestAccountQuotaPriorityIgnoresSeparatePremiumCredits(t *testing.T) {
 	basicOnly := &Account{
 		UserEmail: "basic@example.com",
 		QuotaInfo: &QuotaInfo{IsEligible: true, SpaceLimit: 200, SpaceUsage: 50, UserLimit: 200, UserUsage: 50}, // 150
@@ -148,14 +149,8 @@ func TestAccountQuotaPriorityUsesServiceTierWithoutCounterArithmetic(t *testing.
 	if accountQuotaPriority(basicOnly) != 1 {
 		t.Fatalf("trial score: want 1, got %d", accountQuotaPriority(basicOnly))
 	}
-	if got := accountQuotaPriority(premiumLowBasic); got != 2 {
-		t.Fatalf("live premium signal score: want 2, got %d", got)
-	}
-
-	pool := newPool(basicOnly, premiumLowBasic)
-	got := pool.NextBest()
-	if got == nil || got.UserEmail != "premium@example.com" {
-		t.Fatalf("expected premium account to win, got %#v", got)
+	if got := accountQuotaPriority(premiumLowBasic); got != 1 {
+		t.Fatalf("private Premium fields must not change the plan tier: want 1, got %d", got)
 	}
 }
 
@@ -190,6 +185,106 @@ func TestRefreshAccountQuotaNilAccount(t *testing.T) {
 	}
 }
 
+func TestRefreshAccountQuotaSingleflightsConcurrentSyncAndAsyncChecks(t *testing.T) {
+	previous := routingQuotaFetcher
+	t.Cleanup(func() { routingQuotaFetcher = previous })
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	routingQuotaFetcher = func(*Account) (*QuotaInfo, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return &QuotaInfo{IsEligible: true, SpaceLimit: 75, SpaceUsage: 1}, nil
+	}
+
+	acc := &Account{UserEmail: "singleflight@example.com", PlanType: "free"}
+	pool := newPool(acc)
+	pool.RefreshAccountQuotaAsync(acc)
+	<-started
+
+	result := make(chan bool, 1)
+	go func() {
+		result <- pool.RefreshAccountQuota(acc, 0)
+	}()
+	select {
+	case got := <-result:
+		t.Fatalf("synchronous follower returned before the shared check completed: %v", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("concurrent checks made %d upstream calls, want 1", got)
+	}
+	close(release)
+	if got := <-result; !got {
+		t.Fatal("shared eligible result was not returned to the synchronous caller")
+	}
+}
+
+func TestQuotaGenerationRejectsOlderResponse(t *testing.T) {
+	acc := &Account{UserEmail: "generation@example.com", PlanType: "free"}
+	pool := newPool(acc)
+	older := pool.nextQuotaGeneration(acc)
+	newer := pool.nextQuotaGeneration(acc)
+	if _, applied := pool.applyQuotaInfoIfCurrent(acc, &QuotaInfo{IsEligible: false}, newer); !applied {
+		t.Fatal("newest quota response was unexpectedly rejected")
+	}
+	if _, applied := pool.applyQuotaInfoIfCurrent(acc, &QuotaInfo{IsEligible: true}, older); applied {
+		t.Fatal("older quota response overwrote newer state")
+	}
+	if quota := acc.quotaInfoSnapshot(); quota == nil || quota.IsEligible {
+		t.Fatalf("newest exhausted state was lost: %#v", quota)
+	}
+}
+
+func TestQuotaGenerationNewerStartFailureDoesNotDiscardOlderSuccess(t *testing.T) {
+	acc := &Account{
+		UserEmail: "generation-failure@example.com",
+		PlanType:  "free",
+		QuotaInfo: &QuotaInfo{IsEligible: false},
+	}
+	pool := newPool(acc)
+
+	older := pool.nextQuotaGeneration(acc)
+	_ = pool.nextQuotaGeneration(acc) // newer request starts, then fails before applying
+
+	if _, applied := pool.applyQuotaInfoIfCurrent(acc, &QuotaInfo{IsEligible: true}, older); !applied {
+		t.Fatal("a newer failed check prevented an older successful response from being applied")
+	}
+	if quota := acc.quotaInfoSnapshot(); quota == nil || !quota.IsEligible {
+		t.Fatalf("older successful response was not retained after newer failure: %#v", quota)
+	}
+}
+
+func TestApplyWorkspaceProfileRefreshesIncludedAIPlan(t *testing.T) {
+	now := time.Now()
+	acc := &Account{
+		UserEmail:            "upgraded@example.com",
+		PlanType:             "plus",
+		QuotaInfo:            &QuotaInfo{IsEligible: false},
+		QuotaExhaustedAt:     &now,
+		PermanentlyExhausted: true,
+	}
+	pool := newPool(acc)
+	_, _, planChanged := pool.applyWorkspaceProfile(acc, WorkspaceProbeResult{
+		Count:     1,
+		PlanType:  "team",
+		AIEnabled: true,
+	})
+	if !planChanged || acc.planTypeSnapshot() != "team" {
+		t.Fatalf("plan was not refreshed: changed=%v plan=%q", planChanged, acc.planTypeSnapshot())
+	}
+	if pool.isQuotaExhausted(acc) {
+		t.Fatal("upgraded included-AI plan remained exhausted")
+	}
+	quota := acc.quotaSnapshot()
+	if quota.ExhaustedAt != nil || quota.PermanentlyExhausted {
+		t.Fatalf("legacy trial flags were not cleared: %#v", quota)
+	}
+}
+
 func TestApplyQuotaInfoMarksAndClearsExhaustion(t *testing.T) {
 	pool := NewAccountPool()
 	now := time.Now()
@@ -220,19 +315,61 @@ func TestApplyQuotaInfoMarksAndClearsExhaustion(t *testing.T) {
 		t.Fatal("complimentary trial exhaustion should be retained as unavailable")
 	}
 
-	// Business includes full Notion AI, so exhaustion only marks timestamp even
-	// if the private premium fields are empty.
-	paid := &Account{UserEmail: "biz@example.com", PlanType: "business"}
-	pool.applyQuotaInfo(paid, &QuotaInfo{
-		IsEligible: false,
-		SpaceLimit: 200, SpaceUsage: 200,
-		UserLimit: 200, UserUsage: 200,
-	})
-	if paid.PermanentlyExhausted {
-		t.Fatal("Business plan with full Notion AI must not be marked as trial exhausted")
+	// Notion's legacy/internal Team identifier is a paid included-AI plan.
+	// Stale complimentary quota flags and the old 75-point counters must not
+	// disable it.
+	paidExhaustedAt := time.Now()
+	paid := &Account{
+		UserEmail:            "team@example.com",
+		PlanType:             "team",
+		QuotaExhaustedAt:     &paidExhaustedAt,
+		PermanentlyExhausted: true,
 	}
-	if paid.QuotaExhaustedAt == nil {
-		t.Fatal("paid plan should still have QuotaExhaustedAt set")
+	res := pool.applyQuotaInfo(paid, &QuotaInfo{
+		IsEligible: false,
+		SpaceLimit: 75, SpaceUsage: 999,
+		UserLimit: 75, UserUsage: 999,
+	})
+	if !res.Unlimited {
+		t.Fatal("Team plan should be classified as current unlimited mode")
+	}
+	if paid.PermanentlyExhausted {
+		t.Fatal("Team plan must not retain a complimentary-trial exhaustion flag")
+	}
+	if paid.QuotaExhaustedAt != nil {
+		t.Fatal("Team plan must clear the old Basic exhaustion timestamp")
+	}
+	if pool.isQuotaExhausted(paid) {
+		t.Fatal("Team plan must remain selectable despite legacy Basic counters")
+	}
+}
+
+func TestRefreshAccountQuotaCachedTeamIgnoresLegacyBasicEligibility(t *testing.T) {
+	originalRoutingQuotaFetcher := routingQuotaFetcher
+	t.Cleanup(func() { routingQuotaFetcher = originalRoutingQuotaFetcher })
+	var calls atomic.Int32
+	routingQuotaFetcher = func(*Account) (*QuotaInfo, error) {
+		calls.Add(1)
+		return nil, errors.New("must not be called")
+	}
+	acc := &Account{
+		UserEmail: "team@example.com",
+		PlanType:  "team",
+		QuotaInfo: &QuotaInfo{
+			IsEligible: false,
+			SpaceLimit: 75,
+			SpaceUsage: 999,
+		},
+	}
+	pool := newPool(acc)
+	if !pool.RefreshAccountQuota(acc, time.Minute) {
+		t.Fatal("cached Team plan must ignore the legacy Basic eligibility flag")
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("included-AI plan made %d synchronous quota call(s)", calls.Load())
+	}
+	if got := accountQuotaPriority(&Account{PlanType: "team"}); got != 2 {
+		t.Fatalf("Team without cached quota priority=%d, want 2", got)
 	}
 }
 
@@ -252,7 +389,9 @@ func TestRefreshAllRechecksTrialExhaustedAccountForUpgradeRecovery(t *testing.T)
 		return &QuotaInfo{IsEligible: true}, nil
 	}
 	modelsFetcher = func(*Account) ([]ModelEntry, error) { return nil, nil }
-	workspaceProbe = func(*Account) (int, error) { return 1, nil }
+	workspaceProbe = func(*Account) (WorkspaceProbeResult, error) {
+		return WorkspaceProbeResult{Count: 1}, nil
+	}
 
 	now := time.Now()
 	acc := &Account{
@@ -273,6 +412,73 @@ func TestRefreshAllRechecksTrialExhaustedAccountForUpgradeRecovery(t *testing.T)
 	}
 	if acc.QuotaInfo == nil || !acc.QuotaInfo.IsEligible {
 		t.Fatalf("expected refreshed eligibility, got %#v", acc.QuotaInfo)
+	}
+}
+
+func TestRefreshAllUpdatesPlanClassificationFromWorkspaceProfile(t *testing.T) {
+	originalQuotaFetcher := quotaFetcher
+	originalModelsFetcher := modelsFetcher
+	originalWorkspaceProbe := workspaceProbe
+	t.Cleanup(func() {
+		quotaFetcher = originalQuotaFetcher
+		modelsFetcher = originalModelsFetcher
+		workspaceProbe = originalWorkspaceProbe
+	})
+	quotaFetcher = func(*Account) (*QuotaInfo, error) {
+		return &QuotaInfo{IsEligible: false, SpaceLimit: 75, SpaceUsage: 75}, nil
+	}
+	modelsFetcher = func(*Account) ([]ModelEntry, error) { return nil, nil }
+	workspaceProbe = func(*Account) (WorkspaceProbeResult, error) {
+		return WorkspaceProbeResult{Count: 1, PlanType: "team", AIEnabled: true}, nil
+	}
+
+	now := time.Now()
+	acc := &Account{
+		UserEmail:            "upgrade-plan@example.com",
+		PlanType:             "plus",
+		QuotaInfo:            &QuotaInfo{IsEligible: false},
+		QuotaExhaustedAt:     &now,
+		PermanentlyExhausted: true,
+	}
+	pool := newPool(acc)
+	pool.RefreshAll("")
+	if got := acc.planTypeSnapshot(); got != "team" {
+		t.Fatalf("refreshed plan=%q, want team", got)
+	}
+	if pool.isQuotaExhausted(acc) {
+		t.Fatal("refreshed Team account remained exhausted by legacy V1 counters")
+	}
+}
+
+func TestRefreshAllStopsIgnoringLegacyQuotaAfterPlanDowngrade(t *testing.T) {
+	originalQuotaFetcher := quotaFetcher
+	originalModelsFetcher := modelsFetcher
+	originalWorkspaceProbe := workspaceProbe
+	t.Cleanup(func() {
+		quotaFetcher = originalQuotaFetcher
+		modelsFetcher = originalModelsFetcher
+		workspaceProbe = originalWorkspaceProbe
+	})
+	quotaFetcher = func(*Account) (*QuotaInfo, error) {
+		return &QuotaInfo{IsEligible: false, SpaceLimit: 75, SpaceUsage: 75}, nil
+	}
+	modelsFetcher = func(*Account) ([]ModelEntry, error) { return nil, nil }
+	workspaceProbe = func(*Account) (WorkspaceProbeResult, error) {
+		return WorkspaceProbeResult{Count: 1, PlanType: "plus", AIEnabled: true}, nil
+	}
+
+	acc := &Account{
+		UserEmail: "downgrade-plan@example.com",
+		PlanType:  "team",
+		QuotaInfo: &QuotaInfo{IsEligible: true},
+	}
+	pool := newPool(acc)
+	pool.RefreshAll("")
+	if got := acc.planTypeSnapshot(); got != "plus" {
+		t.Fatalf("refreshed plan=%q, want plus", got)
+	}
+	if !pool.isQuotaExhausted(acc) {
+		t.Fatal("downgraded complimentary plan still ignored exhausted V1 state")
 	}
 }
 

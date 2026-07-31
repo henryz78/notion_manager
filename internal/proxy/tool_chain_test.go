@@ -51,6 +51,7 @@ func TestResolveToolChoiceMode(t *testing.T) {
 		{name: "anthropic any", choice: map[string]interface{}{"type": "any"}, want: "required"},
 		{name: "anthropic named", choice: map[string]interface{}{"type": "tool", "name": "Read"}, want: "force:Read"},
 		{name: "openai named", choice: map[string]interface{}{"type": "function", "function": map[string]interface{}{"name": "Read"}}, want: "force:Read"},
+		{name: "responses named", choice: map[string]interface{}{"type": "function", "name": "Read"}, want: "force:Read"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -83,8 +84,12 @@ func TestToolProtocolPrefixState(t *testing.T) {
 	}{
 		{"", false, true},
 		{"  <", false, true},
-		{`{"name":"action_1"`, true, false},
+		{`{"name":"action_1"`, false, true},
+		{`{"name":"action_1","arguments":`, true, false},
+		{`{"answer":`, false, false},
 		{`<|{"name":"action_1"`, true, false},
+		{"```go\nfmt.Println", false, false},
+		{"```json\n{\"answer\":", false, false},
 		{"ordinary answer", false, false},
 	}
 	for _, test := range tests {
@@ -117,6 +122,40 @@ func TestIncrementalToolStreamBuffersSplitToolJSON(t *testing.T) {
 	}
 	if stream.mode != "protocol" {
 		t.Fatalf("tool response mode = %q, want protocol", stream.mode)
+	}
+}
+
+func TestIncrementalToolStreamReleasesOrdinaryJSONAndCodeFence(t *testing.T) {
+	for _, chunks := range [][]string{
+		{`{"answer":`, `"plain JSON"}`},
+		{"```go\n", "fmt.Println(\"hello\")\n```"},
+		{"```json\n", `{"answer":`, "42}\n```"},
+	} {
+		stream := newIncrementalToolStream("auto")
+		var output strings.Builder
+		for _, chunk := range chunks {
+			output.WriteString(stream.Push(chunk))
+		}
+		if stream.mode != "text" || output.String() == "" {
+			t.Fatalf("ordinary structured answer remained buffered: mode=%q output=%q chunks=%q", stream.mode, output.String(), chunks)
+		}
+	}
+}
+
+func TestAllowedToolNamesForChoiceRestrictsForcedTool(t *testing.T) {
+	tools := []AnthropicTool{{Name: "A"}, {Name: "B"}}
+	allowed, err := allowedToolNamesForChoice(tools, "force:A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allowed) != 1 {
+		t.Fatalf("allowed tools=%v, want only A", allowed)
+	}
+	if _, ok := allowed["A"]; !ok {
+		t.Fatalf("forced tool A is not allowed: %v", allowed)
+	}
+	if _, err := allowedToolNamesForChoice(tools, "force:missing"); err == nil {
+		t.Fatal("undeclared forced tool was accepted")
 	}
 }
 

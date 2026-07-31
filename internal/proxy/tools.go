@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -244,7 +245,7 @@ func filterNativeSearchTools(tools []Tool) ([]Tool, bool) {
 // - Inline tags like <command-name>/clear</command-name>
 var (
 	blockTagRegex  = regexp.MustCompile(`(?s)<(?:system-reminder|local-command-caveat)>.*?</(?:system-reminder|local-command-caveat)>`)
-	inlineTagRegex = regexp.MustCompile(`<[a-z][-a-z]*>[^<]*</[a-z][-a-z]*>`)
+	inlineTagRegex = regexp.MustCompile(`(?s)<(?:command-name|command-message|command-args)>.*?</(?:command-name|command-message|command-args)>`)
 )
 
 func stripSystemReminders(content string) string {
@@ -295,7 +296,7 @@ func resolveToolChoiceMode(toolChoice ...interface{}) string {
 		switch strings.ToLower(strings.TrimSpace(kind)) {
 		case "any", "required":
 			return "required"
-		case "tool":
+		case "tool", "function":
 			if name, _ := value["name"].(string); strings.TrimSpace(name) != "" {
 				return "force:" + strings.TrimSpace(name)
 			}
@@ -670,7 +671,7 @@ func parseToolCalls(content string) ([]ToolCall, string, bool) {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 	}
-	if err := json.Unmarshal([]byte(stripped), &direct); err == nil && direct.Name != "" {
+	if err := json.Unmarshal([]byte(stripped), &direct); err == nil && direct.Name != "" && len(bytes.TrimSpace(direct.Arguments)) > 0 {
 		argsStr := string(direct.Arguments)
 		if !json.Valid(direct.Arguments) {
 			argsStr = "{}"
@@ -693,7 +694,8 @@ func parseToolCalls(content string) ([]ToolCall, string, bool) {
 			Arguments json.RawMessage `json:"arguments"`
 		} `json:"tool_call"`
 	}
-	if err := json.Unmarshal([]byte(stripped), &wrapper); err == nil && wrapper.ToolCall != nil {
+	if err := json.Unmarshal([]byte(stripped), &wrapper); err == nil && wrapper.ToolCall != nil &&
+		wrapper.ToolCall.Name != "" && len(bytes.TrimSpace(wrapper.ToolCall.Arguments)) > 0 {
 		argsStr := string(wrapper.ToolCall.Arguments)
 		if !json.Valid(wrapper.ToolCall.Arguments) {
 			argsStr = "{}"
@@ -723,7 +725,7 @@ func parseToolCalls(content string) ([]ToolCall, string, bool) {
 			Name      string          `json:"name"`
 			Arguments json.RawMessage `json:"arguments"`
 		}
-		if err := json.Unmarshal([]byte(line), &lineCall); err == nil && lineCall.Name != "" {
+		if err := json.Unmarshal([]byte(line), &lineCall); err == nil && lineCall.Name != "" && len(bytes.TrimSpace(lineCall.Arguments)) > 0 {
 			argsStr := string(lineCall.Arguments)
 			if !json.Valid(lineCall.Arguments) {
 				argsStr = "{}"
@@ -752,7 +754,7 @@ func parseToolCallJSON(jsonStr string, index int) *ToolCall {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 	}
-	if err := json.Unmarshal([]byte(jsonStr), &call); err != nil || strings.TrimSpace(call.Name) == "" {
+	if err := json.Unmarshal([]byte(jsonStr), &call); err != nil || strings.TrimSpace(call.Name) == "" || len(bytes.TrimSpace(call.Arguments)) == 0 {
 		return nil
 	}
 	argsStr := string(call.Arguments)

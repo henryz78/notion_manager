@@ -144,7 +144,9 @@ Response shape:
   "summary": {
     "exhausted_only": 4,
     "no_workspace": 2,
+    "ai_disabled": 1,
     "premium_accounts": 5,
+    "unlimited_accounts": 10,
     "exhausted_trials": 6,
     "research_limited": 0,
     "total_research_usage": 14,
@@ -158,6 +160,8 @@ Response shape:
     "email": "...",
     "name": "...",
     "plan": "personal",
+    "quota_unlimited": false,
+    "ai_disabled": false,
     "space": "...",
     "exhausted": false,
     "permanent": false,
@@ -219,9 +223,9 @@ worker pools.
 - All component code lives in `App.tsx` (single-file for now; split when it grows)
 - No external UI library — TailwindCSS utility classes only
 - Responsive: 5-col summary grid → 2-col on tablet → 1-col on mobile
-- Account cards are sorted server-side by health, then full Notion AI plan /
-  live premium signal, then stable account name. Private quota counters are
-  not added together for ranking.
+- Account cards are sorted server-side by health, then included-AI workspace
+  plan (Team/Business/Enterprise), then stable account name. Private V2 credit
+  fields are diagnostic-only and never participate in plan detection or ranking.
 - Search is debounced 250ms and forwarded to the server as `?q=`; the
   server filters across all accounts on email/name/plan/workspace
 - Pagination: 20 cards per page, fetched on demand (`?page=&page_size=`)

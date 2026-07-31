@@ -1,22 +1,47 @@
 package proxy
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var ErrToolBridgeNoTool = errors.New("tool bridge produced no usable tool action")
 
 const maxInferenceAccountCalls = 3
 const maxEmptyResponseAttempts = 2
+const maxAnthropicRequestBodyBytes = 64 * 1024 * 1024
+
+func mergeSequentialUsage(first, second *UsageInfo) *UsageInfo {
+	if first == nil && second == nil {
+		return nil
+	}
+	if first == nil {
+		copy := *second
+		return &copy
+	}
+	if second == nil {
+		copy := *first
+		return &copy
+	}
+	merged := &UsageInfo{
+		PromptTokens:     max(first.PromptTokens, second.PromptTokens),
+		CompletionTokens: first.CompletionTokens + second.CompletionTokens,
+	}
+	merged.TotalTokens = merged.PromptTokens + merged.CompletionTokens
+	return merged
+}
 
 func inferenceAccountCallLimit(poolSize int) int {
 	if poolSize <= 0 {
@@ -204,7 +229,7 @@ func renderAnthropicCitationText(rawText string, knownURLs []string, knownDocs [
 // It replaces inline citations [^{{URL}}] with [N] in real-time using
 // a buffered state machine, emits thinking blocks as they arrive,
 // then appends a Sources section.
-func streamWebSearch(w http.ResponseWriter, flusher http.Flusher, acc *Account, query string, model string, requestID string, blockIndex *int, hasThinking bool) (*UsageInfo, error) {
+func streamWebSearch(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, acc *Account, query string, model string, requestID string, blockIndex *int, hasThinking bool, session *Session) (*UsageInfo, string, error) {
 	var finalUsage *UsageInfo
 	var thinkingBlocks []ThinkingBlock
 	var streamedText strings.Builder
@@ -219,12 +244,21 @@ func streamWebSearch(w http.ResponseWriter, flusher http.Flusher, acc *Account, 
 		{Role: "user", Content: query},
 	}
 	callOpts := CallOptions{
-		EnableWebSearch:   true,
-		ThinkingBlocks:    &thinkingBlocks,
-		KnownCitationURLs: &knownCitationURLs,
-		KnownCitationDocs: &knownCitationDocs,
-		KnownToolCallURLs: &knownToolCallURLs,
-		RequestID:         requestID,
+		Context:                 ctx,
+		EnableWebSearch:         true,
+		ThinkingBlocks:          &thinkingBlocks,
+		KnownCitationURLs:       &knownCitationURLs,
+		KnownCitationDocs:       &knownCitationDocs,
+		KnownToolCallURLs:       &knownToolCallURLs,
+		Session:                 session,
+		ForceThreadContinuation: session != nil,
+		RequestID:               requestID,
+	}
+	if session != nil {
+		// The bridge inference that selected WebSearch is already a completed
+		// server turn. Record it before continuing the same Notion thread; a
+		// later failure invalidates this session, so partial state is never reused.
+		advanceConversationServerTurnLocked(session, model)
 	}
 
 	// emitPendingThinking emits any thinking blocks that have been collected
@@ -362,7 +396,10 @@ func streamWebSearch(w http.ResponseWriter, flusher http.Flusher, acc *Account, 
 		})
 	}
 
-	return finalUsage, err
+	if err == nil && strings.TrimSpace(streamedText.String()) == "" {
+		err = ErrEmptyResponse
+	}
+	return finalUsage, streamedText.String(), err
 }
 
 // ========== Anthropic Messages API Types ==========
@@ -439,6 +476,37 @@ type AnthropicResponse struct {
 type AnthropicUsage struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
+}
+
+func lastAssistantAnthropicMessageIndex(messages []AnthropicMessage) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" {
+			return i
+		}
+	}
+	return -1
+}
+
+func continuationMessageFromBlocks(blocks []AnthropicContentBlock) ChatMessage {
+	message := ChatMessage{Role: "assistant"}
+	var text strings.Builder
+	for _, block := range blocks {
+		switch block.Type {
+		case "text":
+			text.WriteString(block.Text)
+		case "tool_use":
+			message.ToolCalls = append(message.ToolCalls, ToolCall{
+				ID:   block.ID,
+				Type: "function",
+				Function: ToolCallFunction{
+					Name:      block.Name,
+					Arguments: string(block.Input),
+				},
+			})
+		}
+	}
+	message.Content = text.String()
+	return message
 }
 
 var structuredOutputLeadingTagRegex = regexp.MustCompile(`(?s)^\s*(?:<[A-Za-z][^>\n]*/>\s*)+`)
@@ -625,6 +693,18 @@ func declaredToolNames(tools []AnthropicTool) map[string]struct{} {
 	return names
 }
 
+func allowedToolNamesForChoice(tools []AnthropicTool, toolChoiceMode string) (map[string]struct{}, error) {
+	names := declaredToolNames(tools)
+	if !strings.HasPrefix(toolChoiceMode, "force:") {
+		return names, nil
+	}
+	forcedName := strings.TrimSpace(strings.TrimPrefix(toolChoiceMode, "force:"))
+	if _, ok := names[forcedName]; !ok {
+		return nil, fmt.Errorf("tool_choice references undeclared tool %q", forcedName)
+	}
+	return map[string]struct{}{forcedName: {}}, nil
+}
+
 func applyStructuredOutputBridge(messages []ChatMessage, outputConfig *AnthropicOutputConfig) []ChatMessage {
 	if outputConfig == nil || outputConfig.Format == nil || outputConfig.Format.Type != "json_schema" || outputConfig.Format.Schema == nil {
 		return messages
@@ -663,14 +743,37 @@ func applyStructuredOutputBridge(messages []ChatMessage, outputConfig *Anthropic
 func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := "msg_" + generateUUIDv4()
+		dashboardSettingsMu.RLock()
+		defer dashboardSettingsMu.RUnlock()
+		var activeSessionLock *Session
+		defer func() {
+			recovered := recover()
+			if activeSessionLock != nil {
+				// A panic or forgotten return path must not strand the
+				// conversation mutex or leave a partially-mutated thread
+				// available to the next request.
+				globalSessionManager.DeleteIf(activeSessionLock.managerKey, activeSessionLock)
+				activeSessionLock.unlockForRequest()
+				activeSessionLock = nil
+			}
+			if recovered != nil {
+				panic(recovered)
+			}
+		}()
 
 		if r.Method != http.MethodPost {
 			writeAnthropicError(w, requestID, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
 			return
 		}
 
+		r.Body = http.MaxBytesReader(w, r.Body, maxAnthropicRequestBodyBytes)
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				writeAnthropicError(w, requestID, http.StatusRequestEntityTooLarge, "request body exceeds 64 MiB", "invalid_request_error")
+				return
+			}
 			writeAnthropicError(w, requestID, http.StatusBadRequest, "failed to read request body: "+err.Error(), "invalid_request_error")
 			return
 		}
@@ -744,11 +847,19 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		logAnthropicRequest(req, model)
 
 		// Convert Anthropic messages to internal ChatMessage format
-		messages, fileAttachments := convertAnthropicMessages(req.System, req.Messages)
+		messages, fileAttachments, err := convertAnthropicMessages(req.System, req.Messages)
+		if err != nil {
+			writeAnthropicError(w, requestID, http.StatusBadRequest, "invalid attachment: "+err.Error(), "invalid_request_error")
+			return
+		}
 		if err := validateToolProtocol(messages); err != nil {
 			writeAnthropicError(w, requestID, http.StatusBadRequest, "invalid tool history: "+err.Error(), "invalid_request_error")
 			return
 		}
+		// Preserve the exact client-visible history for safe unsalted session
+		// chaining. Tool schemas and structured-output prompts injected below
+		// are request-local implementation details and must not enter the key.
+		sessionIdentityMessages := cloneChatMessages(messages)
 		if len(fileAttachments) > 0 {
 			log.Printf("[upload-debug] extracted %d file attachment(s) from request", len(fileAttachments))
 		}
@@ -786,28 +897,48 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		// and the request continues as a normal chat request.
 		toolChoiceMode := resolveToolChoiceMode(req.ToolChoice)
 		hasTools := toolBridgeActive(isResearcher, len(req.Tools)) && toolChoiceMode != "none"
-		allowedToolNames := declaredToolNames(req.Tools)
+		allowedToolNames, err := allowedToolNamesForChoice(req.Tools, toolChoiceMode)
+		if err != nil {
+			writeAnthropicError(w, requestID, http.StatusBadRequest, err.Error(), "invalid_request_error")
+			return
+		}
 		enableWebSearch := effectiveWebSearch
+		for _, tool := range req.Tools {
+			if tool.Name == "WebSearch" {
+				enableWebSearch = true
+				break
+			}
+		}
 
 		// Bind repeated client history to the real Notion thread. Current
 		// Notion persists server Agent replies only on that thread; rebuilding a
 		// fresh thread every request loses assistant context.
 		var fingerprint string
 		var session *Session
+		var sessionSalt string
+		stableSessionReuse := false
+		var clientContinuationKey string
 		rawMessageCount := 0
 		if !isResearcher {
-			sessionSalt := extractConversationSalt(req.Metadata)
-			fingerprint = computeSessionFingerprintWithSalt(messages, sessionSalt)
+			sessionSalt = extractConversationSalt(req.Metadata)
 			rawMessageCount = countConversationMessages(messages)
-			session = globalSessionManager.Get(fingerprint)
-			if shouldStartFreshForAmbiguousSingleTurn(session, rawMessageCount, sessionSalt) {
-				globalSessionManager.Delete(fingerprint)
-				session = nil
-			} else if session != nil && rawMessageCount <= session.RawMessageCount {
-				// A retry, edit, or rollback must not append a duplicate user
-				// step to the stored Notion thread. Start a clean replay.
-				globalSessionManager.Delete(fingerprint)
-				session = nil
+			clientContinuationKey = extractAssistantContinuationKeyWithContext(
+				sessionIdentityMessages,
+				fileAttachments,
+				lastAssistantAnthropicMessageIndex(req.Messages),
+			)
+			stableSessionReuse = strings.TrimSpace(sessionSalt) != ""
+			if stableSessionReuse {
+				fingerprint = computeStableSessionFingerprint(sessionSalt)
+			} else {
+				// Stateless OpenAI/Anthropic clients usually resend the prior
+				// assistant reply but provide no conversation ID. Bind only by
+				// an exact reply signature that this proxy previously emitted;
+				// never guess from a shared opening prompt.
+				fingerprint = clientContinuationKey
+			}
+			if fingerprint != "" {
+				session = globalSessionManager.Get(fingerprint)
 			}
 		}
 		if requestDiagnostic != nil {
@@ -821,10 +952,10 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			}
 		}
 		invalidateSession := func(contextMode string) {
-			if isResearcher || session == nil {
+			if isResearcher || fingerprint == "" || session == nil {
 				return
 			}
-			globalSessionManager.Delete(fingerprint)
+			globalSessionManager.DeleteIf(fingerprint, session)
 			session = nil
 			if requestDiagnostic != nil && contextMode != "" {
 				requestDiagnostic.SetContextMode(contextMode)
@@ -847,14 +978,15 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					},
 				})
 			}
-			// Filter out WebSearch/WebFetch — these are handled by Notion's native search.
-			// Injecting them as custom tools causes the model to generate JSON tool calls
-			// instead of using Notion's server-side search which actually executes.
+			// WebSearch remains in the compatibility protocol so the proxy can
+			// execute it server-side. Its declaration also enables Notion's
+			// native search for the request and is already reflected in the
+			// session contract computed above.
 			var toolDetectedWebSearch bool
 			convertedTools, toolDetectedWebSearch = filterNativeSearchTools(convertedTools)
 			if toolDetectedWebSearch {
 				enableWebSearch = true
-				log.Printf("[bridge] WebSearch/WebFetch detected — enabling Notion native search and preserving history")
+				log.Printf("[bridge] WebSearch detected — enabling Notion native search and preserving history")
 			}
 			bridgeTools, originalToToolAlias, toolAliasToOriginal = aliasClientTools(convertedTools)
 		} else if !isResearcher && req.OutputConfig != nil && req.OutputConfig.Format != nil && req.OutputConfig.Format.Type == "json_schema" {
@@ -902,9 +1034,8 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 						acc = pool.NextExcluding(tried)
 					}
 				} else if selection == 0 {
-					// New-conversation routing: prefer full Notion AI plans,
-					// then live premium signals, without adding undocumented
-					// private counters together.
+					// New-conversation routing prefers included-AI plans without
+					// treating private credit counters as workspace-plan evidence.
 					acc = pool.NextBest()
 				} else {
 					// Failover: keep the same service-tier preference among
@@ -951,26 +1082,104 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 
 			requestMessages := attemptMessages
 			currentSession := session
-			if !isResearcher && currentSession == nil {
-				currentSession = newConversationSession(acc.UserEmail)
+			wasContinuation := false
+			cacheSession := false
+			if !isResearcher {
+				if fingerprint != "" {
+					currentSession, wasContinuation, cacheSession = lockConversationSessionForRequest(
+						globalSessionManager,
+						fingerprint,
+						session,
+						rawMessageCount,
+						acc.UserEmail,
+						clientContinuationKey,
+					)
+					if cacheSession {
+						session = currentSession
+					} else {
+						session = nil
+					}
+				} else {
+					currentSession = newConversationSession(acc.UserEmail)
+					currentSession.lockForRequest()
+				}
+				activeSessionLock = currentSession
+				// Publish the exact client-visible history chain before the
+				// terminal HTTP/SSE event is sent. The session remains locked
+				// until the outer attempt finishes, so a fast next turn cannot
+				// observe a half-completed thread.
+				oldFingerprint := fingerprint
+				publishOldFingerprint := oldFingerprint
+				if !cacheSession {
+					// An ambiguous/duplicate request runs in an isolated thread
+					// that is intentionally not bound to the old key. Its new,
+					// unique assistant anchor can still be published safely.
+					publishOldFingerprint = ""
+				}
+				currentSession.publishAssistant = func(message ChatMessage) {
+					chain := append(cloneChatMessages(sessionIdentityMessages), message)
+					nextFingerprint := computeConversationContinuationKeyWithContext(
+						chain,
+						fileAttachments,
+					)
+					if nextFingerprint == "" {
+						return
+					}
+					currentSession.expectedClientKey = nextFingerprint
+					if stableSessionReuse {
+						return
+					}
+					if globalSessionManager.PublishReplacement(publishOldFingerprint, nextFingerprint, currentSession) {
+						fingerprint = nextFingerprint
+						session = currentSession
+						cacheSession = true
+					} else {
+						session = nil
+						cacheSession = false
+					}
+				}
 			}
 
 			accountCalls++
 			log.Printf("[req] %s model=%s messages=%d stream=%v tools=%d attachments=%d account=%s continuation=%v (attempt %d/%d) [anthropic]",
-				requestID, model, len(req.Messages), req.Stream, len(req.Tools), len(fileAttachments), acc.UserEmail, currentSession != nil && currentSession.TurnCount > 0, accountCalls, maxAccountCalls)
+				requestID, model, len(req.Messages), req.Stream, len(req.Tools), len(fileAttachments), acc.UserEmail, wasContinuation, accountCalls, maxAccountCalls)
 			if requestDiagnostic != nil {
 				requestDiagnostic.BeginAttempt(acc.UserEmail)
 			}
 
 			// Upload file attachments to Notion (if any) — skip for researcher mode
 			var uploadedAttachments []UploadedAttachment
-			if !isResearcher && len(fileAttachments) > 0 {
-				for i, fa := range fileAttachments {
+			attemptFileAttachments := fileAttachments
+			if wasContinuation {
+				attemptFileAttachments = attachmentsAfterMessageIndex(
+					fileAttachments,
+					lastAssistantAnthropicMessageIndex(req.Messages),
+				)
+			}
+			if !isResearcher && len(attemptFileAttachments) > 0 {
+				for i, fa := range attemptFileAttachments {
 					log.Printf("[upload-debug] %s: uploading attachment %d/%d: %s (%s, %d bytes)",
-						requestID, i+1, len(fileAttachments), fa.FileName, fa.ContentType, len(fa.Data))
-					uploaded, err := UploadFileToNotion(acc, &fa)
+						requestID, i+1, len(attemptFileAttachments), fa.FileName, fa.ContentType, len(fa.Data))
+					uploadThreadID := ""
+					createUploadThread := true
+					if currentSession != nil {
+						uploadThreadID = currentSession.ThreadID
+						createUploadThread = currentSession.TurnCount == 0 && i == 0
+					}
+					uploaded, err := attachmentUploader(acc, &fa, uploadThreadID, createUploadThread)
 					if err != nil {
 						log.Printf("[upload] %s: attachment %d upload failed: %v", requestID, i+1, err)
+						if currentSession != nil {
+							if cacheSession {
+								// A pre-published session must be invalidated before
+								// releasing its lock. Otherwise a waiting next turn
+								// could reuse a thread whose attachment setup failed.
+								globalSessionManager.DeleteIf(fingerprint, currentSession)
+								session = nil
+							}
+							currentSession.unlockForRequest()
+							activeSessionLock = nil
+						}
 						if requestDiagnostic != nil {
 							requestDiagnostic.FinishAttempt("upload_error", err)
 						}
@@ -990,14 +1199,30 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				// Researcher mode — always use thinking blocks for research progress
 				hasThinking = true
 				if req.Stream {
-					reqErr = handleResearcherStream(w, acc, requestMessages, model, requestID, hasThinking, requestDiagnostic)
+					reqErr = handleResearcherStream(r.Context(), w, acc, requestMessages, model, requestID, hasThinking, requestDiagnostic)
 				} else {
-					reqErr = handleResearcherNonStream(w, acc, requestMessages, model, requestID, hasThinking, requestDiagnostic)
+					reqErr = handleResearcherNonStream(r.Context(), w, acc, requestMessages, model, requestID, hasThinking, requestDiagnostic)
 				}
 			} else if req.Stream {
-				reqErr = handleAnthropicStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, toolChoiceMode, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic)
+				reqErr = handleAnthropicStream(r.Context(), w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, toolChoiceMode, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic)
 			} else {
-				reqErr = handleAnthropicNonStream(w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, toolChoiceMode, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic)
+				reqErr = handleAnthropicNonStream(r.Context(), w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, toolChoiceMode, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic)
+			}
+			if currentSession != nil {
+				if reqErr == nil {
+					completeConversationSessionLocked(currentSession, rawMessageCount, model)
+					if cacheSession {
+						globalSessionManager.Set(fingerprint, currentSession)
+					}
+				} else if cacheSession {
+					// Invalidate while still holding the session lock. A waiter
+					// cannot wake up and continue a thread that may contain a
+					// failed/partial Agent step.
+					globalSessionManager.DeleteIf(fingerprint, currentSession)
+					session = nil
+				}
+				currentSession.unlockForRequest()
+				activeSessionLock = nil
 			}
 			if requestDiagnostic != nil {
 				requestDiagnostic.FinishAttempt(requestAttemptOutcome(reqErr), reqErr)
@@ -1007,10 +1232,19 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				}
 			}
 
-			// Trigger an async live quota refresh after every call so the next
-			// selection has up-to-date numbers. Deduplicated per account so
-			// concurrent calls don't trigger redundant Notion API hits.
-			pool.RefreshAccountQuotaAsync(acc)
+			// Successful calls refresh quota diagnostics for the next request.
+			// Error events are classified below; refreshing blindly here can
+			// turn a model-specific failure into an account-wide false disable.
+			if reqErr == nil {
+				pool.RefreshAccountQuotaAsync(acc)
+			}
+
+			if reqErr != nil && errors.Is(reqErr, ErrStreamResponseStarted) {
+				// A partial SSE response and an explicit error event already
+				// reached the client. Retrying would splice two model responses
+				// into one stream, and an HTTP error can no longer be written.
+				return
+			}
 
 			if reqErr != nil && errors.Is(reqErr, ErrResearchQuotaExhausted) {
 				// Research mode quota exhausted — account can still serve normal chat
@@ -1027,18 +1261,6 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				}
 				continue
 			}
-			if reqErr != nil && errors.Is(reqErr, ErrQuotaExhausted) {
-				log.Printf("[quota] %s quota exhausted — retaining account for future re-check", acc.UserEmail)
-				pool.MarkQuotaExhausted(acc)
-				log.Printf("[quota] %s quota exhausted, trying next account (%d/%d available)",
-					acc.UserEmail, pool.AvailableCount(), pool.Count())
-				if requestDiagnostic != nil {
-					requestDiagnostic.SetContextMode("full_replay_account_switch")
-				}
-				invalidateSession("new_thread_account_switch")
-				continue
-			}
-
 			if reqErr != nil && errors.Is(reqErr, ErrPromptTooLong) {
 				lastNonQuotaErr = reqErr
 				break
@@ -1061,13 +1283,18 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			}
 
 			if reqErr != nil && errors.Is(reqErr, ErrPremiumFeatureUnavailable) {
-				// Premium feature unavailable — for free accounts this means quota is permanently gone
+				// This event can be model/feature-specific. Only the V1
+				// eligibility endpoint may classify a complimentary trial as
+				// exhausted; never freeze an otherwise healthy account solely
+				// from this inference event.
 				if isFreePlan(acc) {
-					log.Printf("[premium] %s complimentary trial unavailable — retaining account for future re-check", acc.UserEmail)
-					pool.MarkPermanentlyExhausted(acc)
+					if pool.RefreshAccountQuota(acc, 0) {
+						log.Printf("[premium] %s feature unavailable but V1 quota remains eligible; trying next account", acc.UserEmail)
+					} else {
+						log.Printf("[premium] %s feature unavailable and V1 quota confirms exhausted; trying next account", acc.UserEmail)
+					}
 				} else {
-					log.Printf("[premium] %s premium feature unavailable, trying next account", acc.UserEmail)
-					pool.MarkTemporarilyUnavailable(acc, "premium_unavailable", defaultAccountFailureCooldown)
+					log.Printf("[premium] %s feature unavailable on this request; trying next account without quarantining it", acc.UserEmail)
 				}
 				if requestDiagnostic != nil {
 					requestDiagnostic.SetContextMode("full_replay_account_switch")
@@ -1105,10 +1332,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 
 			if reqErr == nil {
 				pool.ClearTemporaryUnavailable(acc)
-				if !isResearcher && currentSession != nil {
-					wasContinuation := currentSession.TurnCount > 0
-					completeConversationSession(currentSession, rawMessageCount, model)
-					globalSessionManager.Set(fingerprint, currentSession)
+				if currentSession != nil {
 					if requestDiagnostic != nil {
 						if wasContinuation {
 							requestDiagnostic.SetContextMode("thread_continuation")
@@ -1151,8 +1375,6 @@ func requestAttemptOutcome(err error) string {
 	switch {
 	case errors.Is(err, ErrResearchQuotaExhausted):
 		return "research_quota_exhausted"
-	case errors.Is(err, ErrQuotaExhausted):
-		return "quota_exhausted"
 	case errors.Is(err, ErrEmptyResponse):
 		return "empty_response"
 	case errors.Is(err, ErrPromptTooLong):
@@ -1175,7 +1397,7 @@ func toolBridgeActive(isResearcher bool, toolCount int) bool {
 
 // convertAnthropicMessages converts Anthropic system + messages to internal ChatMessage format.
 // It also extracts file attachments (image/document content blocks) for Notion upload.
-func convertAnthropicMessages(system interface{}, msgs []AnthropicMessage) ([]ChatMessage, []FileAttachment) {
+func convertAnthropicMessages(system interface{}, msgs []AnthropicMessage) ([]ChatMessage, []FileAttachment, error) {
 	var attachments []FileAttachment
 	var result []ChatMessage
 
@@ -1220,7 +1442,7 @@ func convertAnthropicMessages(system interface{}, msgs []AnthropicMessage) ([]Ch
 		}
 	}
 
-	for _, msg := range msgs {
+	for msgIndex, msg := range msgs {
 		cm := ChatMessage{Role: msg.Role}
 
 		switch content := msg.Content.(type) {
@@ -1257,37 +1479,54 @@ func convertAnthropicMessages(system interface{}, msgs []AnthropicMessage) ([]Ch
 					case "image":
 						// Extract image from base64 or URL source
 						if source, ok := m["source"].(map[string]interface{}); ok {
-							fa := extractFileFromSource(source, "image")
-							if fa != nil {
-								attachments = append(attachments, *fa)
+							fa, err := extractFileFromSource(source, "image")
+							if err != nil {
+								return nil, nil, err
 							}
+							fa.MessageIndex = msgIndex
+							attachments = append(attachments, *fa)
 						}
 					case "document":
 						// Extract PDF/text document from base64, URL, or file source
 						if source, ok := m["source"].(map[string]interface{}); ok {
-							fa := extractFileFromSource(source, "document")
-							if fa != nil {
-								attachments = append(attachments, *fa)
+							fa, err := extractFileFromSource(source, "document")
+							if err != nil {
+								return nil, nil, err
 							}
+							fa.MessageIndex = msgIndex
+							attachments = append(attachments, *fa)
 						}
 					case "tool_result":
 						// Convert tool_result to tool role message
 						toolUseID, _ := m["tool_use_id"].(string)
-						var resultText string
+						var resultParts []string
 						if c, ok := m["content"].(string); ok {
-							resultText = c
+							resultParts = append(resultParts, c)
 						} else if c, ok := m["content"].([]interface{}); ok {
 							for _, cb := range c {
 								if cbm, ok := cb.(map[string]interface{}); ok {
-									if t, ok := cbm["text"].(string); ok {
-										resultText += t
+									switch nestedType, _ := cbm["type"].(string); nestedType {
+									case "text":
+										if text, ok := cbm["text"].(string); ok {
+											resultParts = append(resultParts, text)
+										}
+									case "image", "document":
+										if source, ok := cbm["source"].(map[string]interface{}); ok {
+											attachment, err := extractFileFromSource(source, nestedType)
+											if err != nil {
+												return nil, nil, err
+											}
+											attachment.MessageIndex = msgIndex
+											attachments = append(attachments, *attachment)
+											resultParts = append(resultParts, fmt.Sprintf("[%s attachment]", nestedType))
+										}
 									}
 								}
 							}
 						}
 						result = append(result, ChatMessage{
 							Role:       "tool",
-							Content:    resultText,
+							Content:    strings.Join(resultParts, "\n"),
 							ToolCallID: toolUseID,
 							Name:       toolIDToName[toolUseID],
 						})
@@ -1305,12 +1544,71 @@ func convertAnthropicMessages(system interface{}, msgs []AnthropicMessage) ([]Ch
 		}
 	}
 
-	return result, attachments
+	return result, attachments, nil
+}
+
+func attachmentsAfterMessageIndex(attachments []FileAttachment, messageIndex int) []FileAttachment {
+	if len(attachments) == 0 {
+		return nil
+	}
+	filtered := make([]FileAttachment, 0, len(attachments))
+	for _, attachment := range attachments {
+		if attachment.MessageIndex > messageIndex {
+			filtered = append(filtered, attachment)
+		}
+	}
+	return filtered
+}
+
+const maxRemoteAttachmentBytes = 25 * 1024 * 1024
+
+func isUnsafeAttachmentIP(ip net.IP) bool {
+	return ip == nil || !ip.IsGlobalUnicast() || ip.IsLoopback() || ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+}
+
+func safeAttachmentDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("invalid attachment address: %w", err)
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve attachment host: %w", err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("attachment host resolved to no addresses")
+	}
+	for _, resolved := range ips {
+		if isUnsafeAttachmentIP(resolved.IP) {
+			return nil, fmt.Errorf("attachment URL resolves to a private or reserved address")
+		}
+	}
+	dialer := net.Dialer{Timeout: 10 * time.Second}
+	return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+}
+
+var remoteAttachmentHTTPClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		DialContext:           safeAttachmentDialContext,
+		ResponseHeaderTimeout: 10 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+	},
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return fmt.Errorf("too many attachment redirects")
+		}
+		if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+			return fmt.Errorf("unsupported attachment redirect scheme")
+		}
+		return nil
+	},
 }
 
 // extractFileFromSource extracts file data from an Anthropic content block source.
 // Supports base64 and URL source types. blockKind is "image" or "document".
-func extractFileFromSource(source map[string]interface{}, blockKind string) *FileAttachment {
+func extractFileFromSource(source map[string]interface{}, blockKind string) (*FileAttachment, error) {
 	srcType, _ := source["type"].(string)
 
 	switch srcType {
@@ -1318,12 +1616,14 @@ func extractFileFromSource(source map[string]interface{}, blockKind string) *Fil
 		mediaType, _ := source["media_type"].(string)
 		data64, _ := source["data"].(string)
 		if data64 == "" {
-			return nil
+			return nil, fmt.Errorf("%s base64 source is empty", blockKind)
+		}
+		if base64.StdEncoding.DecodedLen(len(data64)) > maxRemoteAttachmentBytes {
+			return nil, fmt.Errorf("%s exceeds %d bytes", blockKind, maxRemoteAttachmentBytes)
 		}
 		decoded, err := base64.StdEncoding.DecodeString(data64)
 		if err != nil {
-			log.Printf("[upload] failed to decode base64 %s: %v", blockKind, err)
-			return nil
+			return nil, fmt.Errorf("decode base64 %s: %w", blockKind, err)
 		}
 		if mediaType == "" {
 			if blockKind == "image" {
@@ -1337,24 +1637,37 @@ func extractFileFromSource(source map[string]interface{}, blockKind string) *Fil
 			Data:        decoded,
 			FileName:    generateUUIDv4() + ext,
 			ContentType: mediaType,
-		}
+		}, nil
 
 	case "url":
 		urlStr, _ := source["url"].(string)
 		if urlStr == "" {
-			return nil
+			return nil, fmt.Errorf("%s URL source is empty", blockKind)
 		}
-		// Download the file from URL
-		resp, err := http.Get(urlStr)
+		parsedURL, err := url.Parse(urlStr)
+		if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Hostname() == "" {
+			return nil, fmt.Errorf("invalid %s URL", blockKind)
+		}
+		// Download only from public HTTP(S) addresses, with bounded time and
+		// size. The custom dialer revalidates every redirect target and blocks
+		// loopback, link-local, and private networks.
+		resp, err := remoteAttachmentHTTPClient.Get(parsedURL.String())
 		if err != nil {
-			log.Printf("[upload] failed to download %s from URL: %v", blockKind, err)
-			return nil
+			return nil, fmt.Errorf("download %s URL: %w", blockKind, err)
 		}
 		defer resp.Body.Close()
-		data, err := io.ReadAll(resp.Body)
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("%s URL returned HTTP %d", blockKind, resp.StatusCode)
+		}
+		if resp.ContentLength > maxRemoteAttachmentBytes {
+			return nil, fmt.Errorf("%s exceeds %d bytes", blockKind, maxRemoteAttachmentBytes)
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxRemoteAttachmentBytes+1))
 		if err != nil {
-			log.Printf("[upload] failed to read %s URL response: %v", blockKind, err)
-			return nil
+			return nil, fmt.Errorf("read %s URL response: %w", blockKind, err)
+		}
+		if len(data) > maxRemoteAttachmentBytes {
+			return nil, fmt.Errorf("%s exceeds %d bytes", blockKind, maxRemoteAttachmentBytes)
 		}
 		mediaType := resp.Header.Get("Content-Type")
 		if mediaType == "" {
@@ -1373,11 +1686,10 @@ func extractFileFromSource(source map[string]interface{}, blockKind string) *Fil
 			Data:        data,
 			FileName:    generateUUIDv4() + ext,
 			ContentType: mediaType,
-		}
+		}, nil
 
 	default:
-		log.Printf("[upload] unsupported source type %q for %s block", srcType, blockKind)
-		return nil
+		return nil, fmt.Errorf("unsupported source type %q for %s block", srcType, blockKind)
 	}
 }
 
@@ -1402,7 +1714,6 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 	thinkingBlockOpen := false
 	textBlockOpen := false
 	blockIndex := 0
-	sawContent := false
 	callOpts.KnownCitationURLs = &knownCitationURLs
 	callOpts.KnownCitationDocs = &knownCitationDocs
 	callOpts.KnownToolCallURLs = &knownToolCallURLs
@@ -1480,7 +1791,6 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 				return
 			}
 			thinkingForLog.WriteString(delta)
-			sawContent = true
 			ensureHeaders()
 			if !thinkingBlockOpen {
 				sendAnthropicSSE(w, flusher, "content_block_start", map[string]interface{}{
@@ -1504,7 +1814,6 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 			if !jsonOnlyOutput {
 				cleaned := cr.Process(delta)
 				if cleaned != "" {
-					sawContent = true
 					ensureTextBlock()
 					sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
 						"type":  "content_block_delta",
@@ -1521,17 +1830,17 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 
 	if cbErr != nil {
 		if !headersSent {
-			if errors.Is(cbErr, ErrQuotaExhausted) {
-				return cbErr
-			}
 			log.Printf("[err] %s: %v", requestID, cbErr)
 			return cbErr
 		}
-		log.Printf("[err] %s: streaming completed with partial data before error: %v", requestID, cbErr)
+		return writeAnthropicStreamError(w, flusher, requestID, cbErr)
 	}
 
-	if fullContent.Len() == 0 && !sawContent {
+	if strings.TrimSpace(fullContent.String()) == "" {
 		log.Printf("[warn] %s: empty response from Notion, will retry", requestID)
+		if headersSent {
+			return writeAnthropicStreamError(w, flusher, requestID, ErrEmptyResponse)
+		}
 		return ErrEmptyResponse
 	}
 
@@ -1541,7 +1850,6 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 
 	if !jsonOnlyOutput {
 		if flushed := cr.Flush(); flushed != "" {
-			sawContent = true
 			ensureTextBlock()
 			sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
 				"type":  "content_block_delta",
@@ -1552,7 +1860,6 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 	} else {
 		normalized := normalizeStructuredOutputText(fullContent.String())
 		if normalized != "" {
-			sawContent = true
 			ensureTextBlock()
 			sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
 				"type":  "content_block_delta",
@@ -1590,6 +1897,15 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 		}
 	}
 
+	assistantText := renderAnthropicCitationText(fullContent.String(), knownCitationURLs, knownCitationDocs, knownToolCallURLs)
+	if jsonOnlyOutput {
+		assistantText = normalizeStructuredOutputText(fullContent.String())
+	}
+	callOpts.Session.publishAssistantContinuation(ChatMessage{
+		Role:    "assistant",
+		Content: assistantText,
+	})
+
 	outputTokens := 0
 	inputTokens := 0
 	if finalUsage != nil {
@@ -1613,13 +1929,9 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 		})
 	}
 	if fullContent.Len() > 0 {
-		text := renderAnthropicCitationText(fullContent.String(), knownCitationURLs, knownCitationDocs, knownToolCallURLs)
-		if jsonOnlyOutput {
-			text = normalizeStructuredOutputText(fullContent.String())
-		}
 		contentBlocks = append(contentBlocks, AnthropicContentBlock{
 			Type: "text",
-			Text: text,
+			Text: assistantText,
 		})
 	}
 	LogAPIOutputJSON(requestID, "anthropic stream summary", AnthropicResponse{
@@ -1639,18 +1951,87 @@ func streamAnthropicTextResponse(w http.ResponseWriter, acc *Account, messages [
 	return nil
 }
 
+const maxToolProtocolProbeBytes = 4 * 1024
+
+var (
+	jsonFirstKeyPrefixRegex = regexp.MustCompile(`(?s)^\{\s*"([^"\\]+)"\s*:`)
+	jsonNamedSecondKeyRegex = regexp.MustCompile(`(?s)^\{\s*"name"\s*:\s*"[^"]*"\s*,\s*"([^"\\]+)"\s*:`)
+)
+
+func jsonToolProtocolPrefixState(content string) (protocol, undecided bool) {
+	trimmed := strings.TrimSpace(content)
+	if !strings.HasPrefix(trimmed, "{") {
+		return false, false
+	}
+	firstKey := jsonFirstKeyPrefixRegex.FindStringSubmatch(trimmed)
+	if len(firstKey) < 2 {
+		if json.Valid([]byte(trimmed)) || len(trimmed) >= maxToolProtocolProbeBytes {
+			return false, false
+		}
+		return false, true
+	}
+	switch firstKey[1] {
+	case "tool_call":
+		return true, false
+	case "name":
+		if secondKey := jsonNamedSecondKeyRegex.FindStringSubmatch(trimmed); len(secondKey) >= 2 {
+			return secondKey[1] == "arguments", false
+		}
+		if json.Valid([]byte(trimmed)) {
+			_, _, hasToolCall := parseToolCalls(trimmed)
+			return hasToolCall, false
+		}
+		if len(trimmed) >= maxToolProtocolProbeBytes {
+			return false, false
+		}
+		return false, true
+	default:
+		return false, false
+	}
+}
+
 func toolProtocolPrefixState(content string) (protocol, undecided bool) {
 	trimmed := strings.TrimLeft(content, " \t\r\n")
 	if trimmed == "" {
 		return false, true
 	}
-	for _, prefix := range []string{"{", "<|", "<tool_call>", "```"} {
+	for _, prefix := range []string{"<|", "<tool_call>", "```tool_call"} {
 		if strings.HasPrefix(trimmed, prefix) {
 			return true, false
 		}
 		if strings.HasPrefix(prefix, trimmed) {
 			return false, true
 		}
+	}
+	if strings.HasPrefix(trimmed, "{") {
+		return jsonToolProtocolPrefixState(trimmed)
+	}
+	if strings.HasPrefix(trimmed, "```") {
+		afterFence := trimmed[3:]
+		if afterFence == "" {
+			return false, true
+		}
+		lowerAfterFence := strings.ToLower(afterFence)
+		if strings.HasPrefix("json", lowerAfterFence) {
+			return false, true
+		}
+		if strings.HasPrefix(lowerAfterFence, "json") {
+			afterFence = afterFence[len("json"):]
+			if afterFence == "" {
+				return false, true
+			}
+			if !strings.ContainsRune(" \t\r\n", rune(afterFence[0])) {
+				return false, false
+			}
+		}
+		payload := strings.TrimLeft(afterFence, " \t\r\n")
+		if payload == "" {
+			return false, true
+		}
+		if strings.HasPrefix(payload, "{") {
+			return jsonToolProtocolPrefixState(payload)
+		}
+		return false, false
 	}
 	return false, false
 }
@@ -1707,9 +2088,10 @@ func (stream *incrementalToolStream) FlushText() string {
 // handleAnthropicStream streams thinking and ordinary text as it arrives. Only
 // a response that begins like a tool protocol is buffered until it can be
 // validated and converted into tool_use events.
-func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, toolChoiceMode string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic) error {
+func handleAnthropicStream(ctx context.Context, w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, toolChoiceMode string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic) error {
 	if !hasTools {
 		callOpts := CallOptions{
+			Context:               ctx,
 			HasClientTools:        hasBridgedClientTools,
 			EnableWebSearch:       enableWebSearch,
 			EnableWorkspaceSearch: enableWorkspaceSearch,
@@ -1742,6 +2124,7 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 	thinkingOpen := false
 	textOpen := false
 	blockIndex := 0
+	var clientVisibleText strings.Builder
 	toolStream := newIncrementalToolStream(toolChoiceMode)
 	requiresToolCall := toolChoiceMode == "required" || strings.HasPrefix(toolChoiceMode, "force:")
 
@@ -1797,6 +2180,7 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 		if text == "" {
 			return
 		}
+		clientVisibleText.WriteString(text)
 		ensureText()
 		sendAnthropicSSE(w, flusher, "content_block_delta", map[string]interface{}{
 			"type": "content_block_delta", "index": blockIndex,
@@ -1813,6 +2197,7 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 	}
 
 	callOpts := CallOptions{
+		Context:               ctx,
 		NativeToolUses:        &nativeToolUses,
 		ThinkingBlocks:        &thinkingBlocks,
 		HasClientTools:        hasBridgedClientTools,
@@ -1872,11 +2257,14 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 		return cbErr
 	}
 	if cbErr != nil {
-		log.Printf("[err] %s: tool stream ended after partial output: %v", requestID, cbErr)
+		return writeAnthropicStreamError(w, flusher, requestID, cbErr)
 	}
 
 	content := fullContent.String()
-	if content == "" && len(nativeToolUses) == 0 && thinkingForLog.Len() == 0 {
+	if strings.TrimSpace(content) == "" && len(nativeToolUses) == 0 {
+		if headersSent {
+			return writeAnthropicStreamError(w, flusher, requestID, ErrEmptyResponse)
+		}
 		return ErrEmptyResponse
 	}
 	emitText(toolStream.FlushText())
@@ -1921,15 +2309,12 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 
 	if prepared.WebSearchQuery != "" {
 		ensureHeaders()
-		searchUsage, searchErr := streamWebSearch(w, flusher, acc, prepared.WebSearchQuery, model, requestID, &blockIndex, hasThinking)
+		searchUsage, searchText, searchErr := streamWebSearch(ctx, w, flusher, acc, prepared.WebSearchQuery, model, requestID, &blockIndex, hasThinking, session)
 		if searchErr != nil {
-			log.Printf("[bridge] WebSearch streaming failed: %v", searchErr)
+			return writeAnthropicStreamError(w, flusher, requestID, searchErr)
 		}
-		if searchUsage != nil && finalUsage != nil {
-			finalUsage.PromptTokens += searchUsage.PromptTokens
-			finalUsage.CompletionTokens += searchUsage.CompletionTokens
-			finalUsage.TotalTokens = finalUsage.PromptTokens + finalUsage.CompletionTokens
-		}
+		finalUsage = mergeSequentialUsage(finalUsage, searchUsage)
+		clientVisibleText.WriteString(searchText)
 	}
 
 	for _, call := range prepared.ToolCalls {
@@ -1947,6 +2332,13 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 		sendAnthropicSSE(w, flusher, "content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": blockIndex})
 		blockIndex++
 	}
+
+	continuation := ChatMessage{
+		Role:    "assistant",
+		Content: clientVisibleText.String(),
+	}
+	continuation.ToolCalls = append(continuation.ToolCalls, prepared.ToolCalls...)
+	session.publishAssistantContinuation(continuation)
 
 	stopReason := "end_turn"
 	if prepared.HasCalls {
@@ -1975,7 +2367,7 @@ func handleAnthropicStream(w http.ResponseWriter, acc *Account, messages []ChatM
 }
 
 // handleAnthropicNonStream handles non-streaming Anthropic response
-func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, toolChoiceMode string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic) error {
+func handleAnthropicNonStream(ctx context.Context, w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, toolChoiceMode string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic) error {
 	var fullContent strings.Builder
 	var finalUsage *UsageInfo
 	defer func() {
@@ -1990,6 +2382,7 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 	knownToolCallURLs := make(map[string][]string)
 
 	callOpts := CallOptions{
+		Context:               ctx,
 		ThinkingBlocks:        &thinkingBlocks,
 		HasClientTools:        hasBridgedClientTools,
 		EnableWebSearch:       enableWebSearch,
@@ -2038,9 +2431,6 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 	}
 
 	if err != nil {
-		if errors.Is(err, ErrQuotaExhausted) {
-			return err
-		}
 		log.Printf("[err] %s: %v", requestID, err)
 		return err
 	}
@@ -2048,7 +2438,7 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 	content := fullContent.String()
 
 	// Empty response: Notion returned 200 but produced no text — retry on next account
-	if len(content) == 0 && len(nativeToolUses) == 0 {
+	if strings.TrimSpace(content) == "" && len(nativeToolUses) == 0 {
 		log.Printf("[warn] %s: empty non-stream response from Notion, will retry", requestID)
 		return ErrEmptyResponse
 	}
@@ -2109,25 +2499,16 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 		// Intercept WebSearch tool calls → execute via Notion's native search
 		if prepared.WebSearchQuery != "" {
 			log.Printf("[bridge] WebSearch intercepted — executing via Notion native search: %q", prepared.WebSearchQuery)
-			searchResult, searchUsage, searchErr := executeWebSearch(acc, prepared.WebSearchQuery, model, requestID)
+			searchResult, searchUsage, searchErr := executeWebSearch(ctx, acc, prepared.WebSearchQuery, model, requestID, session)
 			if searchErr == nil && searchResult != "" {
 				if doneText != "" {
 					doneText = doneText + "\n\n" + searchResult
 				} else {
 					doneText = searchResult
 				}
-				if searchUsage != nil && finalUsage != nil {
-					finalUsage.PromptTokens += searchUsage.PromptTokens
-					finalUsage.CompletionTokens += searchUsage.CompletionTokens
-					finalUsage.TotalTokens = finalUsage.PromptTokens + finalUsage.CompletionTokens
-				}
+				finalUsage = mergeSequentialUsage(finalUsage, searchUsage)
 			} else if searchErr != nil {
-				log.Printf("[bridge] WebSearch execution failed: %v", searchErr)
-				if doneText != "" {
-					doneText = doneText + "\n\nWeb search failed: " + searchErr.Error()
-				} else {
-					doneText = "Web search failed: " + searchErr.Error()
-				}
+				return searchErr
 			}
 		}
 
@@ -2160,6 +2541,13 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 			Text: cleanCitationsWithContext(content, knownToolCallURLs, knownCitationURLs, knownCitationDocs),
 		})
 	}
+	// WebSearch may have added a second inference step after the initial
+	// usage snapshot was created. Report the final peak-input/summed-output
+	// values actually used by the complete request.
+	if finalUsage != nil {
+		aUsage.InputTokens = reportedInputTokens(finalUsage.PromptTokens, requestDiagnostic)
+		aUsage.OutputTokens = finalUsage.CompletionTokens
+	}
 
 	resp := AnthropicResponse{
 		ID:         requestID,
@@ -2178,6 +2566,7 @@ func handleAnthropicNonStream(w http.ResponseWriter, acc *Account, messages []Ch
 		}
 	}
 
+	session.publishAssistantContinuation(continuationMessageFromBlocks(contentBlocks))
 	LogAPIOutputJSON(requestID, "anthropic non-stream response", resp)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -2188,6 +2577,20 @@ func sendAnthropicSSE(w http.ResponseWriter, flusher http.Flusher, eventType str
 	raw, _ := json.Marshal(data)
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, raw)
 	flusher.Flush()
+}
+
+func writeAnthropicStreamError(w http.ResponseWriter, flusher http.Flusher, requestID string, cause error) error {
+	log.Printf("[err] %s: upstream stream interrupted after partial output: %v", requestID, cause)
+	payload := map[string]interface{}{
+		"type": "error",
+		"error": map[string]interface{}{
+			"type":    "api_error",
+			"message": "upstream stream interrupted: " + cause.Error(),
+		},
+	}
+	LogAPIOutputJSON(requestID, "anthropic stream error", payload)
+	sendAnthropicSSE(w, flusher, "error", payload)
+	return fmt.Errorf("%w: %w", ErrStreamResponseStarted, cause)
 }
 
 // truncateForLog truncates by rune count to avoid splitting UTF-8 sequences.
@@ -2334,7 +2737,7 @@ func generateFakeSignature() string {
 //
 // SSE headers are deferred until the first actual data arrives, so that quota-
 // exhaustion retries don't produce duplicate headers.
-func handleResearcherStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasThinking bool, requestDiagnostic *RequestDiagnostic) error {
+func handleResearcherStream(ctx context.Context, w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasThinking bool, requestDiagnostic *RequestDiagnostic) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeAnthropicError(w, requestID, http.StatusInternalServerError, "streaming not supported", "api_error")
@@ -2407,6 +2810,7 @@ func handleResearcherStream(w http.ResponseWriter, acc *Account, messages []Chat
 	}
 
 	callOpts := CallOptions{
+		Context:           ctx,
 		IsResearcher:      true,
 		RequestID:         requestID,
 		RequestDiagnostic: requestDiagnostic,
@@ -2485,14 +2889,14 @@ func handleResearcherStream(w http.ResponseWriter, acc *Account, messages []Chat
 	}, callOpts)
 
 	if cbErr != nil {
-		if errors.Is(cbErr, ErrQuotaExhausted) || errors.Is(cbErr, ErrResearchQuotaExhausted) {
+		log.Printf("[err] %s researcher: %v", requestID, cbErr)
+		if headersSent {
+			return writeAnthropicStreamError(w, flusher, requestID, cbErr)
+		}
+		if errors.Is(cbErr, ErrResearchQuotaExhausted) {
 			return cbErr
 		}
-		log.Printf("[err] %s researcher: %v", requestID, cbErr)
-		if !headersSent {
-			writeAnthropicError(w, requestID, http.StatusBadGateway, "notion researcher error: "+cbErr.Error(), "api_error")
-		}
-		return nil
+		return cbErr
 	}
 
 	// Close text block if started
@@ -2554,7 +2958,7 @@ func handleResearcherStream(w http.ResponseWriter, acc *Account, messages []Chat
 
 // handleResearcherNonStream handles non-streaming Anthropic response for researcher mode.
 // Collects all content first, then returns a complete JSON response.
-func handleResearcherNonStream(w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasThinking bool, requestDiagnostic *RequestDiagnostic) error {
+func handleResearcherNonStream(ctx context.Context, w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasThinking bool, requestDiagnostic *RequestDiagnostic) error {
 	var fullContent strings.Builder
 	var finalUsage *UsageInfo
 	defer func() {
@@ -2563,6 +2967,7 @@ func handleResearcherNonStream(w http.ResponseWriter, acc *Account, messages []C
 	var thinkingBlocks []ThinkingBlock
 
 	callOpts := CallOptions{
+		Context:           ctx,
 		IsResearcher:      true,
 		ThinkingBlocks:    &thinkingBlocks,
 		RequestID:         requestID,
@@ -2579,12 +2984,11 @@ func handleResearcherNonStream(w http.ResponseWriter, acc *Account, messages []C
 	}, callOpts)
 
 	if cbErr != nil {
-		if errors.Is(cbErr, ErrQuotaExhausted) || errors.Is(cbErr, ErrResearchQuotaExhausted) {
+		if errors.Is(cbErr, ErrResearchQuotaExhausted) {
 			return cbErr
 		}
 		log.Printf("[err] %s researcher non-stream: %v", requestID, cbErr)
-		writeAnthropicError(w, requestID, http.StatusBadGateway, "notion researcher error: "+cbErr.Error(), "api_error")
-		return nil
+		return cbErr
 	}
 
 	aUsage := &AnthropicUsage{}

@@ -26,7 +26,7 @@ const (
 
 const publicModelCreatedAt = int64(1735689600)
 
-var dashboardSettingsMu sync.Mutex
+var dashboardSettingsMu sync.RWMutex
 
 type publicModelResponse struct {
 	Object string        `json:"object"`
@@ -317,8 +317,13 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 			http.Error(w, `{"error":"unauthorized, dashboard login required"}`, http.StatusUnauthorized)
 			return
 		}
-		dashboardSettingsMu.Lock()
-		defer dashboardSettingsMu.Unlock()
+		if r.Method == http.MethodGet {
+			dashboardSettingsMu.RLock()
+			defer dashboardSettingsMu.RUnlock()
+		} else {
+			dashboardSettingsMu.Lock()
+			defer dashboardSettingsMu.Unlock()
+		}
 
 		switch r.Method {
 		case "GET":
@@ -332,7 +337,7 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				"enable_tool_bridge":               AppConfig.ToolBridgeEnabled(),
 				"tool_choice_policy":               AppConfig.ToolChoicePolicy(),
 				"debug_logging":                    AppConfig.Server.DebugLogging,
-				"notion_proxy":                     AppConfig.NotionProxyURL(),
+				"notion_proxy":                     strings.TrimSpace(AppConfig.Proxy.NotionProxy),
 			})
 
 		case "PUT":
@@ -361,6 +366,7 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 			}
 
 			changed := false
+			invalidateThreads := false
 			rebuildTransport := false
 			if body.EnableWebSearch != nil {
 				AppConfig.Proxy.EnableWebSearch = body.EnableWebSearch
@@ -381,6 +387,7 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				if AppConfig.Proxy.UseClientSystemPrompt != *body.UseClientSystemPrompt {
 					AppConfig.Proxy.UseClientSystemPrompt = *body.UseClientSystemPrompt
 					changed = true
+					invalidateThreads = true
 					log.Printf("[settings] use_client_system_prompt → %v", *body.UseClientSystemPrompt)
 				}
 			}
@@ -388,6 +395,7 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				if AppConfig.Proxy.UseNotionPersonalInstructions != *body.UseNotionPersonalInstructions {
 					AppConfig.Proxy.UseNotionPersonalInstructions = *body.UseNotionPersonalInstructions
 					changed = true
+					invalidateThreads = true
 					log.Printf("[settings] use_notion_personal_instructions → %v", *body.UseNotionPersonalInstructions)
 				}
 			}
@@ -395,12 +403,14 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				if AppConfig.Proxy.EnableToolBridge != *body.EnableToolBridge {
 					AppConfig.Proxy.EnableToolBridge = *body.EnableToolBridge
 					changed = true
+					invalidateThreads = true
 					log.Printf("[settings] enable_tool_bridge → %v", *body.EnableToolBridge)
 				}
 			}
 			if body.ToolChoicePolicy != nil && AppConfig.Proxy.ToolChoicePolicy != *body.ToolChoicePolicy {
 				AppConfig.Proxy.ToolChoicePolicy = *body.ToolChoicePolicy
 				changed = true
+				invalidateThreads = true
 				log.Printf("[settings] tool_choice_policy -> %s", *body.ToolChoicePolicy)
 			}
 			if body.DebugLogging != nil {
@@ -422,6 +432,7 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				}
 				if AppConfig.Proxy.NotionProxy != next {
 					AppConfig.Proxy.NotionProxy = next
+					setRuntimeNotionProxy(AppConfig, next)
 					changed = true
 					rebuildTransport = true
 					if next == "" {
@@ -443,6 +454,9 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 			if rebuildTransport {
 				RebuildChromeTransport()
 			}
+			if invalidateThreads {
+				globalSessionManager.Clear()
+			}
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"enable_web_search":                AppConfig.WebSearchEnabled(),
 				"enable_workspace_search":          AppConfig.WorkspaceSearchEnabled(),
@@ -453,7 +467,7 @@ func HandleAdminSettings(configPath string, auth *DashboardAuth) http.HandlerFun
 				"enable_tool_bridge":               AppConfig.ToolBridgeEnabled(),
 				"tool_choice_policy":               AppConfig.ToolChoicePolicy(),
 				"debug_logging":                    AppConfig.Server.DebugLogging,
-				"notion_proxy":                     AppConfig.NotionProxyURL(),
+				"notion_proxy":                     strings.TrimSpace(AppConfig.Proxy.NotionProxy),
 			})
 
 		default:
@@ -566,40 +580,35 @@ func setYAMLString(mapping *yaml.Node, key, value string) {
 	)
 }
 
-// planIncludesFullNotionAI reflects the current public product policy: full
-// Notion AI is included with Business and Enterprise. Free and Plus only get
-// a limited complimentary trial; the public docs do not publish a fixed count.
+// planIncludesFullNotionAI reflects the current product policy: full Notion AI
+// is included with Business and Enterprise. "team" is Notion's legacy/internal
+// paid workspace identifier. Free and Plus only get a limited complimentary
+// trial; the public docs do not publish a fixed count.
 func planIncludesFullNotionAI(plan string) bool {
 	switch strings.ToLower(strings.TrimSpace(plan)) {
-	case "business", "enterprise":
+	case "team", "business", "enterprise":
 		return true
 	default:
 		return false
 	}
 }
 
-// isFreePlan is retained as the internal "complimentary/trial account"
-// predicate used by failover code. A live premium signal still wins for old or
-// non-standard plan names, but Plus is no longer assumed to have monthly AI.
+// isFreePlan is retained as the internal complimentary/trial predicate used by
+// failover code. Private Premium credit fields are deliberately not considered:
+// they are diagnostics, not an authoritative workspace-plan identifier.
 func isFreePlan(acc *Account) bool {
 	if acc == nil {
 		return true
 	}
-	if planIncludesFullNotionAI(acc.PlanType) {
+	planType := acc.planTypeSnapshot()
+	if planIncludesFullNotionAI(planType) {
 		return false
 	}
-	quota := acc.quotaInfoSnapshot()
-	if quota != nil && (quota.HasPremium || quota.PremiumLimit > 0 || quota.PremiumBalance > 0) {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(acc.PlanType)) {
+	switch strings.ToLower(strings.TrimSpace(planType)) {
 	case "personal", "free", "plus", "personal_pro", "":
 		return true
 	default:
-		// Unknown/legacy plans rely on the live premium signal when present.
-		if quota != nil && !quota.HasPremium {
-			return true
-		}
+		// Unknown plans are not permanently classified without evidence.
 		return false
 	}
 }

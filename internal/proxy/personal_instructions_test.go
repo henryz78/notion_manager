@@ -99,7 +99,14 @@ func TestLoadOldConfigDefaultsPersonalInstructionsOff(t *testing.T) {
 func TestAdminSettingsReadsUpdatesAndPersistsPersonalInstructions(t *testing.T) {
 	previous := AppConfig
 	AppConfig = DefaultConfig()
-	t.Cleanup(func() { AppConfig = previous })
+	globalSessionManager.Clear()
+	t.Cleanup(func() {
+		globalSessionManager.Clear()
+		AppConfig = previous
+	})
+
+	sessionKey := "settings-invalidation"
+	globalSessionManager.Set(sessionKey, newConversationSession("settings@example.com"))
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte("proxy:\n  enable_web_search: true\n"), 0o644); err != nil {
@@ -127,6 +134,9 @@ func TestAdminSettingsReadsUpdatesAndPersistsPersonalInstructions(t *testing.T) 
 	}
 	if AppConfig.ClientSystemPromptEnabled() || AppConfig.ToolBridgeEnabled() {
 		t.Fatal("independent prompt/tool settings were not updated")
+	}
+	if globalSessionManager.Get(sessionKey) != nil {
+		t.Fatal("thread-affecting settings update did not clear existing sessions")
 	}
 	persisted, err := os.ReadFile(configPath)
 	if err != nil {

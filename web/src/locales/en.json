@@ -21,6 +21,9 @@
     "no_workspace_tooltip": "No accessible workspace, excluded from selection pool",
     "used": "Used {{count}}",
     "no_workspace": "No Workspace",
+    "ai_disabled": "Notion AI Disabled",
+    "ai_disabled_alert": "Notion AI is disabled for this workspace, so this account is excluded from request routing. Enable AI in Notion first.",
+    "ai_disabled_tooltip": "Notion AI is disabled for this workspace; excluded from routing",
     "basic_remaining": "Basic Remaining",
     "premium_remaining": "Premium Remaining",
     "last_checked": "Checked {{date}}",
@@ -52,6 +55,8 @@
     "cookie_invalid": "Cookie Expired",
     "temporarily_skipped": "Skipped: {{reason}}",
     "basic_estimated": "Estimated Basic Remaining {{count}}",
+    "ai_allowance": "AI allowance",
+    "unlimited_now": "Unlimited for now",
     "premium_raw": "Premium balance Raw {{count}}",
     "disabled": "Disabled"
   },
@@ -74,12 +79,15 @@
     "basic_estimated": "Estimated Basic Remaining",
     "basic_same": "Space / User values match · Not a published quota",
     "basic_split": "Space {{space}} · User {{user}} (API values)",
+    "basic_same_with_unlimited": "Complimentary accounts only · {{count}} paid accounts currently unlimited",
+    "basic_split_with_unlimited": "Complimentary Space {{space}} · User {{user}} · {{count}} paid accounts currently unlimited",
     "premium_raw": "Premium balance Raw",
     "premium_signal": "{{count}} API signals · Research API usage {{usage}}",
     "premium_empty": "No Premium value returned · This does not represent Custom Agent credits",
     "available_count": "{{count}} available",
     "exhausted_count": "{{count}} exhausted",
     "no_workspace_count": "{{count}} no workspace",
+    "ai_disabled_count": "{{count}} AI disabled",
     "auth_invalid_count": "{{count}} cookie expired",
     "disabled_count": "{{count}} manually disabled",
     "temporary_count": "{{count}} temporarily skipped"
@@ -99,7 +107,7 @@
     "starting": "Starting...",
     "check_instructions_help": "Only checks whether the default Notion Agent has a personal-instructions page bound; instruction text is never read or stored.",
     "delete_missing_help": "Rechecks all accounts, then permanently deletes only accounts that currently have no default-Agent personal instructions.",
-    "cleanup_trials_help": "Permanently deletes only Free/Plus accounts disabled because complimentary AI responses were exhausted; other failures are kept."
+    "cleanup_trials_help": "Permanently deletes only exhausted limited-trial plans (Free, Personal, Plus, Personal Pro) after a live plan and quota recheck; other failures are kept."
   },
   "api": {
     "settings_title": "API Settings",
@@ -391,7 +399,7 @@
     "retry_action_failed": "Failed to retry failed items: {{error}}",
     "confirm_delete_missing": "The system will recheck all {{total}} accounts, then permanently delete only accounts that currently have no default-Agent personal instructions.\n\nThe last check found {{missing}} missing. Accounts with check failures are kept.\n\nContinue?",
     "confirm_delete_selected": "Permanently delete the selected {{count}} accounts and their login files?\n\nThis action cannot be undone.",
-    "confirm_delete_exhausted": "Permanently delete {{count}} Free/Plus accounts whose AI trial has been exhausted, including their login files?\n\nBusiness, Enterprise, temporary failures, and expired Cookie accounts are kept. Refresh quotas first if needed.\n\nContinue?"
+    "confirm_delete_exhausted": "Permanently delete {{count}} exhausted limited-trial accounts (Free, Personal, Plus, Personal Pro), including their login files?\n\nEach account is rechecked before deletion. Team, Business, Enterprise, temporary failures, and expired Cookie accounts are kept.\n\nContinue?"
   },
   "menu": {
     "more_actions": "More Actions",
@@ -423,6 +431,9 @@
     "quota_exhausted": "Quota Exhausted",
     "cookie_invalid": "Cookie Expired",
     "no_workspace": "No Workspace",
+    "ai_disabled": "Notion AI Disabled",
+    "ai_disabled_alert": "Notion AI is disabled for this workspace, so this account is excluded from request routing. Enable AI in Notion first.",
+    "ai_disabled_tooltip": "Notion AI is disabled for this workspace; excluded from routing",
     "temporary": "Temporarily Skipped",
     "instructions_configured": "Instructions Configured",
     "instructions_missing": "Instructions Missing",

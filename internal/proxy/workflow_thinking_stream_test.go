@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -35,6 +37,183 @@ func TestCleanAllLangTagsHoldsSplitOpeningMarker(t *testing.T) {
 	}
 	if got := cleanAllLangTags("prefix <label>"); got != "prefix <label>" {
 		t.Fatalf("ordinary angle-bracket text changed: %q", got)
+	}
+}
+
+func TestParseNDJSONStreamPreservesIncompleteLangLikeSuffixAtFinish(t *testing.T) {
+	for _, suffix := range []string{"<", "<l", "<la", "<lan", "<lang"} {
+		want := "literal " + suffix
+		event, err := json.Marshal(map[string]interface{}{
+			"type": "agent-inference",
+			"id":   "step1",
+			"value": []map[string]interface{}{{
+				"type":    "text",
+				"content": want,
+			}},
+			"finishedAt":   1,
+			"inputTokens":  1,
+			"outputTokens": 1,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got strings.Builder
+		err = parseNDJSONStream(bytes.NewReader(event), "", func(delta string, _ bool, _ *UsageInfo) {
+			got.WriteString(delta)
+		}, nil, nil, nil, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("suffix %q: %v", suffix, err)
+		}
+		if got.String() != want {
+			t.Fatalf("suffix %q: got %q, want %q", suffix, got.String(), want)
+		}
+	}
+}
+
+func TestParseNDJSONStreamPreservesLiteralCitationLikeSuffixAtFinish(t *testing.T) {
+	for _, suffix := range []string{"[", "[^", "[^abc"} {
+		want := "literal " + suffix
+		event, err := json.Marshal(map[string]interface{}{
+			"type": "agent-inference",
+			"id":   "step1",
+			"value": []map[string]interface{}{{
+				"type":    "text",
+				"content": want,
+			}},
+			"finishedAt":   1,
+			"inputTokens":  1,
+			"outputTokens": 1,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got strings.Builder
+		err = parseNDJSONStream(bytes.NewReader(event), "", func(delta string, _ bool, _ *UsageInfo) {
+			got.WriteString(delta)
+		}, nil, nil, nil, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("suffix %q: %v", suffix, err)
+		}
+		if got.String() != want {
+			t.Fatalf("suffix %q: got %q, want %q", suffix, got.String(), want)
+		}
+	}
+}
+
+func TestParseNDJSONStreamRejectsMalformedAndTruncatedStreams(t *testing.T) {
+	t.Run("malformed event", func(t *testing.T) {
+		err := parseNDJSONStream(
+			bytes.NewBufferString("{not-json}\n"),
+			"",
+			func(string, bool, *UsageInfo) {},
+			nil, nil, nil, nil, nil, nil,
+		)
+		if err == nil || !strings.Contains(err.Error(), "malformed notion NDJSON") {
+			t.Fatalf("error=%v, want malformed NDJSON error", err)
+		}
+	})
+
+	t.Run("partial text without terminal event", func(t *testing.T) {
+		var got strings.Builder
+		err := parseNDJSONStream(
+			bytes.NewBufferString(`{"type":"agent-inference","id":"step1","value":[{"type":"text","content":"partial"}]}`),
+			"",
+			func(delta string, _ bool, _ *UsageInfo) { got.WriteString(delta) },
+			nil, nil, nil, nil, nil, nil,
+		)
+		if !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("error=%v, want io.ErrUnexpectedEOF", err)
+		}
+		if got.String() != "partial" {
+			t.Fatalf("partial output=%q, want partial", got.String())
+		}
+	})
+
+	t.Run("empty stream without terminal event", func(t *testing.T) {
+		err := parseNDJSONStream(
+			bytes.NewBufferString(`{"type":"ignored"}`),
+			"",
+			func(string, bool, *UsageInfo) {},
+			nil, nil, nil, nil, nil, nil,
+		)
+		if !errors.Is(err, ErrEmptyResponse) {
+			t.Fatalf("error=%v, want ErrEmptyResponse", err)
+		}
+	})
+
+	t.Run("finished internal search without final answer", func(t *testing.T) {
+		err := parseNDJSONStream(
+			bytes.NewBufferString(`{"type":"agent-inference","id":"search-step","value":[{"type":"tool_use","id":"toolu_1","name":"search","content":"{}"}],"finishedAt":1,"inputTokens":10,"outputTokens":1}`),
+			"",
+			func(string, bool, *UsageInfo) {},
+			nil, nil, nil, nil, nil, nil,
+		)
+		if !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("error=%v, want io.ErrUnexpectedEOF", err)
+		}
+	})
+}
+
+func TestParseResearcherStreamRejectsMalformedEvent(t *testing.T) {
+	err := parseResearcherStream(
+		bytes.NewBufferString("{not-json}\n"),
+		"",
+		func(string, bool, *UsageInfo) {},
+		nil,
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "malformed notion researcher NDJSON") {
+		t.Fatalf("error=%v, want malformed researcher NDJSON error", err)
+	}
+}
+
+func TestParseResearcherStreamRejectsWrongShapeAfterPartialReport(t *testing.T) {
+	var report strings.Builder
+	stream := strings.Join([]string{
+		`{"type":"researcher-report","id":"report","value":"partial report"}`,
+		`{"type":"researcher-report","id":"report","value":{}}`,
+	}, "\n")
+	err := parseResearcherStream(
+		bytes.NewBufferString(stream),
+		"",
+		func(delta string, _ bool, _ *UsageInfo) { report.WriteString(delta) },
+		nil,
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "malformed researcher-report") {
+		t.Fatalf("error=%v, want malformed researcher-report error", err)
+	}
+	if report.String() != "partial report" {
+		t.Fatalf("partial report=%q", report.String())
+	}
+}
+
+func TestParseResearcherStreamRejectsMissingReport(t *testing.T) {
+	err := parseResearcherStream(
+		bytes.NewBufferString(`{"type":"researcher-text-observation","value":"query"}`),
+		"",
+		func(string, bool, *UsageInfo) {},
+		nil,
+		nil,
+	)
+	if !errors.Is(err, ErrEmptyResponse) {
+		t.Fatalf("error=%v, want ErrEmptyResponse", err)
+	}
+}
+
+func TestParseNDJSONPatchInternalSearchUsageIsNotTerminal(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"patch","v":[{"o":"a","p":"/s/0/value/-","v":{"type":"tool_use","id":"toolu_1","name":"search","content":"{\"web\":{\"queries\":[\"weather\"]}}"}}]}`,
+		`{"type":"patch","v":[{"o":"a","p":"/s/0/inputTokens","v":10},{"o":"a","p":"/s/0/outputTokens","v":2}]}`,
+	}, "\n")
+	err := parseNDJSONStream(
+		bytes.NewBufferString(stream),
+		"",
+		func(string, bool, *UsageInfo) {},
+		nil, nil, nil, nil, nil, nil,
+	)
+	if err == nil {
+		t.Fatal("patch usage falsely completed an unfinished internal search")
 	}
 }
 
@@ -93,7 +272,7 @@ func TestParseNDJSONStreamCountsEachPatchUsagePathOnce(t *testing.T) {
 func TestParseNDJSONStreamEmitsWorkflowProcessThinking(t *testing.T) {
 	stream := strings.Join([]string{
 		`{"type":"agent-inference","id":"step1","value":[{"type":"thinking","content":"Let me search"}]}`,
-		`{"type":"agent-inference","id":"step1","value":[{"type":"thinking","content":"Let me search for information about Notion Agent."},{"type":"tool_use","id":"toolu_1","name":"search","content":"{\"web\":{\"queries\":[\"What is Notion Agent"}}]}`,
+		`{"type":"agent-inference","id":"step1","value":[{"type":"thinking","content":"Let me search for information about Notion Agent."},{"type":"tool_use","id":"toolu_1","name":"search","content":"{\"web\":{\"queries\":[\"What is Notion Agent"}]}`,
 		`{"type":"agent-inference","id":"step1","value":[{"type":"thinking","content":"Let me search for information about Notion Agent."},{"type":"tool_use","id":"toolu_1","name":"search","content":"{\"web\":{\"queries\":[\"What is Notion Agent and what can you do with it?\"]}}"}],"finishedAt":1,"inputTokens":10,"outputTokens":2}`,
 		`{"type":"agent-search-extracted-results","toolCallId":"toolu_1","results":[{"id":"webpage://?url=https%3A%2F%2Fexample.com%2Fagent","title":"How to work with your Agent"},{"id":"webpage://?url=https%3A%2F%2Fexample.com%2Fnotion-agent","title":"Notion Agent"}]}`,
 		`{"type":"agent-inference","id":"step2","value":[{"type":"thinking","content":"Let me summarize"}]}`,

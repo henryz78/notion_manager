@@ -119,6 +119,84 @@ func TestConvertOpenAIResponsesRequest_WithFunctionCallOutput(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIResponsesRequest_WithFunctionCallHistory(t *testing.T) {
+	req := &OpenAIResponsesRequest{
+		Model: "gpt-5.4",
+		Input: []interface{}{
+			map[string]interface{}{"type": "input_text", "text": "look up both cities"},
+			map[string]interface{}{
+				"type":      "function_call",
+				"call_id":   "call_beijing",
+				"name":      "weather",
+				"arguments": `{"city":"Beijing"}`,
+			},
+			map[string]interface{}{
+				"type":      "function_call",
+				"call_id":   "call_shanghai",
+				"name":      "weather",
+				"arguments": map[string]interface{}{"city": "Shanghai"},
+			},
+			map[string]interface{}{"type": "function_call_output", "call_id": "call_beijing", "output": "sunny"},
+			map[string]interface{}{"type": "function_call_output", "call_id": "call_shanghai", "output": "rainy"},
+			map[string]interface{}{"type": "input_text", "text": "compare them"},
+		},
+	}
+
+	anthReq, err := convertOpenAIResponsesRequest(req)
+	if err != nil {
+		t.Fatalf("convertOpenAIResponsesRequest() error = %v", err)
+	}
+	if len(anthReq.Messages) != 5 {
+		t.Fatalf("messages len = %d, want 5: %#v", len(anthReq.Messages), anthReq.Messages)
+	}
+	if anthReq.Messages[1].Role != "assistant" {
+		t.Fatalf("function calls role = %q, want assistant", anthReq.Messages[1].Role)
+	}
+	callBlocks := anthReq.Messages[1].Content.([]interface{})
+	if len(callBlocks) != 2 {
+		t.Fatalf("function call blocks = %#v", callBlocks)
+	}
+	firstCall := callBlocks[0].(map[string]interface{})
+	if firstCall["type"] != "tool_use" || firstCall["id"] != "call_beijing" || firstCall["name"] != "weather" {
+		t.Fatalf("first function call = %#v", firstCall)
+	}
+	var arguments map[string]interface{}
+	if err := json.Unmarshal(firstCall["input"].(json.RawMessage), &arguments); err != nil {
+		t.Fatalf("decode first function arguments: %v", err)
+	}
+	if arguments["city"] != "Beijing" {
+		t.Fatalf("first function arguments = %#v", arguments)
+	}
+	firstResult := anthReq.Messages[2].Content.([]interface{})[0].(map[string]interface{})
+	if firstResult["type"] != "tool_result" || firstResult["tool_use_id"] != "call_beijing" {
+		t.Fatalf("first function result = %#v", firstResult)
+	}
+	lastBlocks := anthReq.Messages[4].Content.([]interface{})
+	if lastBlocks[0].(map[string]interface{})["text"] != "compare them" {
+		t.Fatalf("last user message = %#v", lastBlocks)
+	}
+}
+
+func TestConvertOpenAIResponsesRequest_RejectsInvalidFunctionCallHistory(t *testing.T) {
+	tests := []struct {
+		name string
+		item map[string]interface{}
+		want string
+	}{
+		{name: "missing call id", item: map[string]interface{}{"type": "function_call", "name": "lookup"}, want: "call_id is required"},
+		{name: "missing name", item: map[string]interface{}{"type": "function_call", "call_id": "call_1"}, want: "name is required"},
+		{name: "invalid arguments", item: map[string]interface{}{"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{"}, want: "invalid JSON arguments"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := convertOpenAIResponsesRequest(&OpenAIResponsesRequest{Model: "gpt-5.4", Input: []interface{}{test.item}})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeOpenAIToolChoiceModes(t *testing.T) {
 	forced := map[string]interface{}{
 		"type":     "function",
@@ -135,6 +213,7 @@ func TestNormalizeOpenAIToolChoiceModes(t *testing.T) {
 		{name: "none", toolChoice: "none", wantMode: "none"},
 		{name: "required", toolChoice: "required", wantMode: "required"},
 		{name: "named", toolChoice: forced, wantMode: "force:Read"},
+		{name: "responses named", toolChoice: map[string]interface{}{"type": "function", "name": "Read"}, wantMode: "force:Read"},
 		{name: "legacy none", functionCall: "none", wantMode: "none"},
 		{name: "legacy named", functionCall: map[string]interface{}{"name": "Read"}, wantMode: "force:Read"},
 	}
@@ -244,6 +323,53 @@ func TestOpenAIChatStreamTranscoder_StreamsTextDeltasInOrder(t *testing.T) {
 	doneAt := strings.Index(body, "data: [DONE]")
 	if firstAt < 0 || secondAt < firstAt || usageAt < secondAt || doneAt < usageAt {
 		t.Fatalf("text stream out of order: first=%d second=%d usage=%d done=%d\n%s", firstAt, secondAt, usageAt, doneAt, body)
+	}
+}
+
+func TestOpenAIStreamTranscodersExposeAnthropicErrorWithoutSuccessMarker(t *testing.T) {
+	errorFrame := anthropicSSEFrame{
+		Event: "error",
+		Data:  json.RawMessage(`{"type":"error","error":{"type":"api_error","message":"upstream stream interrupted"}}`),
+	}
+
+	chatRecorder := httptest.NewRecorder()
+	chat := newOpenAIChatStreamTranscoder(chatRecorder, chatRecorder, "chatcmpl_error", "gpt-test", 123, false)
+	if err := chat.HandleFrame(anthropicSSEFrame{
+		Event: "content_block_delta",
+		Data:  json.RawMessage(`{"index":0,"delta":{"type":"text_delta","text":"partial"}}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := chat.HandleFrame(errorFrame); err != nil {
+		t.Fatal(err)
+	}
+	chatBody := chatRecorder.Body.String()
+	if !strings.Contains(chatBody, `"error"`) || !strings.Contains(chatBody, "upstream stream interrupted") {
+		t.Fatalf("chat stream missing error payload: %s", chatBody)
+	}
+	if strings.Contains(chatBody, "[DONE]") || strings.Contains(chatBody, `"finish_reason":"stop"`) {
+		t.Fatalf("chat stream falsely completed after error: %s", chatBody)
+	}
+
+	responsesRecorder := httptest.NewRecorder()
+	responses := newOpenAIResponsesStreamTranscoder(responsesRecorder, responsesRecorder, "resp_error", "gpt-test", 123)
+	if err := responses.HandleFrame(anthropicSSEFrame{
+		Event: "message_start",
+		Data:  json.RawMessage(`{"message":{"usage":{"input_tokens":1}}}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := responses.HandleFrame(errorFrame); err != nil {
+		t.Fatal(err)
+	}
+	responsesBody := responsesRecorder.Body.String()
+	if !strings.Contains(responsesBody, "event: response.failed") ||
+		!strings.Contains(responsesBody, `"status":"failed"`) ||
+		!strings.Contains(responsesBody, "upstream stream interrupted") {
+		t.Fatalf("responses stream missing failed event: %s", responsesBody)
+	}
+	if strings.Contains(responsesBody, "event: response.completed") {
+		t.Fatalf("responses stream falsely completed after error: %s", responsesBody)
 	}
 }
 

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,7 +38,9 @@ func withFetchers(
 	if m != nil {
 		modelsFetcher = m
 	}
-	workspaceProbe = func(*Account) (int, error) { return 1, nil }
+	workspaceProbe = func(*Account) (WorkspaceProbeResult, error) {
+		return WorkspaceProbeResult{Count: 1}, nil
+	}
 	return func() {
 		quotaFetcher = origQ
 		modelsFetcher = origM
@@ -46,7 +50,7 @@ func withFetchers(
 
 // withWorkspaceProbe overrides only the workspace probe stub for tests
 // that exercise the new "no workspace" code paths.
-func withWorkspaceProbe(t *testing.T, w func(*Account) (int, error)) func() {
+func withWorkspaceProbe(t *testing.T, w func(*Account) (WorkspaceProbeResult, error)) func() {
 	t.Helper()
 	orig := workspaceProbe
 	if w != nil {
@@ -155,7 +159,7 @@ func TestSaveAccountFilePreservesSessionFieldsAndMergesQuota(t *testing.T) {
 	// Atomic: no leftover .tmp.
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
-		if filepath.Ext(e.Name()) == ".tmp" || strings.HasSuffix(e.Name(), ".tmp") {
+		if filepath.Ext(e.Name()) == ".tmp" || strings.HasSuffix(e.Name(), ".tmp") || strings.Contains(e.Name(), ".tmp-") {
 			t.Fatalf("leftover tmp file: %s", e.Name())
 		}
 	}
@@ -166,6 +170,124 @@ func TestSaveAccountFileNoMatchingFileReturnsError(t *testing.T) {
 	acc := &Account{UserEmail: "ghost@example.com", QuotaInfo: &QuotaInfo{IsEligible: true}}
 	if err := saveAccountFile(dir, acc); err == nil {
 		t.Fatalf("expected error when no matching file, got nil")
+	}
+}
+
+func TestSaveAccountFileSerializesConcurrentWriters(t *testing.T) {
+	dir := t.TempDir()
+	email := "concurrent-save@example.com"
+	path := seedAccountFile(t, dir, email)
+	acc := &Account{UserEmail: email, PlanType: "free"}
+
+	const writers = 12
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			now := time.Unix(int64(i+1), 0)
+			acc.setModels([]ModelEntry{{ID: "model", Name: "Model"}})
+			acc.setQuotaInfo(&QuotaInfo{
+				IsEligible: true,
+				SpaceUsage: i,
+				SpaceLimit: 75,
+			}, &now)
+			errs <- saveAccountFile(dir, acc)
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent save failed: %v", err)
+		}
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read final account: %v", err)
+	}
+	var saved map[string]interface{}
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatalf("final account JSON is invalid: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".tmp-") {
+			t.Fatalf("temporary account file was left behind: %s", entry.Name())
+		}
+	}
+}
+
+func TestSaveAccountToFileIsAtomicAndProtected(t *testing.T) {
+	dir := t.TempDir()
+	const writers = 12
+
+	expectedTokens := make(map[string]bool, writers)
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		token := fmt.Sprintf("token-%d", i)
+		expectedTokens[token] = true
+		wg.Add(1)
+		go func(token string) {
+			defer wg.Done()
+			_, err := SaveAccountToFile(&Account{
+				TokenV2:   token,
+				UserID:    "user-id",
+				UserEmail: "atomic-save@example.com",
+				SpaceID:   "space-id",
+				PlanType:  "free",
+			}, dir)
+			errs <- err
+		}(token)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent SaveAccountToFile failed: %v", err)
+		}
+	}
+
+	path := filepath.Join(dir, "atomic-save@example.com.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read final account file: %v", err)
+	}
+	var saved struct {
+		TokenV2 string `json:"token_v2"`
+	}
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatalf("final account JSON is invalid: %v", err)
+	}
+	validToken := expectedTokens[saved.TokenV2]
+	if !validToken {
+		t.Fatalf("final account contains a torn or unknown token: %q", saved.TokenV2)
+	}
+
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat final account file: %v", err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("account file permissions=%#o, want 0600", got)
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read account dir: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".tmp-") {
+			t.Fatalf("temporary account file was left behind: %s", entry.Name())
+		}
 	}
 }
 

@@ -115,6 +115,7 @@ func DiscoverAccountFromToken(tokenV2 string) (*Account, error) {
 		AIEnabled   bool
 	}
 	var bestSpace *spaceInfo
+	bestSpaceScore := -1
 	for _, ptr := range spaceViewPointers {
 		raw, ok := userData.RecordMap.Space[ptr.SpaceID]
 		if !ok {
@@ -149,20 +150,29 @@ func DiscoverAccountFromToken(tokenV2 string) (*Account, error) {
 			si.ID = s.Value.Value.ID
 			si.Name = s.Value.Value.Name
 			si.PlanType = s.Value.Value.PlanType
-			aiOff := s.Value.Value.Settings.DisableAIFeature != nil && *s.Value.Value.Settings.DisableAIFeature
+			aiOff := (s.Value.Value.Settings.EnableAIFeature != nil && !*s.Value.Value.Settings.EnableAIFeature) ||
+				(s.Value.Value.Settings.DisableAIFeature != nil && *s.Value.Value.Settings.DisableAIFeature)
 			si.AIEnabled = !aiOff
 		} else {
 			si.ID = s.Value.ID
 			si.Name = s.Value.Name
 			si.PlanType = s.Value.PlanType
-			aiOff := s.Value.Settings.DisableAIFeature != nil && *s.Value.Settings.DisableAIFeature
+			aiOff := (s.Value.Settings.EnableAIFeature != nil && !*s.Value.Settings.EnableAIFeature) ||
+				(s.Value.Settings.DisableAIFeature != nil && *s.Value.Settings.DisableAIFeature)
 			si.AIEnabled = !aiOff
 		}
 		if si.ID == "" {
 			si.ID = ptr.SpaceID
 		}
-		if bestSpace == nil || (si.AIEnabled && si.PlanType != "free") {
+		score := workspacePreference(notionWorkspaceMetadata{
+			ID:        si.ID,
+			Name:      si.Name,
+			PlanType:  si.PlanType,
+			AIEnabled: si.AIEnabled,
+		})
+		if bestSpace == nil || score > bestSpaceScore {
 			bestSpace = &si
+			bestSpaceScore = score
 		}
 	}
 	if bestSpace == nil {
@@ -195,20 +205,25 @@ func DiscoverAccountFromToken(tokenV2 string) (*Account, error) {
 
 	browserID := generateUUIDv4()
 	deviceID := generateUUIDv4()
+	workspaceCheckedAt := time.Now()
+	workspaceAIEnabled := bestSpace.AIEnabled
 
 	acc := &Account{
-		TokenV2:       tokenV2,
-		UserID:        userID,
-		UserName:      userName,
-		UserEmail:     userEmail,
-		SpaceID:       bestSpace.ID,
-		SpaceName:     bestSpace.Name,
-		SpaceViewID:   bestSpace.SpaceViewID,
-		PlanType:      bestSpace.PlanType,
-		Timezone:      timezone,
-		ClientVersion: DefaultClientVersion,
-		BrowserID:     browserID,
-		DeviceID:      deviceID,
+		TokenV2:            tokenV2,
+		UserID:             userID,
+		UserName:           userName,
+		UserEmail:          userEmail,
+		SpaceID:            bestSpace.ID,
+		SpaceName:          bestSpace.Name,
+		SpaceViewID:        bestSpace.SpaceViewID,
+		PlanType:           bestSpace.PlanType,
+		Timezone:           timezone,
+		ClientVersion:      DefaultClientVersion,
+		BrowserID:          browserID,
+		DeviceID:           deviceID,
+		SpaceCount:         len(spaceViewPointers),
+		WorkspaceCheckedAt: &workspaceCheckedAt,
+		WorkspaceAIEnabled: &workspaceAIEnabled,
 	}
 
 	// Step 2: Fetch available models
@@ -267,6 +282,14 @@ func SaveAccountToFile(acc *Account, dir string) (string, error) {
 		"browser_id":     acc.BrowserID,
 		"device_id":      acc.DeviceID,
 	}
+	profile := acc.profileSnapshot()
+	if profile.WorkspaceCheckedAt != nil {
+		data["space_count"] = profile.SpaceCount
+		data["workspace_checked_at"] = profile.WorkspaceCheckedAt.Format(time.RFC3339)
+		if profile.AIEnabled != nil {
+			data["workspace_ai_enabled"] = *profile.AIEnabled
+		}
+	}
 	modelSnapshot := acc.modelsSnapshot()
 	quota := acc.quotaSnapshot()
 	if len(modelSnapshot) > 0 {
@@ -306,10 +329,37 @@ func SaveAccountToFile(acc *Account, dir string) (string, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("create accounts dir: %w", err)
 	}
-
-	if err := os.WriteFile(path, append(out, '\n'), 0644); err != nil {
-		return "", fmt.Errorf("write account file: %w", err)
+	unlockFile, err := lockAccountFilePath(path)
+	if err != nil {
+		return "", err
 	}
+	defer unlockFile()
+	tmpFile, err := os.CreateTemp(dir, "."+filename+".tmp-*")
+	if err != nil {
+		return "", fmt.Errorf("create account temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmpFile.Chmod(0o600); err != nil {
+		_ = tmpFile.Close()
+		return "", fmt.Errorf("protect account temp file: %w", err)
+	}
+	if _, err := tmpFile.Write(append(out, '\n')); err != nil {
+		_ = tmpFile.Close()
+		return "", fmt.Errorf("write account temp file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return "", fmt.Errorf("close account temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return "", fmt.Errorf("replace account file: %w", err)
+	}
+	cleanupTmp = false
 
 	return filename, nil
 }
@@ -320,7 +370,7 @@ func (p *AccountPool) AddAccount(acc *Account) {
 	defer p.mu.Unlock()
 	// Check for duplicate by email
 	for i, existing := range p.accounts {
-		if existing.UserEmail == acc.UserEmail {
+		if strings.EqualFold(strings.TrimSpace(existing.UserEmail), strings.TrimSpace(acc.UserEmail)) {
 			// Replace existing
 			p.accounts[i] = acc
 			log.Printf("[account] replaced: %s (%s)", acc.UserName, acc.UserEmail)
@@ -350,10 +400,30 @@ func DeleteAccountFile(email, dir string) error {
 		if err := json.Unmarshal(data, &existing); err != nil {
 			continue
 		}
-		if e, _ := existing["user_email"].(string); e == email {
+		if e, _ := existing["user_email"].(string); strings.EqualFold(e, email) {
+			unlockFile, err := lockAccountFilePath(path)
+			if err != nil {
+				return err
+			}
+			latest, err := os.ReadFile(path)
+			if err != nil {
+				unlockFile()
+				return fmt.Errorf("re-read account file %s: %w", entry.Name(), err)
+			}
+			var latestAccount map[string]interface{}
+			if err := json.Unmarshal(latest, &latestAccount); err != nil {
+				unlockFile()
+				return fmt.Errorf("parse account file %s: %w", entry.Name(), err)
+			}
+			if latestEmail, _ := latestAccount["user_email"].(string); !strings.EqualFold(latestEmail, email) {
+				unlockFile()
+				continue
+			}
 			if err := os.Remove(path); err != nil {
+				unlockFile()
 				return fmt.Errorf("delete file %s: %w", entry.Name(), err)
 			}
+			unlockFile()
 			log.Printf("[account] deleted file: %s", entry.Name())
 			return nil
 		}
@@ -519,11 +589,12 @@ func accountImportInfo(acc *Account) map[string]string {
 	if acc == nil {
 		return map[string]string{}
 	}
+	planType := acc.planTypeSnapshot()
 	return map[string]string{
 		"name":      acc.UserName,
 		"email":     acc.UserEmail,
 		"space":     acc.SpaceName,
-		"plan_type": acc.PlanType,
+		"plan_type": planType,
 	}
 }
 
@@ -983,17 +1054,16 @@ func HandleDeleteAccount(pool *AccountPool, accountsDir string, auth *DashboardA
 			return
 		}
 
-		// Remove from pool
-		if !pool.RemoveAccountByEmail(email) {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "account not found in pool"})
+		if err := deleteAccountByEmail(pool, accountsDir, email); err != nil {
+			if os.IsNotExist(err) {
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(map[string]string{"error": "account not found"})
+				return
+			}
+			log.Printf("[delete-account] deletion failed: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
-		}
-
-		// Delete file
-		if err := DeleteAccountFile(email, accountsDir); err != nil {
-			log.Printf("[delete-account] file deletion warning: %v", err)
-			// Account removed from pool but file not deleted — not fatal
 		}
 
 		log.Printf("[delete-account] removed: %s", email)
@@ -1002,8 +1072,8 @@ func HandleDeleteAccount(pool *AccountPool, accountsDir string, auth *DashboardA
 }
 
 // isComplimentaryPlanType reports plans that currently receive only a limited
-// complimentary Notion AI trial. Business and Enterprise are deliberately
-// excluded because full Notion AI is included with those plans.
+// complimentary Notion AI trial. Included-AI paid plans are deliberately
+// excluded.
 func isComplimentaryPlanType(plan string) bool {
 	switch strings.ToLower(strings.TrimSpace(plan)) {
 	case "free", "personal", "plus", "personal_pro":
@@ -1015,18 +1085,19 @@ func isComplimentaryPlanType(plan string) bool {
 
 // isExhaustedComplimentaryAccount is intentionally narrower than the general
 // unusable-account check: bulk cleanup must not delete accounts disabled only
-// by an expired cookie, missing workspace, temporary upstream failure, or a
-// Business/Enterprise issue. A live premium signal also protects legacy or
-// add-on Plus accounts from being treated as complimentary-only.
+// by an expired cookie, missing workspace, temporary upstream failure, or an
+// included-AI paid-plan issue. Private Premium credit fields are not used as
+// workspace-plan evidence.
 func isExhaustedComplimentaryAccount(acc *Account) bool {
-	if acc == nil || !isComplimentaryPlanType(acc.PlanType) || !isFreePlan(acc) {
+	if acc == nil || !isComplimentaryPlanType(acc.planTypeSnapshot()) {
 		return false
 	}
 	health := acc.healthSnapshot()
 	if health.AuthInvalid || (health.TemporaryUnavailableUntil != nil && health.TemporaryUnavailableUntil.After(time.Now())) {
 		return false
 	}
-	if acc.WorkspaceCheckedAt != nil && acc.SpaceCount == 0 {
+	profile := acc.profileSnapshot()
+	if profile.WorkspaceCheckedAt != nil && profile.SpaceCount == 0 {
 		return false
 	}
 	quota := acc.quotaSnapshot()
@@ -1034,6 +1105,31 @@ func isExhaustedComplimentaryAccount(acc *Account) bool {
 		return true
 	}
 	return quota.Info != nil && !quota.Info.IsEligible
+}
+
+func confirmExhaustedComplimentaryAccount(pool *AccountPool, acc *Account) (bool, error) {
+	if pool == nil || acc == nil {
+		return false, nil
+	}
+	workspace, err := workspaceProbe(acc)
+	if err != nil {
+		return false, fmt.Errorf("refresh workspace plan: %w", err)
+	}
+	pool.applyWorkspaceProfile(acc, workspace)
+	if pool.hasNoWorkspace(acc) {
+		return false, nil
+	}
+	if !isComplimentaryPlanType(acc.planTypeSnapshot()) {
+		return false, nil
+	}
+	eligible, err := pool.refreshAccountQuotaNow(acc)
+	if err != nil {
+		return false, fmt.Errorf("refresh quota: %w", err)
+	}
+	if eligible {
+		return false, nil
+	}
+	return isExhaustedComplimentaryAccount(acc), nil
 }
 
 func exhaustedComplimentaryEmails(pool *AccountPool) []string {
@@ -1052,10 +1148,10 @@ func exhaustedComplimentaryEmails(pool *AccountPool) []string {
 	return emails
 }
 
-// HandleDeleteExhaustedComplimentaryAccounts permanently removes all Free and
-// Plus accounts that are currently marked unavailable because their
+// HandleDeleteExhaustedComplimentaryAccounts permanently removes all Free,
+// Personal, Plus, and Personal Pro accounts that are currently unavailable because their
 // complimentary AI trial is exhausted. Other account health failures and all
-// Business/Enterprise accounts are left untouched.
+// included-AI paid plans are left untouched.
 func HandleDeleteExhaustedComplimentaryAccounts(pool *AccountPool, accountsDir string, auth *DashboardAuth) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1081,12 +1177,16 @@ func HandleDeleteExhaustedComplimentaryAccounts(pool *AccountPool, accountsDir s
 			failed[email] = "account not found"
 		}
 		for _, item := range runAccountsParallel(accounts, 10, func(acc *Account) error {
-			// Re-check inside the worker in case a quota refresh recovered the
-			// account after the initial candidate snapshot.
-			if !isExhaustedComplimentaryAccount(acc) {
+			// Destructive cleanup requires a fresh plan + authoritative V1
+			// confirmation. A network/schema failure always keeps the account.
+			confirmed, err := confirmExhaustedComplimentaryAccount(pool, acc)
+			if err != nil {
+				return err
+			}
+			if !confirmed {
 				return nil
 			}
-			return deleteAccountByEmail(pool, accountsDir, acc.UserEmail)
+			return deleteAccountByIdentity(pool, accountsDir, acc.UserEmail, acc.TokenV2)
 		}) {
 			if item.err != nil {
 				failed[item.email] = item.err.Error()

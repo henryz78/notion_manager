@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"time"
@@ -59,6 +60,7 @@ type Account struct {
 	// probed yet; we treat it as unknown / usable until the next refresh.
 	SpaceCount         int        `json:"-"`
 	WorkspaceCheckedAt *time.Time `json:"-"`
+	WorkspaceAIEnabled *bool      `json:"-"`
 }
 
 // QuotaInfo holds AI usage quota information from V1 + V2 APIs
@@ -254,21 +256,23 @@ type CitationCandidate struct {
 
 // CallOptions holds optional parameters for CallInference
 type CallOptions struct {
-	NativeToolUses        *[]AgentValueEntry
-	HasClientTools        bool // client tools are bridged; keep Notion's internal tools out of this request
-	ThinkingBlocks        *[]ThinkingBlock
-	EnableWebSearch       bool                  // force useWebSearch=true in Notion config
-	EnableWorkspaceSearch *bool                 // override workspace search (nil = use config default)
-	UseReadOnlyMode       bool                  // ASK mode — Notion's workflow useReadOnlyMode=true (model answers but skips edits)
-	Attachments           []UploadedAttachment  // uploaded file attachments to include in transcript
-	IsResearcher          bool                  // researcher mode (deep research)
-	ThinkingCallback      ThinkingDeltaCallback // incremental thinking/process callback for streaming
-	KnownCitationURLs     *[]string             // known web result URLs for repairing truncated citations
-	KnownCitationDocs     *[]CitationCandidate  // known search result metadata for context-based citation recovery
-	KnownToolCallURLs     *map[string][]string  // tool call id -> ordered web result URLs for resolving tool citations
-	Session               *Session              // real Notion thread for this client conversation
-	RequestID             string                // top-level API request ID for log correlation
-	RequestDiagnostic     *RequestDiagnostic    // metadata-only Dashboard request trace
+	Context                 context.Context
+	NativeToolUses          *[]AgentValueEntry
+	HasClientTools          bool // client tools are bridged; keep Notion's internal tools out of this request
+	ThinkingBlocks          *[]ThinkingBlock
+	EnableWebSearch         bool                  // force useWebSearch=true in Notion config
+	EnableWorkspaceSearch   *bool                 // override workspace search (nil = use config default)
+	UseReadOnlyMode         bool                  // ASK mode — Notion's workflow useReadOnlyMode=true (model answers but skips edits)
+	Attachments             []UploadedAttachment  // uploaded file attachments to include in transcript
+	IsResearcher            bool                  // researcher mode (deep research)
+	ThinkingCallback        ThinkingDeltaCallback // incremental thinking/process callback for streaming
+	KnownCitationURLs       *[]string             // known web result URLs for repairing truncated citations
+	KnownCitationDocs       *[]CitationCandidate  // known search result metadata for context-based citation recovery
+	KnownToolCallURLs       *map[string][]string  // tool call id -> ordered web result URLs for resolving tool citations
+	Session                 *Session              // real Notion thread for this client conversation
+	ForceThreadContinuation bool                  // continue Session.ThreadID before the client-visible turn is published
+	RequestID               string                // top-level API request ID for log correlation
+	RequestDiagnostic       *RequestDiagnostic    // metadata-only Dashboard request trace
 }
 
 // ========== Researcher Mode NDJSON Event Types ==========
@@ -349,9 +353,10 @@ type PatchOp struct {
 // FileAttachment represents a file extracted from Anthropic content blocks (image/document)
 // that needs to be uploaded to Notion before inference.
 type FileAttachment struct {
-	Data        []byte // raw file bytes (decoded from base64)
-	FileName    string // original or generated filename
-	ContentType string // MIME type (image/png, application/pdf, text/csv, etc.)
+	Data         []byte // raw file bytes (decoded from base64)
+	FileName     string // original or generated filename
+	ContentType  string // MIME type (image/png, application/pdf, text/csv, etc.)
+	MessageIndex int    // source Anthropic message index; used to avoid re-uploading history on continuation
 }
 
 // AttachmentTranscriptMsg is the transcript entry for uploaded files.

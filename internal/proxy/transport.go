@@ -123,12 +123,19 @@ func doChromeRequestWithIdleTimeout(req *http.Request, idleTimeout time.Duration
 
 	ctx, cancel := context.WithCancel(req.Context())
 	var headerTimedOut atomic.Bool
+	timerDone := make(chan struct{})
 	timer := time.AfterFunc(idleTimeout, func() {
+		defer close(timerDone)
 		headerTimedOut.Store(true)
 		cancel()
 	})
 	resp, err := client.Do(req.Clone(ctx))
-	timer.Stop()
+	if !timer.Stop() {
+		// Stop returning false means the callback has started or is about to
+		// start. Wait for it before inspecting headerTimedOut so a response
+		// arriving on the deadline cannot be canceled after being accepted.
+		<-timerDone
+	}
 	if err != nil {
 		cancel()
 		if headerTimedOut.Load() {

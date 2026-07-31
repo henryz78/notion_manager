@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -119,6 +120,20 @@ type RegisterConfig struct {
 
 // AppConfig is the global configuration instance
 var AppConfig *Config
+
+type notionProxySnapshot struct {
+	Config *Config
+	Value  string
+}
+
+var runtimeNotionProxy atomic.Value
+
+func setRuntimeNotionProxy(config *Config, value string) {
+	runtimeNotionProxy.Store(notionProxySnapshot{
+		Config: config,
+		Value:  strings.TrimSpace(value),
+	})
+}
 
 // ResolveConfigPath chooses the runtime configuration file. Local launches
 // keep using config.yaml. Container launches that set ACCOUNTS_DIR (as the
@@ -403,6 +418,7 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 
 	AppConfig = cfg
+	setRuntimeNotionProxy(cfg, cfg.Proxy.NotionProxy)
 	SetDebugLoggingEnabled(cfg.Server.DebugLogging)
 	SetAPILogInputEnabled(cfg.Server.APILogInput)
 	SetAPILogOutputEnabled(cfg.Server.APILogOutput)
@@ -767,6 +783,12 @@ func (c *Config) EffectiveToolChoice(clientChoice interface{}) interface{} {
 func (c *Config) NotionProxyURL() string {
 	if c == nil {
 		return ""
+	}
+	if raw := runtimeNotionProxy.Load(); raw != nil {
+		snapshot := raw.(notionProxySnapshot)
+		if snapshot.Config == c {
+			return snapshot.Value
+		}
 	}
 	return strings.TrimSpace(c.Proxy.NotionProxy)
 }

@@ -21,6 +21,9 @@
     "no_workspace_tooltip": "账号无可访问工作区，已被排除出选号池",
     "used": "已用 {{count}}",
     "no_workspace": "无工作区",
+    "ai_disabled": "工作区已关闭 Notion AI",
+    "ai_disabled_alert": "该工作区已关闭 Notion AI，账号不会参与请求选号。请先在 Notion 中启用 AI。",
+    "ai_disabled_tooltip": "工作区已关闭 Notion AI，已排除出选号池",
     "basic_remaining": "Basic 剩余",
     "premium_remaining": "Premium 剩余",
     "last_checked": "检查 {{date}}",
@@ -52,6 +55,8 @@
     "cookie_invalid": "Cookie 失效",
     "temporarily_skipped": "临时跳过 {{reason}}",
     "basic_estimated": "Basic 估算余量 {{count}}",
+    "ai_allowance": "AI 额度",
+    "unlimited_now": "当前无限",
     "premium_raw": "Premium balance 原始值 {{count}}",
     "disabled": "已禁用"
   },
@@ -74,12 +79,15 @@
     "basic_estimated": "接口 Basic 估算余量",
     "basic_same": "Space / User 返回值一致 · 非官网承诺额度",
     "basic_split": "Space {{space}} · User {{user}}（接口值）",
+    "basic_same_with_unlimited": "仅统计有限试用账号 · {{count}} 个付费账号当前无限",
+    "basic_split_with_unlimited": "有限试用账号 Space {{space}} · User {{user}} · {{count}} 个付费账号当前无限",
     "premium_raw": "Premium balance 原始值",
     "premium_signal": "{{count}} 个接口信号 · Research 接口用量 {{usage}}",
     "premium_empty": "接口未返回 Premium 数值 · 不代表 Custom Agents credits",
     "available_count": "{{count}} 可用",
     "exhausted_count": "{{count}} 耗尽",
     "no_workspace_count": "{{count}} 无工作区",
+    "ai_disabled_count": "{{count}} 个工作区已关闭 AI",
     "auth_invalid_count": "{{count}} Cookie 失效",
     "disabled_count": "{{count}} 手动禁用",
     "temporary_count": "{{count}} 临时跳过"
@@ -99,7 +107,7 @@
     "starting": "正在启动...",
     "check_instructions_help": "只检测默认 Notion Agent 是否绑定了官网个人指令页面，不读取或保存指令正文",
     "delete_missing_help": "会先重新检测全部账号，只永久删除当前确实没有设置官网默认 Agent 个人指令的账号",
-    "cleanup_trials_help": "仅永久删除因 complimentary AI responses 用完而禁用的 Free/Plus 账号；不会删除其他故障账号"
+    "cleanup_trials_help": "仅永久删除实时复核后确认已用完试用额度的有限试用套餐（Free、Personal、Plus、Personal Pro）；不会删除其他故障账号"
   },
   "api": {
     "settings_title": "API 设置",
@@ -391,7 +399,7 @@
     "retry_action_failed": "重试失败项失败：{{error}}",
     "confirm_delete_missing": "系统会先重新检测全部 {{total}} 个账号，然后永久删除当前确实没有设置官网默认 Agent 个人指令的账号。\n\n上次检测显示未设置：{{missing}} 个。\n检测失败的账号不会删除。\n\n确定继续吗？",
     "confirm_delete_selected": "将永久删除选中的 {{count}} 个账号及其登录文件。\n\n此操作不可撤销，确定继续吗？",
-    "confirm_delete_exhausted": "将永久删除 {{count}} 个已用完 AI 试用额度的 Free/Plus 账号及其登录文件。\n\nBusiness、Enterprise、临时故障和 Cookie 失效账号不会删除。建议先刷新配额。\n\n确定继续吗？"
+    "confirm_delete_exhausted": "将永久删除 {{count}} 个已用完 AI 试用额度的有限试用套餐账号（Free、Personal、Plus、Personal Pro）及其登录文件。\n\n删除前会逐个实时复核。Team、Business、Enterprise、临时故障和 Cookie 失效账号不会删除。\n\n确定继续吗？"
   },
   "menu": {
     "more_actions": "更多操作",
@@ -423,6 +431,9 @@
     "quota_exhausted": "额度用完",
     "cookie_invalid": "Cookie 失效",
     "no_workspace": "无工作区",
+    "ai_disabled": "工作区已关闭 Notion AI",
+    "ai_disabled_alert": "该工作区已关闭 Notion AI，账号不会参与请求选号。请先在 Notion 中启用 AI。",
+    "ai_disabled_tooltip": "工作区已关闭 Notion AI，已排除出选号池",
     "temporary": "临时跳过",
     "instructions_configured": "个人指令已设置",
     "instructions_missing": "个人指令未设置",
