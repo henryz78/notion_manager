@@ -58,7 +58,18 @@
     "ai_allowance": "AI allowance",
     "unlimited_now": "Unlimited for now",
     "premium_raw": "Premium balance Raw {{count}}",
-    "disabled": "Disabled"
+    "disabled": "Disabled",
+    "unnamed_workspace": "Unnamed Workspace",
+    "unnamed_login": "Unnamed Login",
+    "email_unavailable": "Email unavailable",
+    "workspace_identity": "Workspace {{id}}",
+    "select_login": "Select every workspace for {{email}}",
+    "workspaces_count": "{{count}} workspaces",
+    "workspace_health": "{{available}} / {{total}} workspaces available",
+    "workspaces_selected": "{{count}} selected",
+    "expand_workspaces": "Expand",
+    "collapse_workspaces": "Collapse",
+    "auto_routing_note": "New gateway conversations still use automatic backend routing. Open or manage a workspace below only when you want an exact target."
   },
   "stats": {
     "total_accounts": "Total Accounts",
@@ -216,6 +227,7 @@
       "check_failed_kept": " · instruction check failed; kept by Import All",
       "configured_suffix": " · personal instructions configured",
       "missing_suffix": " · personal instructions missing",
+      "multiple_workspaces": "Imported {{count}} workspaces",
       "unnamed_space": "Unnamed Workspace",
       "unknown_plan": "Unknown Plan",
       "request_failed": "Request failed"

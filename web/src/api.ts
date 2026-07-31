@@ -208,6 +208,35 @@ export async function fetchDashboardData(params: AccountListParams = {}): Promis
   return resp.json()
 }
 
+// Account cards are grouped by login identity in the browser, so one logical
+// login must not be split across server-side workspace pages. Fetch filtered
+// workspace rows in bounded 500-row pages and let the UI paginate the grouped
+// login cards. Pools below 500 workspaces still use a single request.
+export async function fetchAllDashboardData(
+  params: Pick<AccountListParams, 'query' | 'status'> = {},
+): Promise<DashboardData> {
+  const pageSize = 500
+  const first = await fetchDashboardData({ ...params, page: 0, pageSize })
+  const filteredTotal = first.filtered_total ?? first.accounts.length
+  if (first.accounts.length >= filteredTotal) {
+    return { ...first, page: 0, page_size: first.accounts.length }
+  }
+
+  const accounts = [...first.accounts]
+  const pageCount = Math.ceil(filteredTotal / pageSize)
+  // Keep request fan-out modest for very large pools.
+  for (let start = 1; start < pageCount; start += 4) {
+    const pages = await Promise.all(
+      Array.from(
+        { length: Math.min(4, pageCount - start) },
+        (_, offset) => fetchDashboardData({ ...params, page: start + offset, pageSize }),
+      ),
+    )
+    pages.forEach(page => accounts.push(...page.accounts))
+  }
+  return { ...first, accounts, page: 0, page_size: accounts.length, filtered_total: filteredTotal }
+}
+
 export async function triggerRefresh(): Promise<{ started: boolean; message?: string }> {
   // Uses dashboard session cookie for auth (not API key)
   const resp = await fetch('/admin/refresh', { method: 'POST' })
@@ -221,14 +250,29 @@ export async function fetchTokenStats(): Promise<TokenStats> {
   return resp.json()
 }
 
-export async function fetchAccountSelection(query = '', status: AccountStatusFilter = 'all'): Promise<string[]> {
+export interface AccountSelection {
+  account_id?: string
+  email: string
+}
+
+export async function fetchAccountSelection(query = '', status: AccountStatusFilter = 'all'): Promise<AccountSelection[]> {
   const sp = new URLSearchParams()
   if (query.trim()) sp.set('q', query.trim())
   if (status !== 'all') sp.set('status', status)
   const resp = await fetch(`/admin/accounts/selection?${sp.toString()}`, { credentials: 'same-origin' })
-  const data = await readJson<{ emails: string[] }>(resp, '全选账号接口返回了无效响应')
+  const data = await readJson<{ accounts?: AccountSelection[]; account_ids?: string[]; emails?: string[] }>(resp, '全选账号接口返回了无效响应')
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-  return data.emails || []
+  if (data.accounts && data.accounts.length > 0) return data.accounts
+  if (data.account_ids && data.account_ids.length > 0) {
+    return data.account_ids.map((account_id, index) => ({
+      account_id,
+      email: data.emails?.[index] || '',
+    }))
+  }
+  // Legacy servers expose only emails. Keep the selector typed as an email;
+  // callers can then send the legacy `emails` field instead of accidentally
+  // placing an email string in `account_ids`.
+  return (data.emails || []).map(email => ({ email }))
 }
 
 export interface RequestHistoryParams {
@@ -292,8 +336,8 @@ export async function fetchVersionStatus(refresh = false): Promise<DeploymentVer
   return data
 }
 
-export function openProxy(email: string) {
-  window.open(`/proxy/start?email=${encodeURIComponent(email)}`, '_blank')
+export function openProxy(accountId: string) {
+  window.open(`/proxy/start?account_id=${encodeURIComponent(accountId)}`, '_blank')
 }
 
 export function openBestProxy() {
@@ -307,15 +351,28 @@ export interface AddAccountResult {
   reason?: string
   error?: string
   filename?: string
+  filenames?: string[]
+  imported?: number
+  skipped?: number
   personal_instructions_checked?: boolean
   personal_instructions_configured?: boolean
   personal_instructions_check_error?: string
   account?: {
+    account_id: string
     name: string
     email: string
     space: string
+    space_id_short: string
     plan_type: string
   }
+  accounts?: Array<{
+    account_id: string
+    name: string
+    email: string
+    space: string
+    space_id_short: string
+    plan_type: string
+  }>
 }
 
 export type AccountImportPersonalInstructionsPolicy = 'all' | 'configured_only'
@@ -339,6 +396,7 @@ export async function addAccount(
 }
 
 export interface PersonalInstructionsCheckItem {
+  account_id?: string
   email: string
   configured?: boolean
   checked_at: string
@@ -377,12 +435,12 @@ export interface BulkAccountActionResult {
   check?: PersonalInstructionsCheckResult
 }
 
-export async function bulkAccountAction(action: BulkAccountAction, emails: string[]): Promise<BulkAccountActionResult> {
+export async function bulkAccountAction(action: BulkAccountAction, accountIds: string[]): Promise<BulkAccountActionResult> {
   const resp = await fetch('/admin/accounts/bulk', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     credentials: 'same-origin',
-    body: JSON.stringify({ action, emails }),
+    body: JSON.stringify({ action, account_ids: accountIds }),
   })
   const data = await readJson<BulkAccountActionResult>(resp, '批量账号操作接口返回了无效响应')
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
@@ -419,6 +477,7 @@ export type AccountBatchJobAction =
   | 'delete_exhausted'
 
 export interface AccountBatchJobStep {
+  account_id?: string
   email: string
   status: 'pending' | 'running' | 'success' | 'failed' | 'skipped'
   message?: string
@@ -443,12 +502,17 @@ export interface AccountBatchJob {
   steps: AccountBatchJobStep[]
 }
 
-export async function startAccountBatchJob(action: AccountBatchJobAction, emails: string[], concurrency = 10): Promise<AccountBatchJob> {
+export async function startAccountBatchJob(
+  action: AccountBatchJobAction,
+  accountIds: string[],
+  concurrency = 10,
+  legacyEmails: string[] = [],
+): Promise<AccountBatchJob> {
   const resp = await fetch('/admin/account-batch-jobs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     credentials: 'same-origin',
-    body: JSON.stringify({ action, emails, concurrency }),
+    body: JSON.stringify({ action, account_ids: accountIds, emails: legacyEmails, concurrency }),
   })
   const data = await readJson<AccountBatchJob | { error?: string; active_job?: AccountBatchJob }>(resp, '启动批量任务时返回了无效响应')
   if (resp.status === 409 && 'active_job' in data && data.active_job) return data.active_job
@@ -668,8 +732,8 @@ export async function getJob(id: string): Promise<RegisterJob> {
   return jsonOrError(resp) as Promise<RegisterJob>
 }
 
-export async function deleteAccount(email: string): Promise<void> {
-  const resp = await fetch(`/admin/accounts/${encodeURIComponent(email)}`, {
+export async function deleteAccount(accountId: string): Promise<void> {
+  const resp = await fetch(`/admin/accounts/${encodeURIComponent(accountId)}`, {
     method: 'DELETE',
     credentials: 'same-origin',
   })

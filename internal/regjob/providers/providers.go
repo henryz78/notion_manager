@@ -67,6 +67,7 @@ type LoginOptions struct {
 // Session; the runner stamps this into the JSON file so future re-login UX
 // can route back to the right Provider.
 type Session struct {
+	AccountID       string                   `json:"account_id,omitempty"`
 	TokenV2         string                   `json:"token_v2"`
 	UserID          string                   `json:"user_id"`
 	UserName        string                   `json:"user_name"`

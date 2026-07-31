@@ -100,6 +100,8 @@ func TestSaveAccountFilePreservesSessionFieldsAndMergesQuota(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	acc := &Account{
 		UserEmail: email,
+		UserID:    "u-" + email,
+		SpaceID:   "s-" + email,
 		QuotaInfo: &QuotaInfo{
 			IsEligible: true, SpaceUsage: 12, SpaceLimit: 100,
 			UserUsage: 5, UserLimit: 50, HasPremium: true,
@@ -254,7 +256,8 @@ func TestSaveAccountToFileIsAtomicAndProtected(t *testing.T) {
 		}
 	}
 
-	path := filepath.Join(dir, "atomic-save@example.com.json")
+	accountID := ComputeAccountID("user-id", "space-id")
+	path := filepath.Join(dir, accountID+"__atomic-save@example.com.json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read final account file: %v", err)
@@ -383,7 +386,7 @@ func TestRefreshAndPersistAccountQuotaFailureDoesNotPersist(t *testing.T) {
 	path := seedAccountFile(t, dir, email)
 
 	pool := NewAccountPool()
-	pool.accounts = []*Account{{UserEmail: email, SpaceID: "s"}}
+	pool.accounts = []*Account{{UserEmail: email, UserID: "u-" + email, SpaceID: "s-" + email}}
 
 	restore := withFetchers(t,
 		func(acc *Account) (*QuotaInfo, error) {
@@ -418,7 +421,7 @@ func TestRefreshAndPersistAccountModelsFailureKeepsQuota(t *testing.T) {
 	path := seedAccountFile(t, dir, email)
 
 	pool := NewAccountPool()
-	pool.accounts = []*Account{{UserEmail: email, SpaceID: "s"}}
+	pool.accounts = []*Account{{UserEmail: email, UserID: "u-" + email, SpaceID: "s-" + email}}
 
 	restore := withFetchers(t,
 		func(acc *Account) (*QuotaInfo, error) {
@@ -448,7 +451,7 @@ func TestRefreshAndPersistAccountIsConcurrencySafe(t *testing.T) {
 	_ = seedAccountFile(t, dir, email)
 
 	pool := NewAccountPool()
-	pool.accounts = []*Account{{UserEmail: email, SpaceID: "s"}}
+	pool.accounts = []*Account{{UserEmail: email, UserID: "u-" + email, SpaceID: "s-" + email}}
 
 	restore := withFetchers(t,
 		func(acc *Account) (*QuotaInfo, error) {

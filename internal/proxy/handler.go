@@ -214,7 +214,7 @@ func HandleAdminAccounts(pool *AccountPool, auth *DashboardAuth) http.HandlerFun
 	}
 }
 
-// HandleAdminAccountSelection returns only matching account emails so the
+// HandleAdminAccountSelection returns only matching account identities so the
 // dashboard can select every filtered result without downloading tokens,
 // models, quota payloads, or walking through every page.
 func HandleAdminAccountSelection(pool *AccountPool, auth *DashboardAuth) http.HandlerFunc {
@@ -232,14 +232,32 @@ func HandleAdminAccountSelection(pool *AccountPool, auth *DashboardAuth) http.Ha
 		accounts = filterAccountDetailsByStatus(accounts, r.URL.Query().Get("status"))
 		sortAccountDetails(accounts)
 		emails := make([]string, 0, len(accounts))
+		accountIDs := make([]string, 0, len(accounts))
+		selections := make([]map[string]string, 0, len(accounts))
 		for _, account := range accounts {
-			if email := strings.TrimSpace(mapString(account, "email")); email != "" {
+			email := strings.TrimSpace(mapString(account, "email"))
+			accountID := strings.TrimSpace(mapString(account, "account_id"))
+			if email != "" {
 				emails = append(emails, email)
+			}
+			if accountID != "" {
+				accountIDs = append(accountIDs, accountID)
+				selections = append(selections, map[string]string{
+					"account_id": accountID,
+					"email":      email,
+				})
+			} else if email != "" {
+				// Legacy in-memory profiles may not have enough identity
+				// fields to derive an account_id. Keep them selectable by
+				// their unique email until the profile is refreshed.
+				selections = append(selections, map[string]string{"email": email})
 			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"total":  len(emails),
-			"emails": emails,
+			"total":       len(selections),
+			"account_ids": accountIDs,
+			"emails":      emails,
+			"accounts":    selections,
 		})
 	}
 }

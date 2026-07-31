@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io/fs"
@@ -372,13 +373,28 @@ func HandleProxyStart(pool *AccountPool, rp *ReverseProxy, auth *DashboardAuth) 
 		}
 
 		email := r.URL.Query().Get("email")
+		accountID := r.URL.Query().Get("account_id")
 		best := r.URL.Query().Get("best")
 
 		var acc *Account
 		if best == "true" {
 			acc = pool.GetBestAccount()
+		} else if accountID != "" {
+			acc = pool.FindUsableByAccountID(accountID)
 		} else if email != "" {
-			acc = pool.GetAccountByEmail(email)
+			var err error
+			acc, err = pool.FindByEmail(email)
+			if err != nil {
+				var ambiguous *AmbiguousEmailError
+				if errors.As(err, &ambiguous) {
+					w.Header().Set("Content-Type", "application/json")
+					http.Error(w, `{"error":"email matches multiple workspaces; use account_id"}`, http.StatusConflict)
+					return
+				}
+			}
+		}
+		if acc != nil && pool.isUnusable(acc) {
+			acc = nil
 		}
 
 		if acc == nil {

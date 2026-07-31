@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,11 +14,16 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"notion-manager/internal/accountstore"
 )
 
-// DiscoverAccountFromToken calls Notion APIs using the given token_v2 to discover
-// all account information (user, space, models, quota).
-func DiscoverAccountFromToken(tokenV2 string) (*Account, error) {
+// DiscoverAccountsFromToken calls Notion APIs using the given token_v2 and
+// returns one independently addressable profile for every accessible
+// workspace. A Notion login may own both complimentary and paid workspaces;
+// collapsing them to one email loses the paid workspace and routes requests to
+// the wrong quota pool.
+func DiscoverAccountsFromToken(tokenV2 string) ([]*Account, error) {
 	client := getChromeHTTPClient(AppConfig.APITimeoutDuration())
 
 	// Step 1: Call loadUserContent to get user/space info
@@ -106,7 +112,9 @@ func DiscoverAccountFromToken(tokenV2 string) (*Account, error) {
 		}
 	}
 
-	// Find the best space (AI enabled, non-free preferred)
+	// Collect every accessible workspace. They are sorted by routing
+	// preference so the backward-compatible single-account wrapper returns the
+	// same paid/AI-enabled choice as the router.
 	type spaceInfo struct {
 		ID          string
 		Name        string
@@ -114,8 +122,8 @@ func DiscoverAccountFromToken(tokenV2 string) (*Account, error) {
 		SpaceViewID string
 		AIEnabled   bool
 	}
-	var bestSpace *spaceInfo
-	bestSpaceScore := -1
+	spaces := make([]spaceInfo, 0, len(spaceViewPointers))
+	seenSpaceIDs := make(map[string]struct{}, len(spaceViewPointers))
 	for _, ptr := range spaceViewPointers {
 		raw, ok := userData.RecordMap.Space[ptr.SpaceID]
 		if !ok {
@@ -164,20 +172,26 @@ func DiscoverAccountFromToken(tokenV2 string) (*Account, error) {
 		if si.ID == "" {
 			si.ID = ptr.SpaceID
 		}
-		score := workspacePreference(notionWorkspaceMetadata{
-			ID:        si.ID,
-			Name:      si.Name,
-			PlanType:  si.PlanType,
-			AIEnabled: si.AIEnabled,
-		})
-		if bestSpace == nil || score > bestSpaceScore {
-			bestSpace = &si
-			bestSpaceScore = score
+		if _, duplicate := seenSpaceIDs[si.ID]; duplicate {
+			continue
 		}
+		seenSpaceIDs[si.ID] = struct{}{}
+		spaces = append(spaces, si)
 	}
-	if bestSpace == nil {
+	if len(spaces) == 0 {
 		return nil, fmt.Errorf("no workspace found for this account")
 	}
+	sort.SliceStable(spaces, func(i, j int) bool {
+		left := workspacePreference(notionWorkspaceMetadata{
+			ID: spaces[i].ID, Name: spaces[i].Name,
+			PlanType: spaces[i].PlanType, AIEnabled: spaces[i].AIEnabled,
+		})
+		right := workspacePreference(notionWorkspaceMetadata{
+			ID: spaces[j].ID, Name: spaces[j].Name,
+			PlanType: spaces[j].PlanType, AIEnabled: spaces[j].AIEnabled,
+		})
+		return left > right
+	})
 
 	// Extract timezone from user_settings
 	timezone := "UTC"
@@ -203,71 +217,84 @@ func DiscoverAccountFromToken(tokenV2 string) (*Account, error) {
 		}
 	}
 
-	browserID := generateUUIDv4()
-	deviceID := generateUUIDv4()
 	workspaceCheckedAt := time.Now()
-	workspaceAIEnabled := bestSpace.AIEnabled
+	accounts := make([]*Account, 0, len(spaces))
+	for _, space := range spaces {
+		workspaceAIEnabled := space.AIEnabled
+		acc := &Account{
+			TokenV2:            tokenV2,
+			UserID:             userID,
+			UserName:           userName,
+			UserEmail:          userEmail,
+			SpaceID:            space.ID,
+			SpaceName:          space.Name,
+			SpaceViewID:        space.SpaceViewID,
+			PlanType:           space.PlanType,
+			Timezone:           timezone,
+			ClientVersion:      DefaultClientVersion,
+			BrowserID:          generateUUIDv4(),
+			DeviceID:           generateUUIDv4(),
+			SpaceCount:         len(spaces),
+			WorkspaceCheckedAt: &workspaceCheckedAt,
+			WorkspaceAIEnabled: &workspaceAIEnabled,
+		}
+		acc.EnsureAccountID()
 
-	acc := &Account{
-		TokenV2:            tokenV2,
-		UserID:             userID,
-		UserName:           userName,
-		UserEmail:          userEmail,
-		SpaceID:            bestSpace.ID,
-		SpaceName:          bestSpace.Name,
-		SpaceViewID:        bestSpace.SpaceViewID,
-		PlanType:           bestSpace.PlanType,
-		Timezone:           timezone,
-		ClientVersion:      DefaultClientVersion,
-		BrowserID:          browserID,
-		DeviceID:           deviceID,
-		SpaceCount:         len(spaceViewPointers),
-		WorkspaceCheckedAt: &workspaceCheckedAt,
-		WorkspaceAIEnabled: &workspaceAIEnabled,
+		// Models and quota can differ by workspace even under one login.
+		models, err := modelsFetcher(acc)
+		if err != nil {
+			log.Printf("[add-account] model fetch failed for workspace=%s (non-fatal): %v", acc.ShortSpaceID(), err)
+		} else {
+			acc.setModels(models)
+		}
+		quota, err := quotaFetcher(acc)
+		if err != nil {
+			log.Printf("[add-account] quota check failed for workspace=%s (non-fatal): %v", acc.ShortSpaceID(), err)
+		} else {
+			now := time.Now()
+			acc.setQuotaInfo(quota, &now)
+		}
+		accounts = append(accounts, acc)
 	}
-
-	// Step 2: Fetch available models
-	models, err := FetchModels(acc)
-	if err != nil {
-		log.Printf("[add-account] model fetch failed (non-fatal): %v", err)
-	} else {
-		acc.setModels(models)
-	}
-
-	// Step 3: Check quota
-	quota, err := CheckQuota(acc)
-	if err != nil {
-		log.Printf("[add-account] quota check failed (non-fatal): %v", err)
-	} else {
-		now := time.Now()
-		acc.setQuotaInfo(quota, &now)
-	}
-
-	return acc, nil
+	return accounts, nil
 }
 
+// DiscoverAccountFromToken keeps the historical API for callers that need one
+// profile. The first profile is the highest-preference workspace.
+func DiscoverAccountFromToken(tokenV2 string) (*Account, error) {
+	accounts, err := DiscoverAccountsFromToken(tokenV2)
+	if err != nil {
+		return nil, err
+	}
+	if len(accounts) == 0 {
+		return nil, fmt.Errorf("no workspace found for this account")
+	}
+	return accounts[0], nil
+}
+
+var discoverAccountsFromToken = DiscoverAccountsFromToken
+
 // SaveAccountToFile writes an Account to a JSON file in the accounts directory.
+// The filename uses the full account_id for collision safety:
+//
+//	<account_id>__<sanitized_email>.json
+//
+// If a file with the same account_id already exists (possibly under an old
+// naming scheme), it is overwritten at the same path. This prevents
+// duplicate files after migration.
+
 func SaveAccountToFile(acc *Account, dir string) (string, error) {
-	// Generate a safe filename from the email or username
+	acc.EnsureAccountID()
+
 	name := acc.UserEmail
 	if name == "" {
 		name = acc.UserName
 	}
 	if name == "" {
-		name = acc.UserID
+		name = "unknown"
 	}
-	// Sanitize filename
-	name = strings.Map(func(r rune) rune {
-		if r == '@' || r == '.' || r == '-' || r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
-			return r
-		}
-		return '_'
-	}, name)
-
-	filename := name + ".json"
-	path := filepath.Join(dir, filename)
-
 	// Build the JSON structure
+	acc.EnsureAccountID()
 	data := map[string]interface{}{
 		"token_v2":       acc.TokenV2,
 		"user_id":        acc.UserID,
@@ -281,6 +308,9 @@ func SaveAccountToFile(acc *Account, dir string) (string, error) {
 		"client_version": acc.ClientVersion,
 		"browser_id":     acc.BrowserID,
 		"device_id":      acc.DeviceID,
+	}
+	if acc.AccountID != "" {
+		data["account_id"] = acc.AccountID
 	}
 	profile := acc.profileSnapshot()
 	if profile.WorkspaceCheckedAt != nil {
@@ -325,68 +355,76 @@ func SaveAccountToFile(acc *Account, dir string) (string, error) {
 		return "", fmt.Errorf("marshal account JSON: %w", err)
 	}
 
-	// Ensure accounts directory exists
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", fmt.Errorf("create accounts dir: %w", err)
-	}
-	unlockFile, err := lockAccountFilePath(path)
+	path, err := accountstore.WriteAccountJSON(dir, acc.AccountID, name, out)
 	if err != nil {
 		return "", err
 	}
-	defer unlockFile()
-	tmpFile, err := os.CreateTemp(dir, "."+filename+".tmp-*")
-	if err != nil {
-		return "", fmt.Errorf("create account temp file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	cleanupTmp := true
-	defer func() {
-		if cleanupTmp {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if err := tmpFile.Chmod(0o600); err != nil {
-		_ = tmpFile.Close()
-		return "", fmt.Errorf("protect account temp file: %w", err)
-	}
-	if _, err := tmpFile.Write(append(out, '\n')); err != nil {
-		_ = tmpFile.Close()
-		return "", fmt.Errorf("write account temp file: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return "", fmt.Errorf("close account temp file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return "", fmt.Errorf("replace account file: %w", err)
-	}
-	cleanupTmp = false
-
-	return filename, nil
+	return filepath.Base(path), nil
 }
 
 // AddAccount adds an account to the pool (hot-load, no restart needed).
 func (p *AccountPool) AddAccount(acc *Account) {
+	if p == nil || acc == nil {
+		return
+	}
+	var replaced *Account
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	// Check for duplicate by email
+	// Check for duplicate by account_id (same user_id + space_id)
+	acc.EnsureAccountID()
 	for i, existing := range p.accounts {
-		if strings.EqualFold(strings.TrimSpace(existing.UserEmail), strings.TrimSpace(acc.UserEmail)) {
-			// Replace existing
+		existing.EnsureAccountID()
+		if existing.AccountID != "" && existing.AccountID == acc.AccountID {
+			// Replace existing (same workspace)
+			replaced = existing
 			p.accounts[i] = acc
-			log.Printf("[account] replaced: %s (%s)", acc.UserName, acc.UserEmail)
-			return
+			break
 		}
 	}
-	p.accounts = append(p.accounts, acc)
-	log.Printf("[account] added: %s (%s) [%s]", acc.UserName, acc.UserEmail, acc.PlanType)
+	if replaced == nil {
+		p.accounts = append(p.accounts, acc)
+	}
+	remaining := append([]*Account(nil), p.accounts...)
+	p.mu.Unlock()
+
+	if replaced != nil {
+		p.liveQuotaMu.Lock()
+		delete(p.liveQuotaFlights, replaced)
+		delete(p.quotaGeneration, replaced)
+		delete(p.quotaApplied, replaced)
+		p.liveQuotaMu.Unlock()
+		globalSessionManager.DeleteByAccountID(replaced.AccountID, replaced.UserEmail)
+		log.Printf("[account] replaced: %s (%s) aid=%s", acc.UserName, acc.UserEmail, acc.ShortSpaceID())
+	} else {
+		log.Printf("[account] added: %s (%s) [%s]", acc.UserName, acc.UserEmail, acc.PlanType)
+	}
+	rebuildDynamicModelMap(remaining)
 }
 
 // DeleteAccountFile removes the JSON file for an account from the accounts directory.
-func DeleteAccountFile(email, dir string) error {
+// Matches by account_id first; falls back to user_id+space_id.
+func DeleteAccountFile(accountID, dir string) error {
+	return deleteAccountFileByIdentity(accountID, "", dir)
+}
+
+func deleteAccountFileByIdentity(accountID, expectedToken, dir string) error {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return fmt.Errorf("account_id is required")
+	}
+	unlockDirectory, err := accountstore.LockDirectory(dir)
+	if err != nil {
+		return err
+	}
+	defer unlockDirectory()
+	return deleteAccountFileByIdentityLocked(accountID, expectedToken, dir)
+}
+
+func deleteAccountFileByIdentityLocked(accountID, expectedToken, dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("read accounts dir: %w", err)
 	}
+	var matches []string
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -400,35 +438,120 @@ func DeleteAccountFile(email, dir string) error {
 		if err := json.Unmarshal(data, &existing); err != nil {
 			continue
 		}
-		if e, _ := existing["user_email"].(string); strings.EqualFold(e, email) {
-			unlockFile, err := lockAccountFilePath(path)
-			if err != nil {
-				return err
-			}
-			latest, err := os.ReadFile(path)
-			if err != nil {
-				unlockFile()
-				return fmt.Errorf("re-read account file %s: %w", entry.Name(), err)
-			}
-			var latestAccount map[string]interface{}
-			if err := json.Unmarshal(latest, &latestAccount); err != nil {
-				unlockFile()
-				return fmt.Errorf("parse account file %s: %w", entry.Name(), err)
-			}
-			if latestEmail, _ := latestAccount["user_email"].(string); !strings.EqualFold(latestEmail, email) {
-				unlockFile()
-				continue
-			}
-			if err := os.Remove(path); err != nil {
-				unlockFile()
-				return fmt.Errorf("delete file %s: %w", entry.Name(), err)
-			}
-			unlockFile()
-			log.Printf("[account] deleted file: %s", entry.Name())
-			return nil
+		if accountIDFromRaw(existing) == accountID {
+			matches = append(matches, path)
 		}
 	}
-	return fmt.Errorf("account file not found for %s", email)
+	switch len(matches) {
+	case 0:
+		return fmt.Errorf("account file not found for account_id %s: %w", accountID, os.ErrNotExist)
+	case 1:
+	default:
+		return fmt.Errorf("multiple account files match account_id %s; refusing partial deletion", accountID)
+	}
+	path := matches[0]
+	unlockFile, err := lockAccountFilePath(path)
+	if err != nil {
+		return err
+	}
+	defer unlockFile()
+	latest, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("re-read account file %s: %w", filepath.Base(path), err)
+	}
+	var latestAccount map[string]interface{}
+	if err := json.Unmarshal(latest, &latestAccount); err != nil {
+		return fmt.Errorf("parse account file %s: %w", filepath.Base(path), err)
+	}
+	if accountIDFromRaw(latestAccount) != accountID {
+		return fmt.Errorf("account identity changed during deletion; replacement retained")
+	}
+	if expectedToken != "" {
+		if token, _ := latestAccount["token_v2"].(string); token != expectedToken {
+			return fmt.Errorf("account identity changed during deletion; replacement retained")
+		}
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("delete file %s: %w", filepath.Base(path), err)
+	}
+	log.Printf("[account] deleted file: %s", filepath.Base(path))
+	return nil
+}
+
+// DeleteAccountFileByEmail removes the JSON file by email (legacy).
+// Returns AmbiguousEmailError if multiple files match.
+func DeleteAccountFileByEmail(email, dir string) error {
+	return deleteAccountFileByEmailIdentity(email, "", dir)
+}
+
+func deleteAccountFileByEmailIdentity(email, expectedToken, dir string) error {
+	unlockDirectory, err := accountstore.LockDirectory(dir)
+	if err != nil {
+		return err
+	}
+	defer unlockDirectory()
+	return deleteAccountFileByEmailIdentityLocked(email, expectedToken, dir)
+}
+
+func deleteAccountFileByEmailIdentityLocked(email, expectedToken, dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read accounts dir: %w", err)
+	}
+	var matches []string
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var existing map[string]interface{}
+		if err := json.Unmarshal(data, &existing); err != nil {
+			continue
+		}
+		e, _ := existing["user_email"].(string)
+		token, _ := existing["token_v2"].(string)
+		if strings.EqualFold(e, email) && (expectedToken == "" || token == expectedToken) {
+			matches = append(matches, path)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return fmt.Errorf("account file not found for %s: %w", email, os.ErrNotExist)
+	case 1:
+		target := matches[0]
+		unlockFile, err := lockAccountFilePath(target)
+		if err != nil {
+			return err
+		}
+		defer unlockFile()
+		latest, err := os.ReadFile(target)
+		if err != nil {
+			return err
+		}
+		var latestAccount map[string]interface{}
+		if err := json.Unmarshal(latest, &latestAccount); err != nil {
+			return err
+		}
+		if latestEmail, _ := latestAccount["user_email"].(string); !strings.EqualFold(latestEmail, email) {
+			return fmt.Errorf("account identity changed during deletion; replacement retained")
+		}
+		if expectedToken != "" {
+			if latestToken, _ := latestAccount["token_v2"].(string); latestToken != expectedToken {
+				return fmt.Errorf("account identity changed during deletion; replacement retained")
+			}
+		}
+		if err := os.Remove(target); err != nil {
+			return fmt.Errorf("delete file: %w", err)
+		}
+		log.Printf("[account] deleted file: %s", filepath.Base(target))
+		return nil
+	default:
+		return &AmbiguousEmailError{Email: email, Count: len(matches)}
+	}
 }
 
 // HandleAddAccount accepts a token_v2, discovers account info via Notion APIs,
@@ -484,20 +607,12 @@ func HandleAddAccount(pool *AccountPool, accountsDir string, auth *DashboardAuth
 			http.Error(w, `{"error":"personal_instructions_policy must be all or configured_only"}`, http.StatusBadRequest)
 			return
 		}
-		if existing := findAccountByToken(pool, tokenV2); existing != nil {
-			log.Printf("[add-account] skipped duplicate token for %s", existing.UserEmail)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"status":  "skipped",
-				"reason":  "duplicate_account",
-				"account": accountImportInfo(existing),
-			})
-			return
-		}
-
 		log.Printf("[add-account] discovering account from token_v2 (%d chars)...", len(tokenV2))
 
-		// Discover account info
-		acc, err := DiscoverAccountFromToken(tokenV2)
+		// Discover every workspace visible to this login. An already imported
+		// token is still probed because a paid workspace may have been added
+		// since the first import.
+		discovered, err := discoverAccountsFromToken(tokenV2)
 		if err != nil {
 			log.Printf("[add-account] discovery failed: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
@@ -508,97 +623,119 @@ func HandleAddAccount(pool *AccountPool, accountsDir string, auth *DashboardAuth
 		}
 
 		checkPersonalInstructions := policySpecified || policy == "configured_only"
-		var configured *bool
-		var checkError string
-		if checkPersonalInstructions {
-			configured, checkError = checkPersonalInstructionsForImport(acc, fetchNotionPersonalInstructionsPageID)
-		}
+		importedAccounts := make([]map[string]string, 0, len(discovered))
+		filenames := make([]string, 0, len(discovered))
+		skipped := 0
+		for _, acc := range discovered {
+			acc.EnsureAccountID()
+			if existing := pool.FindByAccountID(acc.AccountID); existing != nil && existing.TokenV2 == tokenV2 {
+				skipped++
+				continue
+			}
 
-		accountInfo := accountImportInfo(acc)
-		if policy == "configured_only" {
-			if checkError != "" {
-				log.Printf("[add-account] personal-instructions check failed for %s: %s", acc.UserEmail, checkError)
-				w.WriteHeader(http.StatusBadRequest)
+			if checkPersonalInstructions {
+				configured, checkError := checkPersonalInstructionsForImport(acc, fetchNotionPersonalInstructionsPageID)
+				if policy == "configured_only" {
+					if checkError != "" {
+						log.Printf("[add-account] personal-instructions check failed for %s workspace=%s: %s",
+							acc.UserEmail, acc.ShortSpaceID(), checkError)
+						skipped++
+						continue
+					}
+					if configured == nil || !*configured {
+						log.Printf("[add-account] skipped %s workspace=%s: default-Agent personal instructions not configured",
+							acc.UserEmail, acc.ShortSpaceID())
+						skipped++
+						continue
+					}
+				}
+			}
+
+			filename, saveErr := SaveAccountToFile(acc, accountsDir)
+			if saveErr != nil {
+				log.Printf("[add-account] save failed for workspace=%s: %v", acc.ShortSpaceID(), saveErr)
+				w.WriteHeader(http.StatusInternalServerError)
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"error":   "官网个人指令检测失败：" + checkError,
-					"account": accountInfo,
+					"error":    fmt.Sprintf("Failed to save account: %v", saveErr),
+					"imported": len(importedAccounts),
 				})
 				return
 			}
-			if configured == nil || !*configured {
-				log.Printf("[add-account] skipped %s: default-Agent personal instructions not configured", acc.UserEmail)
+			if activateErr := pool.ActivateAccountByIDFromDir(accountsDir, acc.AccountID); activateErr != nil {
+				log.Printf("[add-account] activate failed for workspace=%s: %v", acc.ShortSpaceID(), activateErr)
+				w.WriteHeader(http.StatusConflict)
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
-					"status":                           "skipped",
-					"reason":                           "personal_instructions_missing",
-					"personal_instructions_configured": false,
-					"account":                          accountInfo,
+					"error":    fmt.Sprintf("Failed to activate account: %v", activateErr),
+					"imported": len(importedAccounts),
 				})
 				return
 			}
+			activeAccount := pool.FindByAccountID(acc.AccountID)
+			if activeAccount == nil {
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":    "Account changed while it was being activated",
+					"imported": len(importedAccounts),
+				})
+				return
+			}
+			filenames = append(filenames, filename)
+			importedAccounts = append(importedAccounts, accountImportInfo(activeAccount))
+			log.Printf("[add-account] success: %s (%s) workspace=%s → %s",
+				activeAccount.UserName, activeAccount.UserEmail, activeAccount.ShortSpaceID(), filename)
 		}
 
-		// Save to file
-		filename, err := SaveAccountToFile(acc, accountsDir)
-		if err != nil {
-			log.Printf("[add-account] save failed: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error": fmt.Sprintf("Failed to save account: %v", err),
-			})
+		if len(importedAccounts) == 0 {
+			reason := "duplicate_account"
+			if policy == "configured_only" && skipped > 0 {
+				reason = "personal_instructions_missing"
+			}
+			response := map[string]interface{}{
+				"status":  "skipped",
+				"reason":  reason,
+				"skipped": skipped,
+			}
+			if len(discovered) > 0 {
+				response["account"] = accountImportInfo(discovered[0])
+			}
+			_ = json.NewEncoder(w).Encode(response)
 			return
 		}
 
-		// Hot-load into pool
-		pool.AddAccount(acc)
-
-		log.Printf("[add-account] success: %s (%s) → %s", acc.UserName, acc.UserEmail, filename)
-
 		response := map[string]interface{}{
-			"status":   "ok",
-			"filename": filename,
-			"account":  accountInfo,
+			"status":    "ok",
+			"filename":  filenames[0],
+			"filenames": filenames,
+			"account":   importedAccounts[0],
+			"accounts":  importedAccounts,
+			"imported":  len(importedAccounts),
+			"skipped":   skipped,
 		}
 		if checkPersonalInstructions {
 			response["personal_instructions_checked"] = true
-			if configured != nil {
-				response["personal_instructions_configured"] = *configured
-			}
-			if checkError != "" {
-				response["personal_instructions_check_error"] = checkError
-			}
 		}
 		_ = json.NewEncoder(w).Encode(response)
 	}
-}
-
-func findAccountByToken(pool *AccountPool, tokenV2 string) *Account {
-	if pool == nil || tokenV2 == "" {
-		return nil
-	}
-	pool.mu.RLock()
-	defer pool.mu.RUnlock()
-	for _, acc := range pool.accounts {
-		if acc != nil && acc.TokenV2 == tokenV2 {
-			return acc
-		}
-	}
-	return nil
 }
 
 func accountImportInfo(acc *Account) map[string]string {
 	if acc == nil {
 		return map[string]string{}
 	}
+	acc.EnsureAccountID()
 	planType := acc.planTypeSnapshot()
 	return map[string]string{
-		"name":      acc.UserName,
-		"email":     acc.UserEmail,
-		"space":     acc.SpaceName,
-		"plan_type": planType,
+		"account_id":     acc.AccountID,
+		"name":           acc.UserName,
+		"email":          acc.UserEmail,
+		"space":          acc.SpaceName,
+		"space_id_short": acc.ShortSpaceID(),
+		"plan_type":      planType,
 	}
 }
 
 type PersonalInstructionsCheckItem struct {
+	AccountID  string `json:"account_id,omitempty"`
 	Email      string `json:"email"`
 	Configured *bool  `json:"configured,omitempty"`
 	CheckedAt  string `json:"checked_at"`
@@ -668,7 +805,9 @@ func checkPersonalInstructionsForAccounts(accounts []*Account, concurrency int, 
 			defer workers.Done()
 			for acc := range jobs {
 				checkedAt := time.Now().UTC()
+				acc.EnsureAccountID()
 				item := PersonalInstructionsCheckItem{
+					AccountID: acc.AccountID,
 					Email:     acc.UserEmail,
 					CheckedAt: checkedAt.Format(time.RFC3339),
 				}
@@ -746,8 +885,9 @@ func HandleCheckPersonalInstructions(pool *AccountPool, accountsDir string, auth
 const maxBulkAccountEmails = 5000
 
 type BulkAccountActionRequest struct {
-	Action string   `json:"action"`
-	Emails []string `json:"emails"`
+	Action     string   `json:"action"`
+	AccountIDs []string `json:"account_ids,omitempty"`
+	Emails     []string `json:"emails,omitempty"`
 }
 
 type BulkAccountActionResult struct {
@@ -778,32 +918,86 @@ func normalizeBulkEmails(emails []string) []string {
 	return normalized
 }
 
-func accountsMatchingEmails(pool *AccountPool, requested []string) ([]*Account, []string) {
+func accountsMatchingEmailsDetailed(pool *AccountPool, requested []string) ([]*Account, map[string]string) {
+	failures := make(map[string]string)
 	if pool == nil || len(requested) == 0 {
-		return nil, requested
+		for _, email := range requested {
+			failures[email] = "account not found"
+		}
+		return nil, failures
 	}
 	pool.mu.RLock()
-	byEmail := make(map[string]*Account, len(pool.accounts))
+	byEmail := make(map[string][]*Account, len(pool.accounts))
 	for _, acc := range pool.accounts {
-		byEmail[strings.ToLower(strings.TrimSpace(acc.UserEmail))] = acc
+		key := strings.ToLower(strings.TrimSpace(acc.UserEmail))
+		if key != "" {
+			byEmail[key] = append(byEmail[key], acc)
+		}
 	}
 	pool.mu.RUnlock()
 
 	matched := make([]*Account, 0, len(requested))
-	missing := make([]string, 0)
 	for _, email := range requested {
-		if acc := byEmail[strings.ToLower(email)]; acc != nil {
-			matched = append(matched, acc)
-		} else {
+		switch matches := byEmail[strings.ToLower(email)]; len(matches) {
+		case 0:
+			failures[email] = "account not found"
+		case 1:
+			matched = append(matched, matches[0])
+		default:
+			failures[email] = "email matches multiple workspaces; use account_id"
+		}
+	}
+	return matched, failures
+}
+
+func accountsMatchingEmails(pool *AccountPool, requested []string) ([]*Account, []string) {
+	matched, failures := accountsMatchingEmailsDetailed(pool, requested)
+	missing := make([]string, 0, len(failures))
+	for _, email := range requested {
+		if _, failed := failures[email]; failed {
 			missing = append(missing, email)
 		}
 	}
 	return matched, missing
 }
 
+func normalizeAccountIDs(accountIDs []string) []string {
+	normalized := make([]string, 0, len(accountIDs))
+	seen := make(map[string]struct{}, len(accountIDs))
+	for _, accountID := range accountIDs {
+		accountID = strings.ToLower(strings.TrimSpace(accountID))
+		if !isAccountID(accountID) {
+			continue
+		}
+		if _, exists := seen[accountID]; exists {
+			continue
+		}
+		seen[accountID] = struct{}{}
+		normalized = append(normalized, accountID)
+	}
+	return normalized
+}
+
+func accountsMatchingAccountIDs(pool *AccountPool, requested []string) ([]*Account, []string) {
+	if pool == nil || len(requested) == 0 {
+		return nil, requested
+	}
+	matched := make([]*Account, 0, len(requested))
+	missing := make([]string, 0)
+	for _, accountID := range requested {
+		if acc := pool.FindByAccountID(accountID); acc != nil {
+			matched = append(matched, acc)
+		} else {
+			missing = append(missing, accountID)
+		}
+	}
+	return matched, missing
+}
+
 type parallelAccountResult struct {
-	email string
-	err   error
+	accountID string
+	email     string
+	err       error
 }
 
 func runAccountsParallel(accounts []*Account, concurrency int, worker func(*Account) error) []parallelAccountResult {
@@ -824,7 +1018,12 @@ func runAccountsParallel(accounts []*Account, concurrency int, worker func(*Acco
 		go func() {
 			defer workers.Done()
 			for account := range jobs {
-				results <- parallelAccountResult{email: account.UserEmail, err: worker(account)}
+				account.EnsureAccountID()
+				results <- parallelAccountResult{
+					accountID: account.AccountID,
+					email:     account.UserEmail,
+					err:       worker(account),
+				}
 			}
 		}()
 	}
@@ -870,12 +1069,13 @@ func HandleBulkAccountAction(pool *AccountPool, accountsDir string, auth *Dashbo
 			return
 		}
 		body.Action = strings.ToLower(strings.TrimSpace(body.Action))
+		accountIDs := normalizeAccountIDs(body.AccountIDs)
 		emails := normalizeBulkEmails(body.Emails)
-		if len(emails) == 0 {
-			http.Error(w, `{"error":"at least one email is required"}`, http.StatusBadRequest)
+		if len(accountIDs) == 0 && len(emails) == 0 {
+			http.Error(w, `{"error":"at least one account is required"}`, http.StatusBadRequest)
 			return
 		}
-		if len(emails) > maxBulkAccountEmails {
+		if len(accountIDs) > maxBulkAccountEmails || len(emails) > maxBulkAccountEmails {
 			http.Error(w, `{"error":"too many accounts selected"}`, http.StatusBadRequest)
 			return
 		}
@@ -886,25 +1086,48 @@ func HandleBulkAccountAction(pool *AccountPool, accountsDir string, auth *Dashbo
 			return
 		}
 
-		accounts, missing := accountsMatchingEmails(pool, emails)
+		accounts := make([]*Account, 0)
+		missing := make([]string, 0)
+		emailFailures := make(map[string]string)
+		requested := emails
+		if len(accountIDs) > 0 {
+			accounts, missing = accountsMatchingAccountIDs(pool, accountIDs)
+			requested = accountIDs
+		} else {
+			accounts, emailFailures = accountsMatchingEmailsDetailed(pool, emails)
+		}
 		result := BulkAccountActionResult{
 			Status:    "ok",
 			Action:    body.Action,
-			Requested: len(emails),
+			Requested: len(requested),
 			Matched:   len(accounts),
 			Failed:    make(map[string]string),
 		}
-		for _, email := range missing {
-			result.Failed[email] = "account not found"
+		if len(accountIDs) == 0 {
+			for email, message := range emailFailures {
+				result.Failed[email] = message
+			}
+		} else {
+			for _, accountID := range missing {
+				result.Failed[accountID] = "account not found"
+			}
 		}
 
 		switch body.Action {
 		case "delete":
 			for _, item := range runAccountsParallel(accounts, 10, func(acc *Account) error {
-				return deleteAccountByEmail(pool, accountsDir, acc.UserEmail)
+				acc.EnsureAccountID()
+				if acc.AccountID == "" {
+					return deleteAccountByIdentity(pool, accountsDir, acc.UserEmail, acc.TokenV2)
+				}
+				return deleteAccountByAccountIdentity(pool, accountsDir, acc.AccountID, acc.UserEmail, acc.TokenV2)
 			}) {
+				resultKey := item.accountID
+				if len(accountIDs) == 0 {
+					resultKey = item.email
+				}
 				if item.err != nil {
-					result.Failed[item.email] = item.err.Error()
+					result.Failed[resultKey] = item.err.Error()
 					continue
 				}
 				result.Succeeded++
@@ -919,8 +1142,12 @@ func HandleBulkAccountAction(pool *AccountPool, accountsDir string, auth *Dashbo
 				}
 				return nil
 			}) {
+				resultKey := item.accountID
+				if len(accountIDs) == 0 {
+					resultKey = item.email
+				}
 				if item.err != nil {
-					result.Failed[item.email] = item.err.Error()
+					result.Failed[resultKey] = item.err.Error()
 					continue
 				}
 				result.Succeeded++
@@ -961,26 +1188,41 @@ func deleteMissingPersonalInstructions(pool *AccountPool, accountsDir string, fe
 		pool.SaveAccounts(accountsDir)
 	}
 
-	candidates := make([]string, 0, check.Missing)
+	candidateIDs := make([]string, 0, check.Missing)
+	candidateEmails := make([]string, 0, check.Missing)
 	for _, item := range check.Results {
 		if item.Error == "" && item.Configured != nil && !*item.Configured {
-			candidates = append(candidates, item.Email)
+			if item.AccountID != "" {
+				candidateIDs = append(candidateIDs, item.AccountID)
+			} else {
+				candidateEmails = append(candidateEmails, item.Email)
+			}
 		}
 	}
+	candidateCount := len(candidateIDs) + len(candidateEmails)
 	result := DeleteMissingPersonalInstructionsResult{
 		Status:  "ok",
 		Checked: check.Total,
-		Matched: len(candidates),
-		Emails:  make([]string, 0, len(candidates)),
+		Matched: candidateCount,
+		Emails:  make([]string, 0, candidateCount),
 		Failed:  make(map[string]string),
 		Check:   check,
 	}
-	accounts, missing := accountsMatchingEmails(pool, candidates)
-	for _, email := range missing {
-		result.Failed[email] = "account not found"
+	accounts, missingIDs := accountsMatchingAccountIDs(pool, candidateIDs)
+	legacyAccounts, legacyFailures := accountsMatchingEmailsDetailed(pool, candidateEmails)
+	accounts = append(accounts, legacyAccounts...)
+	for _, accountID := range missingIDs {
+		result.Failed[accountID] = "account not found"
+	}
+	for email, message := range legacyFailures {
+		result.Failed[email] = message
 	}
 	for _, item := range runAccountsParallel(accounts, 10, func(acc *Account) error {
-		return deleteAccountByEmail(pool, accountsDir, acc.UserEmail)
+		acc.EnsureAccountID()
+		if acc.AccountID == "" {
+			return deleteAccountByIdentity(pool, accountsDir, acc.UserEmail, acc.TokenV2)
+		}
+		return deleteAccountByAccountIdentity(pool, accountsDir, acc.AccountID, acc.UserEmail, acc.TokenV2)
 	}) {
 		if item.err != nil {
 			result.Failed[item.email] = item.err.Error()
@@ -1042,31 +1284,49 @@ func HandleDeleteAccount(pool *AccountPool, accountsDir string, auth *DashboardA
 		defer releaseMutation()
 
 		var body struct {
-			Email string `json:"email"`
+			AccountID string `json:"account_id"`
+			Email     string `json:"email"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
+		accountID := strings.TrimSpace(body.AccountID)
 		email := strings.TrimSpace(body.Email)
-		if email == "" {
-			http.Error(w, `{"error":"email is required"}`, http.StatusBadRequest)
+		if accountID == "" && email == "" {
+			http.Error(w, `{"error":"account_id or email is required"}`, http.StatusBadRequest)
 			return
 		}
 
-		if err := deleteAccountByEmail(pool, accountsDir, email); err != nil {
-			if os.IsNotExist(err) {
+		var deleteErr error
+		if accountID != "" {
+			deleteErr = deleteAccountByID(pool, accountsDir, accountID)
+		} else {
+			deleteErr = deleteAccountByEmail(pool, accountsDir, email)
+		}
+		if deleteErr != nil {
+			if os.IsNotExist(deleteErr) {
 				w.WriteHeader(http.StatusNotFound)
 				json.NewEncoder(w).Encode(map[string]string{"error": "account not found"})
 				return
 			}
-			log.Printf("[delete-account] deletion failed: %v", err)
+			var ambiguous *AmbiguousEmailError
+			if errors.As(deleteErr, &ambiguous) {
+				w.WriteHeader(http.StatusConflict)
+				json.NewEncoder(w).Encode(map[string]string{"error": deleteErr.Error()})
+				return
+			}
+			log.Printf("[delete-account] deletion failed: %v", deleteErr)
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			json.NewEncoder(w).Encode(map[string]string{"error": deleteErr.Error()})
 			return
 		}
 
-		log.Printf("[delete-account] removed: %s", email)
+		if accountID != "" {
+			log.Printf("[delete-account] removed account_id=%s", accountID)
+		} else {
+			log.Printf("[delete-account] removed legacy email=%s", email)
+		}
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}
 }
@@ -1132,20 +1392,27 @@ func confirmExhaustedComplimentaryAccount(pool *AccountPool, acc *Account) (bool
 	return isExhaustedComplimentaryAccount(acc), nil
 }
 
-func exhaustedComplimentaryEmails(pool *AccountPool) []string {
+func exhaustedComplimentaryAccounts(pool *AccountPool) []*Account {
 	if pool == nil {
 		return nil
 	}
-	emails := make([]string, 0)
+	accounts := make([]*Account, 0)
 	pool.mu.RLock()
 	defer pool.mu.RUnlock()
 	for _, acc := range pool.accounts {
 		if isExhaustedComplimentaryAccount(acc) {
-			emails = append(emails, acc.UserEmail)
+			accounts = append(accounts, acc)
 		}
 	}
-	sort.Strings(emails)
-	return emails
+	sort.Slice(accounts, func(i, j int) bool {
+		if accounts[i].UserEmail != accounts[j].UserEmail {
+			return accounts[i].UserEmail < accounts[j].UserEmail
+		}
+		accounts[i].EnsureAccountID()
+		accounts[j].EnsureAccountID()
+		return accounts[i].AccountID < accounts[j].AccountID
+	})
+	return accounts
 }
 
 // HandleDeleteExhaustedComplimentaryAccounts permanently removes all Free,
@@ -1169,13 +1436,9 @@ func HandleDeleteExhaustedComplimentaryAccounts(pool *AccountPool, accountsDir s
 		}
 		defer releaseMutation()
 
-		emails := exhaustedComplimentaryEmails(pool)
-		deleted := make([]string, 0, len(emails))
+		accounts := exhaustedComplimentaryAccounts(pool)
+		deleted := make([]string, 0, len(accounts))
 		failed := make(map[string]string)
-		accounts, missing := accountsMatchingEmails(pool, emails)
-		for _, email := range missing {
-			failed[email] = "account not found"
-		}
 		for _, item := range runAccountsParallel(accounts, 10, func(acc *Account) error {
 			// Destructive cleanup requires a fresh plan + authoritative V1
 			// confirmation. A network/schema failure always keeps the account.
@@ -1186,7 +1449,11 @@ func HandleDeleteExhaustedComplimentaryAccounts(pool *AccountPool, accountsDir s
 			if !confirmed {
 				return nil
 			}
-			return deleteAccountByIdentity(pool, accountsDir, acc.UserEmail, acc.TokenV2)
+			acc.EnsureAccountID()
+			if acc.AccountID == "" {
+				return deleteAccountByIdentity(pool, accountsDir, acc.UserEmail, acc.TokenV2)
+			}
+			return deleteAccountByAccountIdentity(pool, accountsDir, acc.AccountID, acc.UserEmail, acc.TokenV2)
 		}) {
 			if item.err != nil {
 				failed[item.email] = item.err.Error()
@@ -1195,7 +1462,11 @@ func HandleDeleteExhaustedComplimentaryAccounts(pool *AccountPool, accountsDir s
 			}
 			// A recovered account returns nil and stays in the pool; count only
 			// accounts that actually disappeared.
-			if _, remaining := accountsMatchingEmails(pool, []string{item.email}); len(remaining) == 1 {
+			remaining := pool.FindByAccountID(item.accountID)
+			if item.accountID == "" {
+				remaining = pool.GetByEmail(item.email)
+			}
+			if remaining == nil {
 				deleted = append(deleted, item.email)
 			}
 		}
@@ -1204,7 +1475,7 @@ func HandleDeleteExhaustedComplimentaryAccounts(pool *AccountPool, accountsDir s
 		log.Printf("[delete-exhausted-trials] deleted=%d failed=%d", len(deleted), len(failed))
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":  "ok",
-			"matched": len(emails),
+			"matched": len(accounts),
 			"deleted": len(deleted),
 			"emails":  deleted,
 			"failed":  failed,

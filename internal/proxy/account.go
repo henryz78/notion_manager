@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"notion-manager/internal/accountstore"
 )
 
 // quotaFetcher / modelsFetcher / workspaceProbe are package-level seams
@@ -25,18 +27,10 @@ var (
 	routingQuotaFetcher = CheckQuotaV1
 	modelsFetcher       = FetchModels
 	workspaceProbe      = CheckUserWorkspaceProfile
-	accountFileLocks    sync.Map // absolute account path -> *sync.Mutex
 )
 
 func lockAccountFilePath(path string) (func(), error) {
-	absolutePath, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolve account path: %w", err)
-	}
-	lockValue, _ := accountFileLocks.LoadOrStore(absolutePath, &sync.Mutex{})
-	fileLock := lockValue.(*sync.Mutex)
-	fileLock.Lock()
-	return fileLock.Unlock, nil
+	return accountstore.LockPath(path)
 }
 
 const (
@@ -415,6 +409,7 @@ func (p *AccountPool) LoadFromDir(dir string) error {
 		return fmt.Errorf("read accounts dir: %w", err)
 	}
 
+	seen := make(map[string]bool)
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -438,6 +433,14 @@ func (p *AccountPool) LoadFromDir(dir string) error {
 			log.Printf("[account] skip %s: placeholder/example config", entry.Name())
 			continue
 		}
+		acc.EnsureAccountID()
+		if acc.AccountID != "" && seen[acc.AccountID] {
+			log.Printf("[account] skip %s: duplicate account_id (same user_id+space_id)", entry.Name())
+			continue
+		}
+		if acc.AccountID != "" {
+			seen[acc.AccountID] = true
+		}
 		if acc.BrowserID == "" {
 			acc.BrowserID = generateUUIDv4()
 		}
@@ -453,7 +456,8 @@ func (p *AccountPool) LoadFromDir(dir string) error {
 		loadPersistedWorkspace(data, &acc)
 		registerModelEntries(acc.Models)
 		p.accounts = append(p.accounts, &acc)
-		log.Printf("[account] loaded: %s (%s) [%s]", acc.UserName, acc.UserEmail, acc.planTypeSnapshot())
+		log.Printf("[account] loaded: %s (%s) [%s] workspace=%s",
+			acc.UserName, acc.UserEmail, acc.planTypeSnapshot(), acc.ShortSpaceID())
 	}
 
 	if len(p.accounts) == 0 {
@@ -474,8 +478,9 @@ func (p *AccountPool) ReloadFromDir(dir string) {
 
 	known := make(map[string]bool, len(p.accounts))
 	for _, acc := range p.accounts {
-		if acc.UserID != "" {
-			known[acc.UserID] = true
+		acc.EnsureAccountID()
+		if acc.AccountID != "" {
+			known[acc.AccountID] = true
 		}
 	}
 
@@ -501,7 +506,8 @@ func (p *AccountPool) ReloadFromDir(dir string) {
 		if acc.TokenV2 == "" || acc.UserID == "" || acc.SpaceID == "" {
 			continue
 		}
-		if known[acc.UserID] {
+		acc.EnsureAccountID()
+		if acc.AccountID != "" && known[acc.AccountID] {
 			continue
 		}
 		if acc.BrowserID == "" {
@@ -514,13 +520,101 @@ func (p *AccountPool) ReloadFromDir(dir string) {
 		loadPersistedWorkspace(data, &acc)
 		registerModelEntries(acc.Models)
 		p.accounts = append(p.accounts, &acc)
-		known[acc.UserID] = true
+		if acc.AccountID != "" {
+			known[acc.AccountID] = true
+		}
 		added++
 		log.Printf("[account] reload added: %s (%s)", acc.UserName, acc.UserEmail)
 	}
 	if added > 0 {
 		log.Printf("[account] reload: %d new account(s); pool now has %d", added, len(p.accounts))
 	}
+}
+
+// LoadAccountByIDFromDir reads exactly one persisted workspace profile. It is
+// used after registration so a refreshed token replaces the live pool entry
+// immediately instead of waiting for a process restart.
+func LoadAccountByIDFromDir(dir, accountID string) (*Account, error) {
+	accountID = strings.ToLower(strings.TrimSpace(accountID))
+	if accountID == "" {
+		return nil, fmt.Errorf("account_id is required")
+	}
+	unlockDirectory, err := accountstore.LockDirectory(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlockDirectory()
+	return loadAccountByIDFromDirLocked(dir, accountID)
+}
+
+func loadAccountByIDFromDirLocked(dir, accountID string) (*Account, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read accounts dir: %w", err)
+	}
+	var match *Account
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var acc Account
+		if err := json.Unmarshal(data, &acc); err != nil {
+			continue
+		}
+		acc.EnsureAccountID()
+		if acc.AccountID != accountID {
+			continue
+		}
+		if match != nil {
+			return nil, fmt.Errorf("multiple account files match account_id %s", accountID)
+		}
+		if acc.TokenV2 == "" || acc.UserID == "" || acc.SpaceID == "" {
+			return nil, fmt.Errorf("account file %s is missing required fields", entry.Name())
+		}
+		if acc.BrowserID == "" {
+			acc.BrowserID = generateUUIDv4()
+		}
+		if acc.ClientVersion == "" || acc.ClientVersion == "unknown" {
+			acc.ClientVersion = DefaultClientVersion
+		}
+		acc.QuotaInfo = loadPersistedQuotaInfo(data)
+		loadPersistedWorkspace(data, &acc)
+		match = &acc
+	}
+	if match == nil {
+		return nil, fmt.Errorf("account file not found for account_id %s: %w", accountID, os.ErrNotExist)
+	}
+	registerModelEntries(match.Models)
+	return match, nil
+}
+
+// ActivateAccountByIDFromDir keeps the directory mutation lock until the
+// freshly written profile is live in memory. A concurrent dashboard deletion
+// therefore cannot remove the file and then be undone by a late registration
+// callback.
+func (p *AccountPool) ActivateAccountByIDFromDir(dir, accountID string) error {
+	if p == nil {
+		return fmt.Errorf("account pool is required")
+	}
+	accountID = strings.ToLower(strings.TrimSpace(accountID))
+	if accountID == "" {
+		return fmt.Errorf("account_id is required")
+	}
+	unlockDirectory, err := accountstore.LockDirectory(dir)
+	if err != nil {
+		return err
+	}
+	defer unlockDirectory()
+	account, err := loadAccountByIDFromDirLocked(dir, accountID)
+	if err != nil {
+		return err
+	}
+	p.AddAccount(account)
+	return nil
 }
 
 func (p *AccountPool) LoadSingle(tokenFile string) error {
@@ -550,8 +644,9 @@ func (p *AccountPool) LoadSingle(tokenFile string) error {
 		acc.ClientVersion = DefaultClientVersion
 	}
 	registerModelEntries(acc.Models)
+	acc.EnsureAccountID()
 	p.accounts = append(p.accounts, &acc)
-	log.Printf("[account] loaded single account: %s", acc.UserName)
+	log.Printf("[account] loaded single account: %s (aid=%s)", acc.UserName, acc.ShortSpaceID())
 	return nil
 }
 
@@ -1092,28 +1187,82 @@ func (p *AccountPool) isQuotaExhaustedRLock(acc *Account) bool {
 	return p.isQuotaExhausted(acc)
 }
 
+func (p *AccountPool) removeUniqueMatchingAccount(match func(*Account) bool) bool {
+	p.mu.Lock()
+	matchIndex := -1
+	for i, a := range p.accounts {
+		if match(a) {
+			if matchIndex >= 0 {
+				p.mu.Unlock()
+				return false
+			}
+			matchIndex = i
+		}
+	}
+	if matchIndex < 0 {
+		p.mu.Unlock()
+		return false
+	}
+	removed := p.accounts[matchIndex]
+	p.accounts = append(p.accounts[:matchIndex], p.accounts[matchIndex+1:]...)
+	remaining := append([]*Account(nil), p.accounts...)
+	p.mu.Unlock()
+
+	p.liveQuotaMu.Lock()
+	delete(p.liveQuotaFlights, removed)
+	delete(p.quotaGeneration, removed)
+	delete(p.quotaApplied, removed)
+	p.liveQuotaMu.Unlock()
+	rebuildDynamicModelMap(remaining)
+	globalSessionManager.DeleteByAccountID(removed.AccountID, removed.UserEmail)
+	return true
+}
+
+// RemoveAccountByAccountID drops exactly one workspace profile from the
+// in-memory pool. Disk deletion remains the caller's responsibility.
+func (p *AccountPool) RemoveAccountByAccountID(accountID string) bool {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return false
+	}
+	return p.removeUniqueMatchingAccount(func(acc *Account) bool {
+		acc.EnsureAccountID()
+		return acc.AccountID == accountID
+	})
+}
+
+// RemoveAccountByAccountIDIfToken atomically removes an exact live identity
+// only when it is still backed by expectedToken. A concurrent re-login may
+// replace the token after disk deletion; that replacement must remain live.
+func (p *AccountPool) RemoveAccountByAccountIDIfToken(accountID, expectedToken string) bool {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return false
+	}
+	return p.removeUniqueMatchingAccount(func(acc *Account) bool {
+		acc.EnsureAccountID()
+		if acc.AccountID != accountID {
+			return false
+		}
+		return expectedToken == "" || acc.TokenV2 == expectedToken
+	})
+}
+
 // RemoveAccountByEmail drops the in-memory pool entry whose user_email
 // matches (case-insensitive). Does NOT touch disk; callers are responsible
 // for the file lifecycle (used by the dashboard delete endpoint).
+// Ambiguous same-email profiles are refused rather than guessed.
 func (p *AccountPool) RemoveAccountByEmail(email string) bool {
-	p.mu.Lock()
-	for i, a := range p.accounts {
-		if strings.EqualFold(a.UserEmail, email) {
-			p.accounts = append(p.accounts[:i], p.accounts[i+1:]...)
-			remaining := append([]*Account(nil), p.accounts...)
-			p.mu.Unlock()
-			p.liveQuotaMu.Lock()
-			delete(p.liveQuotaFlights, a)
-			delete(p.quotaGeneration, a)
-			delete(p.quotaApplied, a)
-			p.liveQuotaMu.Unlock()
-			rebuildDynamicModelMap(remaining)
-			globalSessionManager.DeleteByAccount(a.UserEmail)
-			return true
-		}
-	}
-	p.mu.Unlock()
-	return false
+	return p.removeUniqueMatchingAccount(func(acc *Account) bool {
+		return strings.EqualFold(acc.UserEmail, email)
+	})
+}
+
+func (p *AccountPool) RemoveAccountByEmailIfToken(email, expectedToken string) bool {
+	return p.removeUniqueMatchingAccount(func(acc *Account) bool {
+		return strings.EqualFold(acc.UserEmail, email) &&
+			(expectedToken == "" || acc.TokenV2 == expectedToken)
+	})
 }
 
 // AvailableCount returns the number of accounts the pool can currently
@@ -1150,17 +1299,48 @@ func (p *AccountPool) GetByEmail(email string) *Account {
 	return nil
 }
 
-// getByEmailAnyState looks up an account identity without applying routing
-// health filters. Destructive operations use it to revalidate unavailable
-// accounts before deleting their files.
-func (p *AccountPool) getByEmailAnyState(email string) *Account {
-	if p == nil {
-		return nil
+// FindByEmail returns the unique account matching the given email.
+// Returns AmbiguousEmailError if multiple workspaces share the same email.
+func (p *AccountPool) FindByEmail(email string) (*Account, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var matches []*Account
+	for _, acc := range p.accounts {
+		if strings.EqualFold(acc.UserEmail, email) {
+			matches = append(matches, acc)
+		}
 	}
+	switch len(matches) {
+	case 0:
+		return nil, fmt.Errorf("no account found for email %s", email)
+	case 1:
+		return matches[0], nil
+	default:
+		return nil, &AmbiguousEmailError{Email: email, Count: len(matches)}
+	}
+}
+
+// FindByAccountID returns the account with the given AccountID, or nil.
+func (p *AccountPool) FindByAccountID(id string) *Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for _, acc := range p.accounts {
-		if strings.EqualFold(acc.UserEmail, email) {
+		acc.EnsureAccountID()
+		if acc.AccountID == id {
+			return acc
+		}
+	}
+	return nil
+}
+
+// FindUsableByAccountID returns an exact workspace only when normal routing
+// would also consider it usable.
+func (p *AccountPool) FindUsableByAccountID(id string) *Account {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, acc := range p.accounts {
+		acc.EnsureAccountID()
+		if acc.AccountID == id && !p.isUnusable(acc) {
 			return acc
 		}
 	}
@@ -1488,7 +1668,10 @@ func isClaudeInternalID(id string) bool {
 	}
 }
 
-// SaveAccounts persists current account state (models, quota) back to JSON files
+// SaveAccounts persists current account state (models, quota) back to JSON files.
+// Each account is matched to its disk file by account_id (not email).
+// Missing files are not recreated: a concurrent delete must never be undone
+// by a stale SaveAccounts snapshot.
 func (p *AccountPool) SaveAccounts(dir string) {
 	p.mu.RLock()
 	accs := make([]*Account, len(p.accounts))
@@ -1496,8 +1679,10 @@ func (p *AccountPool) SaveAccounts(dir string) {
 	p.mu.RUnlock()
 
 	for _, acc := range accs {
+		acc.EnsureAccountID()
 		if err := saveAccountFile(dir, acc); err != nil {
-			log.Printf("[account] save %s failed: %v", acc.UserEmail, err)
+			log.Printf("[account] save %s workspace=%s failed: %v",
+				acc.UserEmail, acc.ShortSpaceID(), err)
 		}
 	}
 }
@@ -1519,12 +1704,20 @@ func saveAccountFile(dir string, acc *Account) error {
 	if dir == "" {
 		return fmt.Errorf("saveAccountFile: empty dir")
 	}
+	acc.EnsureAccountID()
+	accountID := acc.AccountID
+	unlockDirectory, err := accountstore.LockDirectory(dir)
+	if err != nil {
+		return err
+	}
+	defer unlockDirectory()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("read dir: %w", err)
 	}
 	var matchPath string
 	var existing map[string]interface{}
+	matchCount := 0
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -1538,17 +1731,29 @@ func saveAccountFile(dir string, acc *Account) error {
 		if err := json.Unmarshal(data, &raw); err != nil {
 			continue
 		}
-		email, _ := raw["user_email"].(string)
-		if !strings.EqualFold(strings.TrimSpace(email), strings.TrimSpace(acc.UserEmail)) {
-			continue
+		if accountID != "" {
+			if accountIDFromRaw(raw) != accountID {
+				continue
+			}
+		} else {
+			email, _ := raw["user_email"].(string)
+			token, _ := raw["token_v2"].(string)
+			if !strings.EqualFold(strings.TrimSpace(email), strings.TrimSpace(acc.UserEmail)) ||
+				(acc.TokenV2 != "" && token != acc.TokenV2) {
+				continue
+			}
 		}
 		matchPath = path
 		existing = raw
-		break
+		matchCount++
 	}
 	if matchPath == "" {
-		return fmt.Errorf("no account file matches %s", acc.UserEmail)
+		return fmt.Errorf("no account file matches identity for %s", acc.UserEmail)
 	}
+	if matchCount > 1 {
+		return &AmbiguousEmailError{Email: acc.UserEmail, Count: matchCount}
+	}
+
 	unlockFile, err := lockAccountFilePath(matchPath)
 	if err != nil {
 		return err
@@ -1563,6 +1768,22 @@ func saveAccountFile(dir string, acc *Account) error {
 	}
 	if err := json.Unmarshal(latest, &existing); err != nil {
 		return fmt.Errorf("parse account file: %w", err)
+	}
+	if accountID != "" {
+		if accountIDFromRaw(existing) != accountID {
+			return fmt.Errorf("account identity changed while saving %s", acc.UserEmail)
+		}
+		// Migrate legacy files only after the locked re-read so the new field
+		// is not lost and a same-path replacement cannot inherit another
+		// account's refreshed state.
+		existing["account_id"] = accountID
+	} else {
+		email, _ := existing["user_email"].(string)
+		token, _ := existing["token_v2"].(string)
+		if !strings.EqualFold(strings.TrimSpace(email), strings.TrimSpace(acc.UserEmail)) ||
+			(acc.TokenV2 != "" && token != acc.TokenV2) {
+			return fmt.Errorf("account identity changed while saving %s", acc.UserEmail)
+		}
 	}
 
 	state := acc.persistSnapshot()
@@ -1651,6 +1872,33 @@ func saveAccountFile(dir string, acc *Account) error {
 // A models-fetch failure is logged but not returned, since quota is the
 // higher-value half of the snapshot.
 func (p *AccountPool) RefreshAndPersistAccount(ctx context.Context, accountsDir, email string) error {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return fmt.Errorf("RefreshAndPersistAccount: empty email")
+	}
+	acc, err := p.FindByEmail(email)
+	if err != nil {
+		return err
+	}
+	return p.refreshAndPersistResolvedAccount(ctx, accountsDir, acc)
+}
+
+// RefreshAndPersistAccountByID refreshes one exact workspace profile. This is
+// the required path after registration because one email may own multiple
+// workspaces.
+func (p *AccountPool) RefreshAndPersistAccountByID(ctx context.Context, accountsDir, accountID string) error {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return fmt.Errorf("RefreshAndPersistAccountByID: empty account_id")
+	}
+	acc := p.FindByAccountID(accountID)
+	if acc == nil {
+		return fmt.Errorf("account not in pool: %s", accountID)
+	}
+	return p.refreshAndPersistResolvedAccount(ctx, accountsDir, acc)
+}
+
+func (p *AccountPool) refreshAndPersistResolvedAccount(ctx context.Context, accountsDir string, acc *Account) error {
 	releaseMutation, ok := p.beginAccountMutation()
 	if !ok {
 		return fmt.Errorf("%s", accountRestoreConflictMessage)
@@ -1662,22 +1910,8 @@ func (p *AccountPool) RefreshAndPersistAccount(ctx context.Context, accountsDir,
 			return err
 		}
 	}
-	target := strings.ToLower(strings.TrimSpace(email))
-	if target == "" {
-		return fmt.Errorf("RefreshAndPersistAccount: empty email")
-	}
-
-	p.mu.RLock()
-	var acc *Account
-	for _, a := range p.accounts {
-		if strings.EqualFold(strings.TrimSpace(a.UserEmail), target) {
-			acc = a
-			break
-		}
-	}
-	p.mu.RUnlock()
 	if acc == nil {
-		return fmt.Errorf("account not in pool: %s", email)
+		return fmt.Errorf("account not in pool")
 	}
 
 	quotaGeneration := p.nextQuotaGeneration(acc)
@@ -1744,11 +1978,15 @@ func (p *AccountPool) GetAccountDetails() []map[string]interface{} {
 		unlimited := planIncludesFullNotionAI(profile.PlanType) && !aiDisabled
 		models := acc.modelsSnapshot()
 		personalInstructions := acc.personalInstructionsSnapshot()
+		acc.EnsureAccountID()
 		entry := map[string]interface{}{
+			"account_id":      acc.AccountID,
+			"login_id":        accountstore.ComputeLoginID(acc.UserID),
 			"email":           acc.UserEmail,
 			"name":            acc.UserName,
 			"plan":            profile.PlanType,
 			"space":           acc.SpaceName,
+			"space_id_short":  acc.ShortSpaceID(),
 			"exhausted":       p.isQuotaExhausted(acc),
 			"permanent":       quota.PermanentlyExhausted && !unlimited,
 			"no_workspace":    p.hasNoWorkspace(acc),

@@ -1019,7 +1019,14 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			var acc *Account
 
 			if !isResearcher && selection == 0 && session != nil {
-				acc = pool.GetByEmail(session.AccountEmail)
+				if session.AccountID != "" {
+					acc = pool.FindUsableByAccountID(session.AccountID)
+				} else {
+					legacyAccount, lookupErr := pool.FindByEmail(session.AccountEmail)
+					if lookupErr == nil && !pool.isUnusable(legacyAccount) {
+						acc = legacyAccount
+					}
+				}
 				if acc == nil {
 					log.Printf("[context] stored Notion thread account is unavailable; starting a fresh thread replay")
 					invalidateSession("new_thread_account_switch")
@@ -1054,7 +1061,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				log.Printf("[quota-live] %s skipped (exhausted on live check)", acc.UserEmail)
 				tried[acc] = true
 				pool.MarkQuotaExhausted(acc)
-				if session != nil && session.AccountEmail == acc.UserEmail {
+				if session != nil &&
+					((session.AccountID != "" && session.AccountID == acc.AccountID) ||
+						(session.AccountID == "" && session.AccountEmail == acc.UserEmail)) {
 					invalidateSession("new_thread_account_switch")
 				}
 				continue
@@ -1093,6 +1102,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 						rawMessageCount,
 						acc.UserEmail,
 						clientContinuationKey,
+						acc.AccountID,
 					)
 					if cacheSession {
 						session = currentSession
@@ -1100,7 +1110,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 						session = nil
 					}
 				} else {
-					currentSession = newConversationSession(acc.UserEmail)
+					currentSession = newConversationSessionForAccount(acc.UserEmail, acc.AccountID)
 					currentSession.lockForRequest()
 				}
 				activeSessionLock = currentSession

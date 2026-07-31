@@ -4,10 +4,13 @@ export interface Model {
 }
 
 export interface AccountInfo {
+  account_id: string
+  login_id?: string
   email: string
   name: string
   plan: string
   space: string
+  space_id_short?: string
   exhausted: boolean
   permanent: boolean
   quota_unlimited?: boolean

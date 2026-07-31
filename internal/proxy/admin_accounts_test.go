@@ -146,6 +146,34 @@ func TestAdminAccountSelectionReturnsAllFilteredEmails(t *testing.T) {
 	}
 }
 
+func TestAdminAccountSelectionIncludesAccountWithoutEmail(t *testing.T) {
+	pool := NewAccountPool()
+	account := &Account{TokenV2: "token", UserID: "user", SpaceID: "space", UserName: "Token account"}
+	account.EnsureAccountID()
+	pool.accounts = []*Account{account}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/accounts/selection", nil)
+	rec := httptest.NewRecorder()
+	HandleAdminAccountSelection(pool, NewDashboardAuth("", "")).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Total      int `json:"total"`
+		AccountIDs []string
+		Accounts   []map[string]string `json:"accounts"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Total != 1 || len(response.Accounts) != 1 {
+		t.Fatalf("response=%+v", response)
+	}
+	if response.Accounts[0]["account_id"] != account.AccountID {
+		t.Fatalf("account_id=%q want=%q", response.Accounts[0]["account_id"], account.AccountID)
+	}
+}
+
 func TestPaginateAccountsBoundary(t *testing.T) {
 	mk := func(n int) []map[string]interface{} {
 		out := make([]map[string]interface{}, 0, n)

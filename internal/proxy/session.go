@@ -21,6 +21,7 @@ type Session struct {
 	publishAssistant  func(ChatMessage)
 	expectedClientKey string
 	ThreadID          string
+	AccountID         string
 	AccountEmail      string
 	ConfigID          string
 	ContextID         string
@@ -279,6 +280,23 @@ func (sm *SessionManager) DeleteByAccount(email string) {
 	sm.mu.Lock()
 	for key, session := range sm.sessions {
 		if session.AccountEmail == email {
+			delete(sm.sessions, key)
+			sm.keyVersions[key]++
+		}
+	}
+	sm.mu.Unlock()
+}
+
+// DeleteByAccountID removes sessions bound to one exact Notion workspace
+// profile. Sessions created before account IDs were persisted are matched by
+// email as a compatibility fallback.
+func (sm *SessionManager) DeleteByAccountID(accountID, legacyEmail string) {
+	accountID = strings.TrimSpace(accountID)
+	legacyEmail = strings.TrimSpace(legacyEmail)
+	sm.mu.Lock()
+	for key, session := range sm.sessions {
+		if (accountID != "" && session.AccountID == accountID) ||
+			(session.AccountID == "" && legacyEmail != "" && session.AccountEmail == legacyEmail) {
 			delete(sm.sessions, key)
 			sm.keyVersions[key]++
 		}
@@ -590,14 +608,19 @@ func lockConversationSessionForRequest(
 	rawMessageCount int,
 	accountEmail string,
 	clientContinuationKey string,
+	accountIDs ...string,
 ) (current *Session, reused bool, cacheable bool) {
+	accountID := ""
+	if len(accountIDs) > 0 {
+		accountID = strings.TrimSpace(accountIDs[0])
+	}
 	current = session
 	for {
 		if current == nil {
 			sm.mu.Lock()
 			if sm.ambiguousLocked(key, time.Now()) {
 				sm.mu.Unlock()
-				current = newConversationSession(accountEmail)
+				current = newConversationSessionForAccount(accountEmail, accountID)
 				current.lockForRequest()
 				return current, false, false
 			}
@@ -605,7 +628,7 @@ func lockConversationSessionForRequest(
 				current = existing
 				sm.mu.Unlock()
 			} else {
-				current = newConversationSession(accountEmail)
+				current = newConversationSessionForAccount(accountEmail, accountID)
 				current.managerKey = key
 				current.managerEpoch = sm.epoch
 				current.managerKeyVersion = sm.keyVersions[key]
@@ -640,16 +663,21 @@ func lockConversationSessionForRequest(
 		// and serve the request through an isolated full replay.
 		sm.MarkAmbiguous(key)
 		current.unlockForRequest()
-		current = newConversationSession(accountEmail)
+		current = newConversationSessionForAccount(accountEmail, accountID)
 		current.lockForRequest()
 		return current, false, false
 	}
 }
 
 func newConversationSession(accountEmail string) *Session {
+	return newConversationSessionForAccount(accountEmail, "")
+}
+
+func newConversationSessionForAccount(accountEmail, accountID string) *Session {
 	now := time.Now()
 	return &Session{
 		ThreadID:         generateUUIDv4(),
+		AccountID:        strings.TrimSpace(accountID),
 		AccountEmail:     accountEmail,
 		ConfigID:         generateUUIDv4(),
 		ContextID:        generateUUIDv4(),

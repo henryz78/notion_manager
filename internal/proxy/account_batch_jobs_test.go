@@ -171,3 +171,47 @@ func TestHandleAccountBatchJobsConflictReturnsActiveJob(t *testing.T) {
 		t.Fatalf("unexpected response: %+v", response)
 	}
 }
+
+func TestHandleAccountBatchJobsAcceptsMixedIDsAndLegacyEmails(t *testing.T) {
+	dir := t.TempDir()
+	exact := &Account{
+		TokenV2:   "exact-token",
+		UserID:    "exact-user",
+		UserEmail: "exact@example.com",
+		SpaceID:   "exact-space",
+		QuotaInfo: &QuotaInfo{IsEligible: true},
+	}
+	legacy := &Account{
+		TokenV2:   "legacy-token",
+		UserEmail: "legacy@example.com",
+		QuotaInfo: &QuotaInfo{IsEligible: true},
+	}
+	for _, account := range []*Account{exact, legacy} {
+		if _, err := SaveAccountToFile(account, dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pool := NewAccountPool()
+	pool.accounts = []*Account{exact, legacy}
+	manager, err := NewAccountBatchManager(pool, dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exact.EnsureAccountID()
+
+	body := `{"action":"disable","account_ids":["` + exact.AccountID + `"],"emails":["legacy@example.com"],"concurrency":2}`
+	req := httptest.NewRequest(http.MethodPost, "/admin/account-batch-jobs", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	HandleAccountBatchJobs(manager, NewDashboardAuth("", "")).ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var started AccountBatchJob
+	if err := json.NewDecoder(rec.Body).Decode(&started); err != nil {
+		t.Fatal(err)
+	}
+	finished := waitForAccountBatchJob(t, manager, started.ID)
+	if finished.Total != 2 || finished.Succeeded != 2 || finished.Failed != 0 {
+		t.Fatalf("job=%+v", finished)
+	}
+}

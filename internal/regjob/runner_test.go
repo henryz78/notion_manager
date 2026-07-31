@@ -154,6 +154,58 @@ func TestRunnerWritesAccountFileAndCallsOnSuccess(t *testing.T) {
 	}
 }
 
+func TestRunnerKeepsSameEmailWorkspacesInSeparateFiles(t *testing.T) {
+	h := newRunnerHarness(t, 2)
+	h.creds[0].Email = "shared@example.com"
+	h.creds[0].Raw["space"] = "business-space"
+	h.creds[1].Email = "shared@example.com"
+	h.creds[1].Raw["space"] = "free-space"
+	prov := &fakeProvider{id: "microsoft", login: func(
+		ctx context.Context,
+		c providers.Credential,
+		b *providers.Credential,
+		opts providers.LoginOptions,
+	) (*providers.Session, error) {
+		return &providers.Session{
+			TokenV2:   "shared-token",
+			UserID:    "shared-user",
+			UserEmail: c.Email,
+			SpaceID:   c.Raw["space"],
+		}, nil
+	}}
+
+	Run(context.Background(), h.store, h.job.ID, prov, h.creds, RunOpts{
+		Concurrency: 2,
+		AccountsDir: h.accountsDir,
+	})
+
+	entries, err := os.ReadDir(h.accountsDir)
+	if err != nil {
+		t.Fatalf("read accounts: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("same-email workspaces were overwritten; files=%v", entries)
+	}
+	seenIDs := make(map[string]bool)
+	for _, entry := range entries {
+		data, err := os.ReadFile(filepath.Join(h.accountsDir, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var account providers.Session
+		if err := json.Unmarshal(data, &account); err != nil {
+			t.Fatal(err)
+		}
+		if account.AccountID == "" {
+			t.Fatalf("account_id missing from %s", entry.Name())
+		}
+		seenIDs[account.AccountID] = true
+	}
+	if len(seenIDs) != 2 {
+		t.Fatalf("workspace account IDs are not unique: %v", seenIDs)
+	}
+}
+
 // TestRunnerOnSuccessReceivesEmail exercises the RunOpts.OnSuccess
 // contract: each successful step must hand the just-persisted email back
 // to the caller so it can drive a per-account quota refresh.

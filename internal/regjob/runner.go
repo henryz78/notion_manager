@@ -7,11 +7,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
 	"sync"
 	"time"
 
+	"notion-manager/internal/accountstore"
 	"notion-manager/internal/regjob/providers"
 )
 
@@ -24,10 +23,11 @@ import (
 // reload the AccountPool from disk and kick off a per-account quota
 // refresh from the email.
 type RunOpts struct {
-	Concurrency int
-	AccountsDir string
-	Proxy       string
-	OnSuccess   func(email string)
+	Concurrency      int
+	AccountsDir      string
+	Proxy            string
+	OnSuccess        func(email string)
+	OnSuccessAccount func(email, accountID string)
 }
 
 // Run drives bulk registration for a list of credentials, writing one
@@ -69,10 +69,6 @@ func Run(
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 
-	// Serialize file writes so two concurrent successes for the same email
-	// (rare, only when an operator submits dups) don't race the rename.
-	var writeMu sync.Mutex
-
 dispatch:
 	for i := range creds {
 		// Bail out cleanly if the context is already cancelled before we
@@ -90,7 +86,10 @@ dispatch:
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			runStep(ctx, store, jobID, idx, provider, cred, backup, loginOpts, opts.AccountsDir, opts.OnSuccess, &writeMu)
+			runStep(
+				ctx, store, jobID, idx, provider, cred, backup, loginOpts,
+				opts.AccountsDir, opts.OnSuccess, opts.OnSuccessAccount,
+			)
 		}(i, creds[i], backups[i])
 	}
 	wg.Wait()
@@ -110,7 +109,7 @@ func runStep(
 	loginOpts providers.LoginOptions,
 	accountsDir string,
 	onSuccess func(email string),
-	writeMu *sync.Mutex,
+	onSuccessAccount func(email, accountID string),
 ) {
 	startedAt := time.Now().UnixMilli()
 	store.UpdateStep(jobID, idx, func(st *Step) {
@@ -170,13 +169,20 @@ func runStep(
 	if session.RegisteredVia == "" {
 		session.RegisteredVia = provider.ID()
 	}
+	session.AccountID = accountstore.ComputeAccountID(session.UserID, session.SpaceID)
 
 	var fileBase string
 	if accountsDir != "" {
-		writeMu.Lock()
-		path := filepath.Join(accountsDir, accountFilename(cred.Email))
-		err := writeAccountFile(path, session)
-		writeMu.Unlock()
+		data, marshalErr := json.MarshalIndent(session, "", "  ")
+		if marshalErr != nil {
+			store.UpdateStep(jobID, idx, func(st *Step) {
+				st.Status = StepFail
+				st.Message = "write: " + marshalErr.Error()
+				st.EndedAt = time.Now().UnixMilli()
+			})
+			return
+		}
+		path, err := accountstore.WriteAccountJSON(accountsDir, session.AccountID, cred.Email, data)
 		if err != nil {
 			store.UpdateStep(jobID, idx, func(st *Step) {
 				st.Status = StepFail
@@ -188,7 +194,9 @@ func runStep(
 		fileBase = filepath.Base(path)
 	}
 
-	if onSuccess != nil {
+	if onSuccessAccount != nil {
+		onSuccessAccount(cred.Email, session.AccountID)
+	} else if onSuccess != nil {
 		onSuccess(cred.Email)
 	}
 
@@ -216,23 +224,4 @@ func pairBackups(creds []providers.Credential) []*providers.Credential {
 		out[i] = &next
 	}
 	return out
-}
-
-var safeFilenameChars = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
-
-func accountFilename(email string) string {
-	clean := safeFilenameChars.ReplaceAllString(strings.ToLower(email), "_")
-	clean = strings.Trim(clean, "_")
-	if clean == "" {
-		clean = "account"
-	}
-	return clean + ".json"
-}
-
-func writeAccountFile(path string, s *providers.Session) error {
-	data, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
 }

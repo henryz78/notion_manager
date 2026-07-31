@@ -58,7 +58,18 @@
     "ai_allowance": "AI 额度",
     "unlimited_now": "当前无限",
     "premium_raw": "Premium balance 原始值 {{count}}",
-    "disabled": "已禁用"
+    "disabled": "已禁用",
+    "unnamed_workspace": "未命名工作区",
+    "unnamed_login": "未命名登录账号",
+    "email_unavailable": "未提供邮箱",
+    "workspace_identity": "工作区 {{id}}",
+    "select_login": "选择 {{email}} 的全部工作区",
+    "workspaces_count": "{{count}} 个工作区",
+    "workspace_health": "{{available}} / {{total}} 个工作区可用",
+    "workspaces_selected": "已选 {{count}} 个",
+    "expand_workspaces": "展开",
+    "collapse_workspaces": "收起",
+    "auto_routing_note": "新的网关对话仍由后端自动选择账号；只有需要指定目标时，才在下方打开或管理某个工作区。"
   },
   "stats": {
     "total_accounts": "总账号",
@@ -216,6 +227,7 @@
       "check_failed_kept": " · 个人指令检测失败，已按“全部导入”保留",
       "configured_suffix": " · 官网个人指令已设置",
       "missing_suffix": " · 官网个人指令未设置",
+      "multiple_workspaces": "已导入 {{count}} 个工作区",
       "unnamed_space": "未命名空间",
       "unknown_plan": "未知套餐",
       "request_failed": "请求失败"

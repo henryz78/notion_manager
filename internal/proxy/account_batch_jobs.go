@@ -27,10 +27,12 @@ const (
 var ErrAccountBatchJobRunning = errors.New("account batch job already running")
 
 type AccountBatchStep struct {
+	AccountID  string `json:"account_id,omitempty"`
 	Email      string `json:"email"`
 	Status     string `json:"status"`
 	Message    string `json:"message,omitempty"`
 	Configured *bool  `json:"configured,omitempty"`
+	selector   string
 }
 
 type AccountBatchJob struct {
@@ -200,7 +202,7 @@ func (m *AccountBatchManager) Active() (*AccountBatchJob, bool) {
 	return job, job != nil
 }
 
-func (m *AccountBatchManager) Start(action string, emails []string, concurrency int) (*AccountBatchJob, error) {
+func (m *AccountBatchManager) Start(action string, selectors []string, concurrency int) (*AccountBatchJob, error) {
 	if m == nil || m.pool == nil {
 		return nil, fmt.Errorf("batch manager is not initialized")
 	}
@@ -208,11 +210,11 @@ func (m *AccountBatchManager) Start(action string, emails []string, concurrency 
 	if action == "" {
 		return nil, fmt.Errorf("unsupported batch action")
 	}
-	emails = normalizeBulkEmails(emails)
-	if len(emails) == 0 {
-		return nil, fmt.Errorf("at least one email is required")
+	selectors = normalizeBulkEmails(selectors)
+	if len(selectors) == 0 {
+		return nil, fmt.Errorf("at least one account is required")
 	}
-	if len(emails) > accountBatchMaxAccounts {
+	if len(selectors) > accountBatchMaxAccounts {
 		return nil, fmt.Errorf("too many accounts selected")
 	}
 	releaseMutation, ok := m.pool.beginAccountMutation()
@@ -220,23 +222,37 @@ func (m *AccountBatchManager) Start(action string, emails []string, concurrency 
 		return nil, errors.New(accountRestoreConflictMessage)
 	}
 	concurrency = clampAccountBatchConcurrency(concurrency)
-	accounts, missing := accountsMatchingEmails(m.pool, emails)
-	targets := make(map[string]*Account, len(accounts))
-	for _, account := range accounts {
-		targets[strings.ToLower(strings.TrimSpace(account.UserEmail))] = account
-	}
-	missingSet := make(map[string]struct{}, len(missing))
-	for _, email := range missing {
-		missingSet[strings.ToLower(strings.TrimSpace(email))] = struct{}{}
-	}
-	steps := make([]AccountBatchStep, 0, len(emails))
+	targets := make(map[string]*Account, len(selectors))
+	steps := make([]AccountBatchStep, 0, len(selectors))
 	failed := 0
-	for _, email := range emails {
-		step := AccountBatchStep{Email: email, Status: "pending"}
-		if _, absent := missingSet[strings.ToLower(email)]; absent {
+	for _, selector := range selectors {
+		selector = strings.TrimSpace(selector)
+		var account *Account
+		var resolveErr error
+		if isAccountID(strings.ToLower(selector)) {
+			account = m.pool.FindByAccountID(strings.ToLower(selector))
+			if account == nil {
+				resolveErr = os.ErrNotExist
+			}
+		} else {
+			account, resolveErr = m.pool.FindByEmail(selector)
+		}
+		step := AccountBatchStep{Email: selector, Status: "pending"}
+		if resolveErr != nil || account == nil {
 			step.Status = "failed"
-			step.Message = "账号不存在"
+			var ambiguousEmail *AmbiguousEmailError
+			if errors.As(resolveErr, &ambiguousEmail) {
+				step.Message = "同一邮箱属于多个工作区，请按账号 ID 重试"
+			} else {
+				step.Message = "账号不存在"
+			}
 			failed++
+		} else {
+			account.EnsureAccountID()
+			step.AccountID = account.AccountID
+			step.Email = account.UserEmail
+			step.selector = strings.ToLower(selector)
+			targets[step.selector] = account
 		}
 		steps = append(steps, step)
 	}
@@ -313,7 +329,14 @@ func (m *AccountBatchManager) execute(action string, account *Account) accountBa
 		}
 		return accountBatchExecution{status: "success", message: "已启用"}
 	case AccountBatchDelete:
-		if err := deleteAccountByIdentity(m.pool, m.accountsDir, account.UserEmail, account.TokenV2); err != nil {
+		account.EnsureAccountID()
+		var err error
+		if account.AccountID == "" {
+			err = deleteAccountByIdentity(m.pool, m.accountsDir, account.UserEmail, account.TokenV2)
+		} else {
+			err = deleteAccountByAccountIdentity(m.pool, m.accountsDir, account.AccountID, account.UserEmail, account.TokenV2)
+		}
+		if err != nil {
 			return accountBatchExecution{status: "failed", message: err.Error()}
 		}
 		return accountBatchExecution{status: "success", message: "已删除"}
@@ -334,8 +357,15 @@ func (m *AccountBatchManager) execute(action string, account *Account) accountBa
 			}
 			return accountBatchExecution{status: "skipped", message: "已设置，保留账号", configured: &configured}
 		}
-		if err := deleteAccountByIdentity(m.pool, m.accountsDir, account.UserEmail, account.TokenV2); err != nil {
-			return accountBatchExecution{status: "failed", message: err.Error(), configured: &configured}
+		account.EnsureAccountID()
+		var deleteErr error
+		if account.AccountID == "" {
+			deleteErr = deleteAccountByIdentity(m.pool, m.accountsDir, account.UserEmail, account.TokenV2)
+		} else {
+			deleteErr = deleteAccountByAccountIdentity(m.pool, m.accountsDir, account.AccountID, account.UserEmail, account.TokenV2)
+		}
+		if deleteErr != nil {
+			return accountBatchExecution{status: "failed", message: deleteErr.Error(), configured: &configured}
 		}
 		return accountBatchExecution{status: "success", message: "未设置，已删除", configured: &configured}
 	case AccountBatchDeleteExhausted:
@@ -349,8 +379,15 @@ func (m *AccountBatchManager) execute(action string, account *Account) accountBa
 		if !confirmed {
 			return accountBatchExecution{status: "skipped", message: "实时复核后仍可用，已保留"}
 		}
-		if err := deleteAccountByIdentity(m.pool, m.accountsDir, account.UserEmail, account.TokenV2); err != nil {
-			return accountBatchExecution{status: "failed", message: err.Error()}
+		account.EnsureAccountID()
+		var deleteErr error
+		if account.AccountID == "" {
+			deleteErr = deleteAccountByIdentity(m.pool, m.accountsDir, account.UserEmail, account.TokenV2)
+		} else {
+			deleteErr = deleteAccountByAccountIdentity(m.pool, m.accountsDir, account.AccountID, account.UserEmail, account.TokenV2)
+		}
+		if deleteErr != nil {
+			return accountBatchExecution{status: "failed", message: deleteErr.Error()}
 		}
 		return accountBatchExecution{status: "success", message: "已删除用完试用额度的账号"}
 	default:
@@ -389,10 +426,10 @@ func (m *AccountBatchManager) run(id string, targets map[string]*Account) {
 					continue
 				}
 				job.Steps[index].Status = "running"
-				email := job.Steps[index].Email
+				selector := job.Steps[index].selector
 				m.mu.Unlock()
 
-				result := m.execute(action, targets[strings.ToLower(strings.TrimSpace(email))])
+				result := m.execute(action, targets[selector])
 
 				m.mu.Lock()
 				job = m.jobs[id]
@@ -472,21 +509,26 @@ func (m *AccountBatchManager) Retry(id string) (*AccountBatchJob, error) {
 	if !ok {
 		return nil, os.ErrNotExist
 	}
-	emails := make([]string, 0, job.Failed)
+	selectors := make([]string, 0, job.Failed)
 	for _, step := range job.Steps {
 		if step.Status == "failed" {
-			emails = append(emails, step.Email)
+			if step.AccountID != "" {
+				selectors = append(selectors, step.AccountID)
+			} else {
+				selectors = append(selectors, step.Email)
+			}
 		}
 	}
-	if len(emails) == 0 {
+	if len(selectors) == 0 {
 		return nil, fmt.Errorf("job has no failed accounts")
 	}
-	return m.Start(job.Action, emails, job.Concurrency)
+	return m.Start(job.Action, selectors, job.Concurrency)
 }
 
 type StartAccountBatchJobRequest struct {
 	Action      string   `json:"action"`
-	Emails      []string `json:"emails"`
+	AccountIDs  []string `json:"account_ids,omitempty"`
+	Emails      []string `json:"emails,omitempty"`
 	Concurrency int      `json:"concurrency"`
 }
 
@@ -515,7 +557,8 @@ func HandleAccountBatchJobs(manager *AccountBatchManager, auth *DashboardAuth) h
 				http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 				return
 			}
-			job, err := manager.Start(body.Action, body.Emails, body.Concurrency)
+			selectors := append(append(make([]string, 0, len(body.AccountIDs)+len(body.Emails)), body.AccountIDs...), body.Emails...)
+			job, err := manager.Start(body.Action, selectors, body.Concurrency)
 			if err != nil {
 				if errors.Is(err, ErrAccountBatchJobRunning) {
 					w.WriteHeader(http.StatusConflict)

@@ -57,7 +57,7 @@ export function AccountMenu({ account, onChanged }: Props) {
 
   const onOpenProxy = (e: React.MouseEvent) => {
     e.stopPropagation()
-    openProxy(account.email)
+    openProxy(account.account_id)
     setOpen(false)
   }
 
@@ -69,7 +69,7 @@ export function AccountMenu({ account, onChanged }: Props) {
     }
     setDeleting(true)
     try {
-      await deleteAccount(account.email)
+      await deleteAccount(account.account_id)
       onChanged()
     } catch (err) {
       console.error('delete account failed', err)
@@ -84,7 +84,7 @@ export function AccountMenu({ account, onChanged }: Props) {
     e.stopPropagation()
     setToggling(true)
     try {
-      await bulkAccountAction(account.disabled ? 'enable' : 'disable', [account.email])
+      await bulkAccountAction(account.disabled ? 'enable' : 'disable', [account.account_id])
       onChanged()
     } catch (err) {
       console.error('toggle account disabled state failed', err)

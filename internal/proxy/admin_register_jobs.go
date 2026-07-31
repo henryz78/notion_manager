@@ -3,17 +3,17 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
+	"notion-manager/internal/accountstore"
 	"notion-manager/internal/regjob"
 	"notion-manager/internal/regjob/providers"
 )
@@ -29,16 +29,16 @@ const postRegisterRefreshTimeout = 30 * time.Second
 // account is written. Production callers leave it nil and we use the
 // pool's RefreshAndPersistAccount.
 var postRegisterRefreshHook func(deps *RegisterJobsDeps, email string)
-
-// Windows keeps directory-read handles open briefly while concurrent workers
-// scan account JSON files. Serialize the small disk mutation section so
-// parallel batch jobs do not race a delete against another worker's scan.
-var accountDeleteMu sync.Mutex
+var accountDeletionAfterDiskHook func()
 
 // triggerPostRegisterRefresh runs the per-account quota refresh in the
 // background. We never block the runner goroutine on a Notion round-trip
 // — if the request hangs the registration would appear stuck on the UI.
 func triggerPostRegisterRefresh(deps *RegisterJobsDeps, email string) {
+	triggerPostRegisterRefreshForAccount(deps, email, "")
+}
+
+func triggerPostRegisterRefreshForAccount(deps *RegisterJobsDeps, email, accountID string) {
 	if hook := postRegisterRefreshHook; hook != nil {
 		hook(deps, email)
 		return
@@ -51,7 +51,7 @@ func triggerPostRegisterRefresh(deps *RegisterJobsDeps, email string) {
 		log.Printf("[admin] post-register quota refresh %s skipped: %s", email, accountRestoreConflictMessage)
 		return
 	}
-	go func(em string) {
+	go func(em, aid string) {
 		defer releaseMutation()
 		// A panic in the quota path (e.g. nil AppConfig in odd test
 		// setups, or a future regression) must not bring the server
@@ -64,10 +64,27 @@ func triggerPostRegisterRefresh(deps *RegisterJobsDeps, email string) {
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), postRegisterRefreshTimeout)
 		defer cancel()
-		if err := deps.Pool.RefreshAndPersistAccount(ctx, deps.AccountsDir, em); err != nil {
+		var err error
+		if aid != "" {
+			err = deps.Pool.RefreshAndPersistAccountByID(ctx, deps.AccountsDir, aid)
+		} else {
+			err = deps.Pool.RefreshAndPersistAccount(ctx, deps.AccountsDir, em)
+		}
+		if err != nil {
 			log.Printf("[admin] post-register quota refresh %s: %v", em, err)
 		}
-	}(email)
+	}(email, accountID)
+}
+
+func activateRegisteredAccount(deps *RegisterJobsDeps, email, accountID string) {
+	if deps == nil || deps.Pool == nil {
+		return
+	}
+	if err := deps.Pool.ActivateAccountByIDFromDir(deps.AccountsDir, accountID); err != nil {
+		log.Printf("[admin] activate registered account %s: %v", accountID, err)
+		return
+	}
+	triggerPostRegisterRefreshForAccount(deps, email, accountID)
 }
 
 // RegisterJobsDeps bundles the dependencies for the new /admin/register/*
@@ -240,9 +257,8 @@ func HandleAdminRegisterStart(deps *RegisterJobsDeps) http.HandlerFunc {
 				Concurrency: concurrency,
 				AccountsDir: deps.AccountsDir,
 				Proxy:       proxyURL,
-				OnSuccess: func(email string) {
-					deps.Pool.ReloadFromDir(deps.AccountsDir)
-					triggerPostRegisterRefresh(deps, email)
+				OnSuccessAccount: func(email, accountID string) {
+					activateRegisteredAccount(deps, email, accountID)
 				},
 			})
 		}()
@@ -498,9 +514,8 @@ func serveJobRetry(deps *RegisterJobsDeps, id string, w http.ResponseWriter, r *
 			Concurrency: concurrency,
 			AccountsDir: deps.AccountsDir,
 			Proxy:       sc.Proxy,
-			OnSuccess: func(email string) {
-				deps.Pool.ReloadFromDir(deps.AccountsDir)
-				triggerPostRegisterRefresh(deps, email)
+			OnSuccessAccount: func(email, accountID string) {
+				activateRegisteredAccount(deps, email, accountID)
 			},
 		})
 	}()
@@ -609,7 +624,9 @@ func writeSSE(w http.ResponseWriter, event string, payload interface{}) error {
 // HandleAdminDeleteAccount removes one account JSON file from disk and from
 // the live AccountPool. Path:
 //
-//	DELETE /admin/accounts/{email}
+//	DELETE /admin/accounts/{identifier}
+//
+// The identifier is either an account_id (64-char hex) or an email (legacy).
 func HandleAdminDeleteAccount(deps *RegisterJobsDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -622,9 +639,9 @@ func HandleAdminDeleteAccount(deps *RegisterJobsDeps) http.HandlerFunc {
 		}
 		raw := strings.TrimPrefix(r.URL.Path, "/admin/accounts/")
 		raw = strings.Trim(raw, "/")
-		email, err := url.PathUnescape(raw)
-		if err != nil || email == "" {
-			http.Error(w, `{"error":"missing email"}`, http.StatusBadRequest)
+		identifier, err := url.PathUnescape(raw)
+		if err != nil || identifier == "" {
+			http.Error(w, `{"error":"missing identifier"}`, http.StatusBadRequest)
 			return
 		}
 		releaseMutation, ok := beginAccountMutationRequest(w, deps.Pool)
@@ -633,15 +650,29 @@ func HandleAdminDeleteAccount(deps *RegisterJobsDeps) http.HandlerFunc {
 		}
 		defer releaseMutation()
 
-		if err := deleteAccountByEmail(deps.Pool, deps.AccountsDir, email); err != nil {
-			if os.IsNotExist(err) {
-				http.Error(w, `{"error":"account not found"}`, http.StatusNotFound)
+		// If identifier looks like a 64-char hex account_id, delete by that;
+		// otherwise fall back to email for backward compatibility.
+		if isAccountID(identifier) {
+			if err := deleteAccountByID(deps.Pool, deps.AccountsDir, identifier); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					http.Error(w, `{"error":"account not found"}`, http.StatusNotFound)
+					return
+				}
+				http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusInternalServerError)
 				return
 			}
-			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusInternalServerError)
-			return
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "deleted": identifier})
+		} else {
+			if err := deleteAccountByEmail(deps.Pool, deps.AccountsDir, identifier); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					http.Error(w, `{"error":"account not found"}`, http.StatusNotFound)
+					return
+				}
+				http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "deleted": identifier})
 		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "deleted": email})
 	}
 }
 
@@ -649,88 +680,105 @@ func HandleAdminDeleteAccount(deps *RegisterJobsDeps) http.HandlerFunc {
 // matches and drops the corresponding pool entry. Returns os.ErrNotExist if
 // no file matches; that's mapped to a 404 by the handler.
 func deleteAccountByEmail(pool *AccountPool, dir, email string) error {
-	expectedToken := ""
-	if pool != nil {
-		if current := pool.getByEmailAnyState(email); current != nil {
-			expectedToken = current.TokenV2
-		}
+	if pool == nil {
+		return DeleteAccountFileByEmail(email, dir)
 	}
-	return deleteAccountByIdentity(pool, dir, email, expectedToken)
+	current, err := pool.FindByEmail(email)
+	if err != nil {
+		var ambiguous *AmbiguousEmailError
+		if errors.As(err, &ambiguous) {
+			return err
+		}
+		// Legacy callers can create/import a file before hot-loading it into
+		// the pool. Exact-on-disk email deletion remains safe only when the
+		// file scan is unambiguous.
+		return DeleteAccountFileByEmail(email, dir)
+	}
+	current.EnsureAccountID()
+	if current.AccountID == "" {
+		return deleteAccountByIdentity(pool, dir, current.UserEmail, current.TokenV2)
+	}
+	return deleteAccountByAccountIdentity(pool, dir, current.AccountID, current.UserEmail, current.TokenV2)
 }
 
 // deleteAccountByIdentity optionally binds a destructive cleanup to the token
 // that was live when the account was selected. A concurrent re-import with the
 // same email must never cause a stale cleanup job to delete the replacement.
 func deleteAccountByIdentity(pool *AccountPool, dir, email, expectedToken string) error {
-	accountDeleteMu.Lock()
-	defer accountDeleteMu.Unlock()
+	if pool == nil {
+		return fmt.Errorf("account pool is required for identity-bound deletion")
+	}
+	unlockDirectory, err := accountstore.LockDirectory(dir)
+	if err != nil {
+		return err
+	}
+	defer unlockDirectory()
 
-	entries, err := os.ReadDir(dir)
+	current, err := pool.FindByEmail(email)
 	if err != nil {
 		return err
 	}
-	var target string
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var raw map[string]interface{}
-		if err := json.Unmarshal(data, &raw); err != nil {
-			continue
-		}
-		if got, _ := raw["user_email"].(string); strings.EqualFold(got, email) {
-			if expectedToken != "" {
-				if token, _ := raw["token_v2"].(string); token != expectedToken {
-					continue
-				}
-			}
-			target = path
-			break
-		}
+	current.EnsureAccountID()
+	if expectedToken != "" && current.TokenV2 != expectedToken {
+		return fmt.Errorf("account identity changed during deletion; replacement retained")
 	}
-	if target == "" {
-		return os.ErrNotExist
+	if current.AccountID == "" {
+		if err := deleteAccountFileByEmailIdentityLocked(current.UserEmail, expectedToken, dir); err != nil {
+			return err
+		}
+		pool.RemoveAccountByEmailIfToken(current.UserEmail, expectedToken)
+		log.Printf("[admin] deleted legacy account (%s)", current.UserEmail)
+		return nil
 	}
-	unlockFile, err := lockAccountFilePath(target)
+	return deleteAccountByAccountIdentityLocked(pool, dir, current.AccountID, current.UserEmail, expectedToken)
+}
+
+func deleteAccountByAccountIdentity(pool *AccountPool, dir, accountID, email, expectedToken string) error {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return fmt.Errorf("account_id is required")
+	}
+	unlockDirectory, err := accountstore.LockDirectory(dir)
 	if err != nil {
 		return err
 	}
-	defer unlockFile()
-	// Revalidate after taking the same path lock used by saveAccountFile.
-	// A concurrent save/delete must never remove a newly replaced account.
-	latest, err := os.ReadFile(target)
-	if err != nil {
-		return err
-	}
-	var latestRaw map[string]interface{}
-	if err := json.Unmarshal(latest, &latestRaw); err != nil {
-		return err
-	}
-	if got, _ := latestRaw["user_email"].(string); !strings.EqualFold(got, email) {
-		return os.ErrNotExist
-	}
-	if expectedToken != "" {
-		if got, _ := latestRaw["token_v2"].(string); got != expectedToken {
+	defer unlockDirectory()
+	return deleteAccountByAccountIdentityLocked(pool, dir, accountID, email, expectedToken)
+}
+
+func deleteAccountByAccountIdentityLocked(pool *AccountPool, dir, accountID, email, expectedToken string) error {
+	if pool != nil {
+		current := pool.FindByAccountID(accountID)
+		if current == nil {
+			return os.ErrNotExist
+		}
+		if expectedToken != "" && current.TokenV2 != expectedToken {
 			return fmt.Errorf("account identity changed during deletion; replacement retained")
 		}
-		if pool != nil {
-			current := pool.getByEmailAnyState(email)
-			if current == nil || current.TokenV2 != expectedToken {
-				return fmt.Errorf("account identity changed during deletion; replacement retained")
-			}
-		}
 	}
-	if err := os.Remove(target); err != nil {
+	if err := deleteAccountFileByIdentityLocked(accountID, expectedToken, dir); err != nil {
 		return err
 	}
-	if pool != nil {
-		pool.RemoveAccountByEmail(email)
+	if hook := accountDeletionAfterDiskHook; hook != nil {
+		hook()
 	}
-	log.Printf("[admin] deleted account file: %s (%s)", target, email)
+	if pool != nil {
+		pool.RemoveAccountByAccountIDIfToken(accountID, expectedToken)
+	}
+	log.Printf("[admin] deleted account workspace account_id=%s (%s)", accountID, email)
 	return nil
+}
+
+// deleteAccountByID removes the account JSON file whose account_id field
+// matches (or can be computed from user_id+space_id) and drops the pool entry.
+func deleteAccountByID(pool *AccountPool, dir, accountID string) error {
+	accountID = strings.TrimSpace(accountID)
+	if pool == nil {
+		return DeleteAccountFile(accountID, dir)
+	}
+	current := pool.FindByAccountID(accountID)
+	if current == nil {
+		return os.ErrNotExist
+	}
+	return deleteAccountByAccountIdentity(pool, dir, accountID, current.UserEmail, current.TokenV2)
 }

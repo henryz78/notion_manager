@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import type { DashboardData, AccountInfo, AccountSummary, DeploymentVersionStatus, RefreshStatus, TokenStats } from './types'
-import { fetchDashboardData, fetchAccountSelection, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats, startAccountBatchJob, getAccountBatchJob, listAccountBatchJobs, retryAccountBatchJob, downloadBackup, restoreBackup, fetchAPIKey, fetchVersionStatus } from './api'
+import { fetchAllDashboardData, fetchAccountSelection, openProxy, openBestProxy, checkAuth, login, logout, triggerRefresh, fetchSettings, updateSettings, addAccount, fetchTokenStats, startAccountBatchJob, getAccountBatchJob, listAccountBatchJobs, retryAccountBatchJob, downloadBackup, restoreBackup, fetchAPIKey, fetchVersionStatus } from './api'
 import type { SearchSettings, ToolChoicePolicy, AccountStatusFilter, AccountBatchJob, AccountBatchJobAction, AccountImportPersonalInstructionsPolicy } from './api'
 import { fmt, formatTokens, getQuotaStatusByUsage, getQuotaPct, avatarColor, avatarLetter, formatCheckedAt, formatTimestampMs, providerDisplay } from './utils'
 import { AccountMenu } from './components/AccountMenu'
@@ -190,7 +190,9 @@ function AddAccountModal({
               line: item.line,
               status: 'success',
               title: res.account.email || res.account.name || t('modal.add.line', { line: item.line }),
-              detail: `${res.account.space || t('modal.add.unnamed_space')} · ${res.account.plan_type || t('modal.add.unknown_plan')}${personalInstructionsDetail}`,
+              detail: res.imported && res.imported > 1
+                ? `${t('modal.add.multiple_workspaces', { count: res.imported })} · ${res.accounts?.map(account => `${account.space || t('modal.add.unnamed_space')} (${account.plan_type || t('modal.add.unknown_plan')})`).join('、')}${personalInstructionsDetail}`
+                : `${res.account.space || t('modal.add.unnamed_space')} · ${res.account.plan_type || t('modal.add.unknown_plan')}${personalInstructionsDetail}`,
             }
           }
         } catch (err) {
@@ -667,16 +669,81 @@ function Badge({ children, variant }: { children: React.ReactNode; variant: 'pla
   )
 }
 
+interface AccountGroup {
+  id: string
+  accounts: AccountInfo[]
+}
+
+function accountLoginKey(account: AccountInfo): string {
+  const loginID = account.login_id?.trim()
+  if (loginID) return `login:${loginID}`
+  const token = account.token_v2?.trim()
+  if (token) return `token:${token}`
+  const email = account.email?.trim().toLowerCase()
+  if (email) return `email:${email}`
+  return `workspace:${account.account_id}`
+}
+
+function groupWorkspaceAccounts(accounts: AccountInfo[]): AccountGroup[] {
+  const grouped = new Map<string, AccountGroup>()
+  const seenAccountIDs = new Set<string>()
+  for (const account of accounts) {
+    if (!account.account_id || seenAccountIDs.has(account.account_id)) continue
+    seenAccountIDs.add(account.account_id)
+    const key = accountLoginKey(account)
+    const existing = grouped.get(key)
+    if (existing) {
+      existing.accounts.push(account)
+    } else {
+      grouped.set(key, { id: account.account_id, accounts: [account] })
+    }
+  }
+  return Array.from(grouped.values())
+}
+
+function GroupCheckbox({
+  checked,
+  indeterminate,
+  label,
+  onChange,
+}: {
+  checked: boolean
+  indeterminate: boolean
+  label: string
+  onChange: () => void
+}) {
+  const ref = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = indeterminate
+  }, [indeterminate])
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={checked}
+      onClick={event => event.stopPropagation()}
+      onChange={event => {
+        event.stopPropagation()
+        onChange()
+      }}
+      className="w-4 h-4 shrink-0 accent-notion-blue cursor-pointer"
+      aria-label={label}
+    />
+  )
+}
+
 function AccountCard({
   account,
   onChanged,
   selected,
   onToggleSelected,
+  embedded = false,
 }: {
   account: AccountInfo
   onChanged: () => void
   selected: boolean
   onToggleSelected: () => void
+  embedded?: boolean
 }) {
   const { t, i18n } = useTranslation()
   const [showModels, setShowModels] = useState(false)
@@ -731,12 +798,12 @@ function AccountCard({
       alert(t('account.temporary_alert', { reason: account.last_failure_reason || 'temporary_failure' }))
       return
     }
-    openProxy(account.email)
+    openProxy(account.account_id)
   }
 
   return (
     <div
-      className={`rounded-lg p-4 border max-sm:p-3 ${manuallyDisabled || authInvalid || noWorkspace || aiDisabled || temporarilyUnavailable ? 'cursor-not-allowed' : 'cursor-pointer hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30'} transition-all duration-200 ${selected ? 'ring-1 ring-notion-blue border-notion-blue/60' : ''} ${cardBg}`}
+      className={`${embedded ? 'rounded-md p-3' : 'rounded-lg p-4 max-sm:p-3'} border ${manuallyDisabled || authInvalid || noWorkspace || aiDisabled || temporarilyUnavailable ? 'cursor-not-allowed' : `cursor-pointer ${embedded ? 'hover:border-white/[0.12]' : 'hover:-translate-y-0.5 hover:shadow-lg hover:shadow-black/30'}`} transition-all duration-200 ${selected ? 'ring-1 ring-notion-blue border-notion-blue/60' : ''} ${cardBg}`}
       onClick={handleClick}
       title={manuallyDisabled ? t('account.manual_disabled_tooltip') : authInvalid ? t('account.auth_invalid_tooltip') : noWorkspace ? t('account.no_workspace_tooltip') : aiDisabled ? t('account.ai_disabled_tooltip') : temporarilyUnavailable ? t('account.temporary_tooltip', { reason: account.last_failure_reason || 'temporary_failure' }) : undefined}
     >
@@ -751,21 +818,27 @@ function AccountCard({
             onToggleSelected()
           }}
           className="w-4 h-4 shrink-0 accent-notion-blue cursor-pointer"
-          aria-label={t('account.select', { email: account.email })}
+          aria-label={t('account.select', { email: account.email || t('account.email_unavailable') })}
           title={t('account.select_action')}
         />
-        <div
-          className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold text-white shrink-0"
-          style={{ background: avatarColor(account.name) }}
-        >
-          {avatarLetter(account.name)}
-        </div>
+        {!embedded && (
+          <div
+            className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold text-white shrink-0"
+            style={{ background: avatarColor(account.name) }}
+          >
+            {avatarLetter(account.name)}
+          </div>
+        )}
         <div className="flex-1 min-w-0">
           <div className="text-[13px] font-semibold truncate">
-            {account.name || 'Unknown'}
-            {account.space && <span className="text-text-secondary font-normal"> · {account.space}</span>}
+            {embedded ? (account.space || t('account.unnamed_workspace')) : (account.name || t('account.unnamed_login'))}
+            {!embedded && account.space && <span className="text-text-secondary font-normal"> · {account.space}</span>}
           </div>
-          <div className="text-[11px] text-text-secondary truncate">{account.email || '—'}</div>
+          <div className="text-[11px] text-text-secondary truncate">
+            {embedded
+              ? t('account.workspace_identity', { id: account.space_id_short || account.account_id.slice(0, 8) })
+              : (account.email || t('account.email_unavailable'))}
+          </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
           <div className={`w-2 h-2 rounded-full ${dotCls}`} />
@@ -873,6 +946,116 @@ function AccountCard({
   )
 }
 
+function AccountGroupCard({
+  group,
+  selectedAccounts,
+  onToggleWorkspace,
+  onToggleGroup,
+  onChanged,
+}: {
+  group: AccountGroup
+  selectedAccounts: Map<string, string>
+  onToggleWorkspace: (account: AccountInfo) => void
+  onToggleGroup: (accounts: AccountInfo[]) => void
+  onChanged: () => void
+}) {
+  const { t } = useTranslation()
+  const [expanded, setExpanded] = useState(group.accounts.length === 1)
+  const primary = group.accounts[0]
+  const accountIDs = group.accounts.map(account => account.account_id).filter(Boolean)
+  const selectedCount = accountIDs.filter(accountID => selectedAccounts.has(accountID)).length
+  const allSelected = accountIDs.length > 0 && selectedCount === accountIDs.length
+  const partiallySelected = selectedCount > 0 && !allSelected
+  const plans = Array.from(new Set(group.accounts.map(account => account.plan).filter(Boolean)))
+  const usableCount = group.accounts.filter(account => {
+    const quotaBlocked = !account.quota_unlimited && (account.permanent || account.exhausted)
+    return !account.disabled && !account.auth_invalid && !account.no_workspace &&
+      !account.ai_disabled && !account.temporarily_unavailable && !quotaBlocked
+  }).length
+  const displayName = primary.name || primary.email || t('account.unnamed_login')
+  const displayEmail = primary.email || t('account.email_unavailable')
+
+  useEffect(() => {
+    if (group.accounts.length === 1) setExpanded(true)
+  }, [group.accounts.length])
+
+  const toggleExpanded = () => setExpanded(value => !value)
+
+  return (
+    <section className={`rounded-lg border bg-bg-card transition-colors ${selectedCount > 0 ? 'border-notion-blue/50' : 'border-white/[0.04]'}`}>
+      <div
+        className="flex items-center gap-3 p-4 cursor-pointer hover:bg-bg-card-hover rounded-lg max-sm:p-3"
+        onClick={toggleExpanded}
+        onKeyDown={event => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            toggleExpanded()
+          }
+        }}
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+      >
+        <GroupCheckbox
+          checked={allSelected}
+          indeterminate={partiallySelected}
+          label={t('account.select_login', { email: displayEmail })}
+          onChange={() => onToggleGroup(group.accounts)}
+        />
+        <div
+          className="w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold text-white shrink-0"
+          style={{ background: avatarColor(displayName) }}
+        >
+          {avatarLetter(displayName)}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-[13px] font-semibold truncate">{displayName}</span>
+            <span className="text-[10px] rounded-full bg-white/[0.06] px-2 py-0.5 text-text-secondary shrink-0">
+              {t('account.workspaces_count', { count: group.accounts.length })}
+            </span>
+          </div>
+          <div className="text-[11px] text-text-secondary truncate">{displayEmail}</div>
+          <div className="mt-1 text-[10px] text-text-muted truncate">
+            {t('account.workspace_health', { available: usableCount, total: group.accounts.length })}
+            {plans.length > 0 ? ` · ${plans.join(' / ')}` : ''}
+          </div>
+        </div>
+        <div className="text-right shrink-0">
+          {selectedCount > 0 && (
+            <div className="text-[10px] text-notion-blue mb-0.5">
+              {t('account.workspaces_selected', { count: selectedCount })}
+            </div>
+          )}
+          <div className="text-[11px] text-text-secondary">
+            {expanded ? t('account.collapse_workspaces') : t('account.expand_workspaces')} {expanded ? '▴' : '▾'}
+          </div>
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="border-t border-border p-2.5 bg-bg-secondary/30 rounded-b-lg">
+          <div className="mb-2 px-1 text-[10px] text-text-muted">
+            {t('account.auto_routing_note')}
+          </div>
+          <div className="grid grid-cols-1 gap-2">
+            {group.accounts.map(account => (
+              <AccountCard
+                key={account.account_id}
+                account={account}
+                onChanged={onChanged}
+                selected={selectedAccounts.has(account.account_id)}
+                onToggleSelected={() => onToggleWorkspace(account)}
+                embedded
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
 const accountBatchActionKeys: Record<AccountBatchJobAction, string> = {
   check_personal_instructions: 'batch.check',
   disable: 'batch.disable',
@@ -941,7 +1124,11 @@ function AccountBatchProgress({
           )}
           {job.state !== 'running' && failedSteps.length > 0 && (
             <div className="mt-2 text-[10px] text-err space-y-0.5">
-              {failedSteps.map(step => <div key={step.email} className="truncate" title={step.message}>{step.email}: {step.message || t('batch.step_failed')}</div>)}
+              {failedSteps.map((step, index) => (
+                <div key={step.account_id || `${step.email}-${index}`} className="truncate" title={step.message}>
+                  {step.email || t('account.email_unavailable')}: {step.message || t('batch.step_failed')}
+                </div>
+              ))}
               {job.failed > failedSteps.length && <div>{t('batch.other_failed', { count: job.failed - failedSteps.length })}</div>}
             </div>
           )}
@@ -975,7 +1162,7 @@ export default function App() {
   const [batchStartingAction, setBatchStartingAction] = useState<AccountBatchJobAction | null>(null)
   const [activeBatchJob, setActiveBatchJob] = useState<AccountBatchJob | null>(null)
   const [selectingAllResults, setSelectingAllResults] = useState(false)
-  const [selectedEmails, setSelectedEmails] = useState<Set<string>>(() => new Set())
+  const [selectedAccounts, setSelectedAccounts] = useState<Map<string, string>>(() => new Map())
   const [refreshStatus, setRefreshStatus] = useState<RefreshStatus | null>(null)
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<AccountStatusFilter>('all')
@@ -1058,12 +1245,12 @@ export default function App() {
     })
   }, [])
 
-  // loadData fetches the *paginated* account list using the current
-  // page + debounced query. The server filters/sorts/slices for us, so
-  // `data.accounts` is already the visible page.
+  // Grouping is by login identity while the server stores one row per
+  // workspace. Fetch all filtered workspace pages first so a login is never
+  // split into duplicate cards at a server-page boundary.
   const loadData = useCallback(async () => {
     try {
-      const d = await fetchDashboardData({ page, pageSize: PAGE_SIZE, query: debouncedQuery, status: statusFilter })
+      const d = await fetchAllDashboardData({ query: debouncedQuery, status: statusFilter })
       setData(d)
       setError(null)
       setRefreshTime(new Date().toLocaleTimeString('zh-CN'))
@@ -1075,7 +1262,7 @@ export default function App() {
     } finally {
       setLoading(false)
     }
-  }, [page, debouncedQuery, statusFilter])
+  }, [debouncedQuery, statusFilter])
 
   useEffect(() => {
     if (authState === 'authenticated') loadData()
@@ -1148,7 +1335,7 @@ export default function App() {
     completedBatchJobsRef.current.add(activeBatchJob.id)
     window.localStorage.removeItem('notion-manager-active-account-batch-job')
     if (['delete', 'delete_missing_personal_instructions', 'delete_exhausted'].includes(activeBatchJob.action)) {
-      setSelectedEmails(new Set())
+      setSelectedAccounts(new Map())
     }
     loadData()
   }, [activeBatchJob, loadData])
@@ -1224,11 +1411,15 @@ export default function App() {
     setQuotaRefreshing(false)
   }
 
-  const launchAccountBatch = async (action: AccountBatchJobAction, emails: string[]) => {
-    if (emails.length === 0 || batchStartingAction || activeBatchJob?.state === 'running') return
+  const launchAccountBatch = async (
+    action: AccountBatchJobAction,
+    accountIds: string[],
+    legacyEmails: string[] = [],
+  ) => {
+    if ((accountIds.length === 0 && legacyEmails.length === 0) || batchStartingAction || activeBatchJob?.state === 'running') return
     setBatchStartingAction(action)
     try {
-      const job = await startAccountBatchJob(action, emails, 10)
+      const job = await startAccountBatchJob(action, accountIds, 10, legacyEmails)
       setActiveBatchJob(job)
       window.localStorage.setItem('notion-manager-active-account-batch-job', job.id)
     } catch (e: any) {
@@ -1240,7 +1431,10 @@ export default function App() {
 
   const launchAllPoolBatch = async (action: AccountBatchJobAction) => {
     try {
-      await launchAccountBatch(action, await fetchAccountSelection('', 'all'))
+      const accounts = await fetchAccountSelection('', 'all')
+      const accountIds = accounts.flatMap(account => account.account_id ? [account.account_id] : [])
+      const legacyEmails = accounts.flatMap(account => !account.account_id && account.email ? [account.email] : [])
+      await launchAccountBatch(action, accountIds, legacyEmails)
     } catch (e: any) {
       window.alert(t('batch.fetch_all_failed', { error: e?.message || t('common.request_failed') }))
     }
@@ -1262,23 +1456,34 @@ export default function App() {
   }
 
   const handleBulkSelected = async (action: Extract<AccountBatchJobAction, 'delete' | 'disable' | 'enable' | 'check_personal_instructions'>) => {
-    const emails = Array.from(selectedEmails)
-    if (emails.length === 0) return
+    const entries = Array.from(selectedAccounts.entries())
+    const accountIds = entries.flatMap(([selector]) => selector.startsWith('legacy:') ? [] : [selector])
+    const legacyEmails = entries.flatMap(([selector, email]) => selector.startsWith('legacy:') && email ? [email] : [])
+    if (accountIds.length === 0 && legacyEmails.length === 0) return
     if (action === 'delete') {
       const confirmed = window.confirm(
-        t('batch.confirm_delete_selected', { count: emails.length }),
+        t('batch.confirm_delete_selected', { count: accountIds.length || legacyEmails.length }),
       )
       if (!confirmed) return
     }
-    await launchAccountBatch(action, emails)
+    await launchAccountBatch(action, accountIds, legacyEmails)
   }
 
   const handleSelectAllResults = async () => {
     if (selectingAllResults) return
     setSelectingAllResults(true)
     try {
-      const emails = await fetchAccountSelection(debouncedQuery, statusFilter)
-      setSelectedEmails(new Set(emails))
+      const accounts = await fetchAccountSelection(debouncedQuery, statusFilter)
+      const selections: Array<[string, string]> = []
+      accounts.forEach(account => {
+        if (account.account_id) {
+          selections.push([account.account_id, account.email])
+          return
+        }
+        const email = account.email?.trim()
+        if (email) selections.push([`legacy:${email.toLowerCase()}`, email])
+      })
+      setSelectedAccounts(new Map(selections))
     } catch (e: any) {
       window.alert(t('common.select_all_failed', { error: e?.message || t('common.request_failed') }))
     } finally {
@@ -1287,7 +1492,7 @@ export default function App() {
   }
 
   const copySelectedEmails = async () => {
-    const emails = Array.from(selectedEmails)
+    const emails = Array.from(new Set(Array.from(selectedAccounts.values()).filter(Boolean)))
     if (emails.length === 0) return
     try {
       await navigator.clipboard.writeText(emails.join('\n'))
@@ -1418,7 +1623,7 @@ export default function App() {
       const result = await restoreBackup(file)
       setSettings(result.settings)
       setProxyDraft(result.settings.notion_proxy ?? '')
-      setSelectedEmails(new Set())
+      setSelectedAccounts(new Map())
       setPage(0)
       await loadData()
       setBackupNotice({ type: 'success', text: t('api.restore_success', { count: result.accounts }) })
@@ -1438,33 +1643,53 @@ export default function App() {
     return () => clearInterval(interval)
   }, [refreshStatus?.refreshing, loadData])
 
-  // Server-paginated: data.accounts is already the visible page slice
-  // (filtered + sorted server-side). filtered_total tells us how many
-  // entries match the current query across the whole pool, which is
-  // what we need to render pagination controls.
   const accounts = data?.accounts || []
-  const paged = accounts
-  const filteredTotal = data?.filtered_total ?? data?.total ?? accounts.length
+  const accountGroups = useMemo(() => groupWorkspaceAccounts(accounts), [accounts])
+  const filteredWorkspaceTotal = data?.filtered_total ?? accounts.length
+  const filteredTotal = accountGroups.length
   const totalPages = Math.max(1, Math.ceil(filteredTotal / PAGE_SIZE))
-  const pageEmails = paged.map(account => account.email)
-  const selectedOnPage = pageEmails.filter(email => selectedEmails.has(email)).length
-  const allPageSelected = pageEmails.length > 0 && selectedOnPage === pageEmails.length
+  const pagedGroups = accountGroups.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+  const pageAccountIDs = pagedGroups.flatMap(group => group.accounts.map(account => account.account_id))
+  const selectedOnPage = pageAccountIDs.filter(accountID => selectedAccounts.has(accountID)).length
+  const allPageSelected = pageAccountIDs.length > 0 && selectedOnPage === pageAccountIDs.length
   const batchBusy = !!batchStartingAction || activeBatchJob?.state === 'running'
 
-  const toggleSelectedEmail = (email: string) => {
-    setSelectedEmails(current => {
-      const next = new Set(current)
-      if (next.has(email)) next.delete(email)
-      else next.add(email)
+  const toggleSelectedAccount = (account: AccountInfo) => {
+    const accountID = account.account_id
+    if (!accountID) return
+    setSelectedAccounts(current => {
+      const next = new Map(current)
+      if (next.has(accountID)) next.delete(accountID)
+      else next.set(accountID, account.email)
+      return next
+    })
+  }
+
+  const toggleSelectedGroup = (groupAccounts: AccountInfo[]) => {
+    const groupAccountIDs = groupAccounts.map(account => account.account_id).filter(Boolean)
+    if (groupAccountIDs.length === 0) return
+    setSelectedAccounts(current => {
+      const next = new Map(current)
+      const allSelected = groupAccountIDs.every(accountID => next.has(accountID))
+      groupAccounts.forEach(account => {
+        if (!account.account_id) return
+        if (allSelected) next.delete(account.account_id)
+        else next.set(account.account_id, account.email)
+      })
       return next
     })
   }
 
   const toggleCurrentPageSelection = () => {
-    setSelectedEmails(current => {
-      const next = new Set(current)
-      if (allPageSelected) pageEmails.forEach(email => next.delete(email))
-      else pageEmails.forEach(email => next.add(email))
+    setSelectedAccounts(current => {
+      const next = new Map(current)
+      if (allPageSelected) {
+        pagedGroups.forEach(group => group.accounts.forEach(account => next.delete(account.account_id)))
+      } else {
+        pagedGroups.forEach(group => group.accounts.forEach(account => {
+          if (account.account_id) next.set(account.account_id, account.email)
+        }))
+      }
       return next
     })
   }
@@ -2017,7 +2242,7 @@ export default function App() {
           </select>
           <button
             onClick={toggleCurrentPageSelection}
-            disabled={pageEmails.length === 0 || batchBusy}
+            disabled={pageAccountIDs.length === 0 || batchBusy}
             className="px-3 py-1.5 bg-bg-secondary hover:bg-bg-card-hover text-text-primary rounded-md text-[12px] font-medium cursor-pointer border border-border disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {allPageSelected ? t('common.unselect_page') : t('common.select_page')}
@@ -2028,51 +2253,51 @@ export default function App() {
             className="px-3 py-1.5 bg-notion-blue/10 hover:bg-notion-blue/20 text-notion-blue rounded-md text-[12px] font-medium cursor-pointer border border-notion-blue/25 disabled:opacity-40 disabled:cursor-not-allowed"
             title={t('common.select_all_help')}
           >
-            {selectingAllResults ? t('common.selecting_all') : t('common.select_all', { count: filteredTotal })}
+            {selectingAllResults ? t('common.selecting_all') : t('common.select_all', { count: filteredWorkspaceTotal })}
           </button>
           <span className="text-[12px] text-text-secondary mr-auto self-center">
-            {t('common.selected', { count: selectedEmails.size })}
-            {selectedOnPage > 0 && selectedEmails.size !== selectedOnPage ? t('common.selected_page', { count: selectedOnPage }) : ''}
+            {t('common.selected', { count: selectedAccounts.size })}
+            {selectedOnPage > 0 && selectedAccounts.size !== selectedOnPage ? t('common.selected_page', { count: selectedOnPage }) : ''}
           </span>
           <div className="flex items-center gap-2 flex-wrap max-sm:grid max-sm:grid-cols-2 max-sm:w-full">
             <button
               onClick={copySelectedEmails}
-              disabled={selectedEmails.size === 0 || batchBusy}
+              disabled={selectedAccounts.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-bg-secondary hover:bg-bg-card-hover text-text-secondary hover:text-text-primary rounded-md text-[12px] cursor-pointer border border-border disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {t('common.copy_emails')}
             </button>
             <button
               onClick={() => handleBulkSelected('check_personal_instructions')}
-              disabled={selectedEmails.size === 0 || batchBusy}
+              disabled={selectedAccounts.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-bg-secondary hover:bg-bg-card-hover text-text-secondary hover:text-text-primary rounded-md text-[12px] cursor-pointer border border-border disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {batchStartingAction === 'check_personal_instructions' ? t('actions.starting') : t('common.check_selected')}
             </button>
             <button
               onClick={() => handleBulkSelected('disable')}
-              disabled={selectedEmails.size === 0 || batchBusy}
+              disabled={selectedAccounts.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-warn/10 hover:bg-warn/20 text-warn rounded-md text-[12px] cursor-pointer border border-warn/25 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {batchStartingAction === 'disable' ? t('actions.starting') : t('common.disable_selected')}
             </button>
             <button
               onClick={() => handleBulkSelected('enable')}
-              disabled={selectedEmails.size === 0 || batchBusy}
+              disabled={selectedAccounts.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-ok/10 hover:bg-ok/20 text-ok rounded-md text-[12px] cursor-pointer border border-ok/25 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {batchStartingAction === 'enable' ? t('actions.starting') : t('common.enable_selected')}
             </button>
             <button
               onClick={() => handleBulkSelected('delete')}
-              disabled={selectedEmails.size === 0 || batchBusy}
+              disabled={selectedAccounts.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-err/10 hover:bg-err/20 text-err rounded-md text-[12px] cursor-pointer border border-err/25 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {batchStartingAction === 'delete' ? t('actions.starting') : t('common.delete_selected')}
             </button>
             <button
-              onClick={() => setSelectedEmails(new Set())}
-              disabled={selectedEmails.size === 0 || batchBusy}
+              onClick={() => setSelectedAccounts(new Map())}
+              disabled={selectedAccounts.size === 0 || batchBusy}
               className="px-3 py-1.5 bg-transparent hover:bg-white/[.05] text-text-muted hover:text-text-primary rounded-md text-[12px] cursor-pointer border border-transparent disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {t('common.clear_selection')}
@@ -2092,14 +2317,15 @@ export default function App() {
             {t('common.no_matching_accounts')}
           </div>
         ) : (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(340px,1fr))] gap-2.5 mb-4 max-sm:grid-cols-1">
-            {paged.map(acc => (
-              <AccountCard
-                key={acc.email}
-                account={acc}
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(380px,1fr))] gap-2.5 mb-4 max-sm:grid-cols-1">
+            {pagedGroups.map(group => (
+              <AccountGroupCard
+                key={group.id}
+                group={group}
+                selectedAccounts={selectedAccounts}
+                onToggleWorkspace={toggleSelectedAccount}
+                onToggleGroup={toggleSelectedGroup}
                 onChanged={loadData}
-                selected={selectedEmails.has(acc.email)}
-                onToggleSelected={() => toggleSelectedEmail(acc.email)}
               />
             ))}
           </div>
