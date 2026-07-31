@@ -746,8 +746,16 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		dashboardSettingsMu.RLock()
 		defer dashboardSettingsMu.RUnlock()
 		var activeSessionLock *Session
+		var activeAccountLease *AccountLease
+		releaseActiveAccountLease := func() {
+			if activeAccountLease != nil {
+				activeAccountLease.Release()
+				activeAccountLease = nil
+			}
+		}
 		defer func() {
 			recovered := recover()
+			releaseActiveAccountLease()
 			if activeSessionLock != nil {
 				// A panic or forgotten return path must not strand the
 				// conversation mutex or leave a partially-mutated thread
@@ -1013,53 +1021,67 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		accountCalls := 0
 		var lastNonQuotaErr error
 		emptyResponseCount := 0
+		allNotionLoginsBusy := false
 		liveCheckInterval := AppConfig.QuotaLiveCheckInterval()
 
 		for selection := 0; selection < selectionLimit && accountCalls < maxAccountCalls; selection++ {
 			var acc *Account
+			var lease *AccountLease
+			var leaseErr error
 
 			if !isResearcher && selection == 0 && session != nil {
+				var sessionAccount *Account
 				if session.AccountID != "" {
-					acc = pool.FindUsableByAccountID(session.AccountID)
+					sessionAccount = pool.FindUsableByAccountID(session.AccountID)
 				} else {
 					legacyAccount, lookupErr := pool.FindByEmail(session.AccountEmail)
 					if lookupErr == nil && !pool.isUnusable(legacyAccount) {
-						acc = legacyAccount
+						sessionAccount = legacyAccount
 					}
 				}
-				if acc == nil {
+				if sessionAccount == nil {
 					log.Printf("[context] stored Notion thread account is unavailable; starting a fresh thread replay")
 					invalidateSession("new_thread_account_switch")
+				} else {
+					lease, leaseErr = pool.LeaseAccount(sessionAccount)
+					if errors.Is(leaseErr, ErrAllNotionLoginsBusy) {
+						log.Printf("[concurrency] stored Notion thread login is busy; replaying on another login")
+						invalidateSession("new_thread_account_switch")
+						lease = nil
+						leaseErr = nil
+					} else if leaseErr == nil && lease != nil {
+						acc = lease.Account()
+					}
 				}
 			}
 			if acc == nil {
-				if isResearcher {
-					if selection == 0 {
-						acc = pool.NextForResearch()
-					} else {
-						// Research-mode failover keeps the same product-tier
-						// preference among accounts not yet tried.
-						acc = pool.NextBestExcluding(tried)
-					}
-				} else if selection == 0 {
-					// New-conversation routing prefers included-AI plans without
-					// treating private credit counters as workspace-plan evidence.
-					acc = pool.NextBest()
-				} else {
-					// Failover: keep the same service-tier preference among
-					// accounts we haven't tried yet.
-					acc = pool.NextBestExcluding(tried)
+				// Ordinary, research, and failover routing use the same
+				// evidence-backed plan preference while atomically reserving a
+				// slot on the selected Notion login.
+				lease, leaseErr = pool.NextBestLease(tried)
+				if errors.Is(leaseErr, ErrAllNotionLoginsBusy) {
+					allNotionLoginsBusy = true
+					break
+				}
+				if leaseErr != nil {
+					lastNonQuotaErr = leaseErr
+					break
+				}
+				if lease != nil {
+					acc = lease.Account()
 				}
 			}
 			if acc == nil {
 				break
 			}
+			activeAccountLease = lease
 
 			// Live quota pre-check: ensure the cached state is fresh enough
 			// that we don't waste an inference call on an exhausted account.
 			// Researcher mode has its own picker that already inspects quota.
 			if !isResearcher && !pool.RefreshAccountQuota(acc, liveCheckInterval) {
 				log.Printf("[quota-live] %s skipped (exhausted on live check)", acc.UserEmail)
+				releaseActiveAccountLease()
 				tried[acc] = true
 				pool.MarkQuotaExhausted(acc)
 				if session != nil &&
@@ -1194,6 +1216,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 						if requestDiagnostic != nil {
 							requestDiagnostic.FinishAttempt("upload_error", err)
 						}
+						releaseActiveAccountLease()
 						writeAnthropicError(w, requestID, http.StatusBadGateway, "file upload failed: "+err.Error(), "api_error")
 						return
 					}
@@ -1242,6 +1265,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					requestDiagnostic.SetFinishReason("stop")
 				}
 			}
+			// The upstream request and any session mutation are complete. Free
+			// the login slot before quota diagnostics or failover selection.
+			releaseActiveAccountLease()
 
 			// Successful calls refresh quota diagnostics for the next request.
 			// Error events are classified below; refreshing blindly here can
@@ -1365,6 +1391,12 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 		if emptyResponseCount > 0 {
 			writeAnthropicError(w, requestID, http.StatusBadGateway,
 				fmt.Sprintf("notion returned no content on %d account(s); the prompt may exceed the model context or upstream ended without a terminal event", emptyResponseCount), "api_error")
+			return
+		}
+		if allNotionLoginsBusy {
+			w.Header().Set("Retry-After", "1")
+			writeAnthropicError(w, requestID, http.StatusTooManyRequests,
+				"all available Notion logins are busy; retry shortly", "rate_limit_error")
 			return
 		}
 		writeAnthropicError(w, requestID, http.StatusServiceUnavailable,

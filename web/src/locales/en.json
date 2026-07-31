@@ -491,6 +491,7 @@
     "load_failed": "Load failed: {{error}}",
     "no_matching_accounts": "No matching accounts found",
     "accounts_pool": "Accounts Pool",
+    "accounts_page_summary": "{{logins}} login accounts · {{workspaces}} workspaces",
     "prev_page": "Previous",
     "next_page": "Next",
     "status_refreshing": "Checking account status... {{current}}/{{total}}",

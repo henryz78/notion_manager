@@ -2381,6 +2381,15 @@ export default function App() {
           />
         )}
 
+        {activePage === 'accounts' && data && (
+          <div className="hidden max-sm:block mb-4">
+            <h1 className="text-[19px] font-semibold text-text-primary">{t('common.accounts_pool')}</h1>
+            <p className="text-[11px] text-text-muted mt-1">
+              {t('common.accounts_page_summary', { logins: accountGroups.length, workspaces: data.total })}
+            </p>
+          </div>
+        )}
+
         {/* Summary */}
         {activePage === 'accounts' && summary && (
           <div className="grid grid-cols-5 divide-x divide-white/[.05] mb-6 max-lg:grid-cols-3 max-md:grid-cols-2 max-md:divide-x-0 max-sm:gap-2 max-sm:mb-3 max-sm:[&>*]:rounded-lg max-sm:[&>*]:border max-sm:[&>*]:border-border max-sm:[&>*]:bg-bg-card max-sm:[&>*:last-child]:col-span-2">

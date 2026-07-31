@@ -135,9 +135,10 @@ type OpenAIResponsesRequest struct {
 }
 
 type anthropicInvocationError struct {
-	Status  int
-	Message string
-	Type    string
+	Status     int
+	Message    string
+	Type       string
+	RetryAfter string
 }
 
 type anthropicSSEFrame struct {
@@ -936,6 +937,9 @@ func HandleOpenAIChatCompletions(pool *AccountPool) http.HandlerFunc {
 
 		anthResp, invErr := invokeAnthropicNonStream(anthropicHandler, r, anthReq)
 		if invErr != nil {
+			if invErr.RetryAfter != "" {
+				w.Header().Set("Retry-After", invErr.RetryAfter)
+			}
 			writeOpenAIError(w, invErr.Status, invErr.Message, invErr.Type, "")
 			return
 		}
@@ -1002,6 +1006,9 @@ func HandleOpenAIResponses(pool *AccountPool) http.HandlerFunc {
 
 		anthResp, invErr := invokeAnthropicNonStream(anthropicHandler, r, anthReq)
 		if invErr != nil {
+			if invErr.RetryAfter != "" {
+				w.Header().Set("Retry-After", invErr.RetryAfter)
+			}
 			writeOpenAIError(w, invErr.Status, invErr.Message, invErr.Type, "")
 			return
 		}
@@ -1062,6 +1069,9 @@ func streamAnthropicAsOpenAIChat(w http.ResponseWriter, r *http.Request, anthrop
 	log.Printf("[openai-chat] stream complete: %d frames, bridge status=%d", frameCount, bridge.Status())
 	if bridge.Status() != http.StatusOK {
 		invErr := parseAnthropicInvocationError(bridge.Status(), bridge.ErrorBody())
+		if retryAfter := bridge.Header().Get("Retry-After"); retryAfter != "" {
+			w.Header().Set("Retry-After", retryAfter)
+		}
 		writeOpenAIError(w, invErr.Status, invErr.Message, invErr.Type, "")
 	}
 }
@@ -1122,6 +1132,9 @@ func streamAnthropicAsOpenAIResponses(w http.ResponseWriter, r *http.Request, an
 		frameCount, bridge.Status(), transcoder.messageText.Len())
 	if bridge.Status() != http.StatusOK {
 		invErr := parseAnthropicInvocationError(bridge.Status(), bridge.ErrorBody())
+		if retryAfter := bridge.Header().Get("Retry-After"); retryAfter != "" {
+			w.Header().Set("Retry-After", retryAfter)
+		}
 		writeOpenAIError(w, invErr.Status, invErr.Message, invErr.Type, "")
 	}
 }
@@ -1135,6 +1148,7 @@ func invokeAnthropicNonStream(anthropicHandler http.HandlerFunc, sourceReq *http
 	anthropicHandler(rr, innerReq)
 	if rr.Code != http.StatusOK {
 		invErr := parseAnthropicInvocationError(rr.Code, rr.Body.Bytes())
+		invErr.RetryAfter = rr.Header().Get("Retry-After")
 		return nil, &invErr
 	}
 	var anthResp AnthropicResponse

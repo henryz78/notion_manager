@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	mrand "math/rand"
@@ -36,12 +37,21 @@ func lockAccountFilePath(path string) (func(), error) {
 const (
 	defaultAccountFailureCooldown = 2 * time.Minute
 	accountRestoreConflictMessage = "account restore is in progress; retry after it finishes"
+	// Keep short bursts useful without allowing one Notion login to receive the
+	// high fan-out that has proven unsafe in real traffic. Workspaces owned by
+	// the same login share these slots.
+	maxConcurrentInferenceRequestsPerLogin = 2
 )
+
+var ErrAllNotionLoginsBusy = errors.New("all available Notion logins are busy")
 
 type AccountPool struct {
 	mu       sync.RWMutex
 	accounts []*Account
 	index    atomic.Uint64
+	// inFlightByLogin is runtime-only. It must never be persisted on an
+	// Account because one login may own several independently stored workspaces.
+	inFlightByLogin map[string]int
 	// accountsDir is set when the pool loads its workspace files. Durable
 	// health transitions (notably a revoked login cookie) use it to persist
 	// only the affected account files immediately.
@@ -77,7 +87,58 @@ func NewAccountPool() *AccountPool {
 		liveQuotaFlights: make(map[*Account]*quotaRefreshFlight),
 		quotaGeneration:  make(map[*Account]uint64),
 		quotaApplied:     make(map[*Account]uint64),
+		inFlightByLogin:  make(map[string]int),
 	}
+}
+
+// AccountLease reserves one inference slot for a Notion login. Release is
+// idempotent so request handlers can safely use both explicit release paths
+// and a panic guard.
+type AccountLease struct {
+	pool     *AccountPool
+	acc      *Account
+	loginKey string
+	once     sync.Once
+}
+
+func (l *AccountLease) Account() *Account {
+	if l == nil {
+		return nil
+	}
+	return l.acc
+}
+
+func (l *AccountLease) Release() {
+	if l == nil || l.pool == nil || l.loginKey == "" {
+		return
+	}
+	l.once.Do(func() {
+		l.pool.mu.Lock()
+		defer l.pool.mu.Unlock()
+		if current := l.pool.inFlightByLogin[l.loginKey]; current > 1 {
+			l.pool.inFlightByLogin[l.loginKey] = current - 1
+		} else {
+			delete(l.pool.inFlightByLogin, l.loginKey)
+		}
+	})
+}
+
+func accountLoginConcurrencyKey(acc *Account) string {
+	if acc == nil {
+		return ""
+	}
+	if loginID := accountstore.ComputeLoginID(acc.UserID); loginID != "" {
+		return "login:" + loginID
+	}
+	// Legacy account files may not have a user_id. Email still groups their
+	// sibling workspaces more safely than treating every workspace separately.
+	if email := strings.ToLower(strings.TrimSpace(acc.UserEmail)); email != "" {
+		return "email:" + email
+	}
+	if accountID := strings.TrimSpace(acc.AccountID); accountID != "" {
+		return "account:" + accountID
+	}
+	return fmt.Sprintf("account-pointer:%p", acc)
 }
 
 type quotaRefreshFlight struct {
@@ -782,6 +843,105 @@ func (p *AccountPool) NextBestExcluding(exclude map[*Account]bool) *Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.pickBestAccountLocked(exclude)
+}
+
+// LeaseAccount reserves an inference slot for an exact workspace, primarily
+// for continuing an existing Notion thread. The workspace is revalidated while
+// holding the pool lock so a concurrent disable/delete cannot be bypassed.
+func (p *AccountPool) LeaseAccount(acc *Account) (*AccountLease, error) {
+	if p == nil || acc == nil {
+		return nil, nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	found := false
+	for _, candidate := range p.accounts {
+		if candidate == acc {
+			found = true
+			break
+		}
+	}
+	if !found || p.isUnusable(acc) {
+		return nil, nil
+	}
+	return p.leaseAccountLocked(acc)
+}
+
+// NextBestLease atomically selects the best usable workspace whose Notion
+// login still has capacity, then reserves that login slot. A busy paid login
+// does not block an idle lower-tier login from serving the request.
+func (p *AccountPool) NextBestLease(exclude map[*Account]bool) (*AccountLease, error) {
+	if p == nil {
+		return nil, nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	acc, allBusy := p.pickBestAccountForLeaseLocked(exclude)
+	if acc == nil {
+		if allBusy {
+			return nil, ErrAllNotionLoginsBusy
+		}
+		return nil, nil
+	}
+	return p.leaseAccountLocked(acc)
+}
+
+func (p *AccountPool) leaseAccountLocked(acc *Account) (*AccountLease, error) {
+	loginKey := accountLoginConcurrencyKey(acc)
+	if p.inFlightByLogin == nil {
+		p.inFlightByLogin = make(map[string]int)
+	}
+	if p.inFlightByLogin[loginKey] >= maxConcurrentInferenceRequestsPerLogin {
+		return nil, ErrAllNotionLoginsBusy
+	}
+	p.inFlightByLogin[loginKey]++
+	return &AccountLease{pool: p, acc: acc, loginKey: loginKey}, nil
+}
+
+func (p *AccountPool) pickBestAccountForLeaseLocked(exclude map[*Account]bool) (*Account, bool) {
+	n := len(p.accounts)
+	if n == 0 {
+		return nil, false
+	}
+	start := p.index.Add(1) - 1
+	var best *Account
+	var fallback *Account
+	bestScore := -1
+	sawBusy := false
+	for i := 0; i < n; i++ {
+		acc := p.accounts[(start+uint64(i))%uint64(n)]
+		if exclude != nil && exclude[acc] {
+			continue
+		}
+		if p.isUnusable(acc) {
+			continue
+		}
+		loginKey := accountLoginConcurrencyKey(acc)
+		if p.inFlightByLogin[loginKey] >= maxConcurrentInferenceRequestsPerLogin {
+			sawBusy = true
+			continue
+		}
+		score := accountQuotaPriority(acc)
+		if score < 0 {
+			if fallback == nil {
+				fallback = acc
+			}
+			continue
+		}
+		if best == nil || score > bestScore {
+			best = acc
+			bestScore = score
+		}
+	}
+	if best != nil {
+		return best, false
+	}
+	if fallback != nil {
+		return fallback, false
+	}
+	return nil, sawBusy
 }
 
 // MarkQuotaExhausted marks an account as quota-exhausted with a timestamp.
