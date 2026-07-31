@@ -52,6 +52,24 @@ const IconSettings = () => (
     <circle cx="12" cy="12" r="3" />
   </svg>
 )
+const IconDashboard = () => (
+  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="3" width="7" height="7" rx="1" />
+    <rect x="14" y="3" width="7" height="7" rx="1" />
+    <rect x="3" y="14" width="7" height="7" rx="1" />
+    <rect x="14" y="14" width="7" height="7" rx="1" />
+  </svg>
+)
+const IconArrowRight = () => (
+  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M5 12h14" /><path d="m13 6 6 6-6 6" />
+  </svg>
+)
+const IconShield = () => (
+  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10" /><path d="m9 12 2 2 4-4" />
+  </svg>
+)
 
 const IconPlus = () => (
   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -351,6 +369,88 @@ function AddAccountModal({
   )
 }
 
+type CleanupTarget = 'auth_invalid' | 'exhausted' | 'no_workspace' | 'personal_missing'
+
+function CleanupModal({
+  counts,
+  busy,
+  onClose,
+  onRun,
+}: {
+  counts: Record<CleanupTarget, number>
+  busy: boolean
+  onClose: () => void
+  onRun: (target: CleanupTarget) => Promise<void>
+}) {
+  const { t } = useTranslation()
+  const [target, setTarget] = useState<CleanupTarget>(() =>
+    (['auth_invalid', 'exhausted', 'no_workspace', 'personal_missing'] as CleanupTarget[])
+      .find(option => counts[option] > 0) ?? 'auth_invalid',
+  )
+  const options: Array<{ target: CleanupTarget; title: string; help: string; tone: string }> = [
+    { target: 'auth_invalid', title: t('cleanup.auth_invalid'), help: t('cleanup.auth_invalid_help'), tone: 'bg-err' },
+    { target: 'exhausted', title: t('cleanup.exhausted'), help: t('cleanup.exhausted_help'), tone: 'bg-warn' },
+    { target: 'no_workspace', title: t('cleanup.no_workspace'), help: t('cleanup.no_workspace_help'), tone: 'bg-err' },
+    { target: 'personal_missing', title: t('cleanup.personal_missing'), help: t('cleanup.personal_missing_help'), tone: 'bg-text-muted' },
+  ]
+  const selected = options.find(option => option.target === target)!
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busy) onClose()
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [busy, onClose])
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4" onClick={() => { if (!busy) onClose() }}>
+      <div className="w-full max-w-lg rounded-xl border border-white/10 bg-[#1a1a1a] p-5 shadow-2xl max-sm:p-4" onClick={event => event.stopPropagation()}>
+        <div className="flex items-start justify-between gap-4 mb-4">
+          <div>
+            <h2 className="text-[16px] font-semibold text-text-primary">{t('cleanup.title')}</h2>
+            <p className="text-[11px] text-text-muted mt-1">{t('cleanup.subtitle')}</p>
+          </div>
+          <button type="button" disabled={busy} onClick={onClose} className="text-text-muted hover:text-white bg-transparent border-none cursor-pointer text-lg px-1 disabled:opacity-30">×</button>
+        </div>
+        <div className="divide-y divide-white/[.05] rounded-lg border border-white/[.07] overflow-hidden">
+          {options.map(option => (
+            <button
+              key={option.target}
+              type="button"
+              onClick={() => setTarget(option.target)}
+              className={`w-full flex items-center gap-3 px-3.5 py-3 text-left border-none cursor-pointer transition-colors ${target === option.target ? 'bg-white/[.07]' : 'bg-bg-card hover:bg-bg-card-hover'}`}
+            >
+              <span className={`w-2 h-2 rounded-full shrink-0 ${option.tone}`} />
+              <span className="min-w-0 flex-1">
+                <span className="block text-[12px] font-medium text-text-primary">{option.title}</span>
+                <span className="block text-[10px] text-text-muted mt-0.5">{option.help}</span>
+              </span>
+              <span className={`text-[12px] font-semibold tabular-nums ${counts[option.target] > 0 ? 'text-text-primary' : 'text-text-muted'}`}>{counts[option.target]}</span>
+              <span className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${target === option.target ? 'border-notion-blue' : 'border-white/20'}`}>
+                {target === option.target && <span className="w-1.5 h-1.5 rounded-full bg-notion-blue" />}
+              </span>
+            </button>
+          ))}
+        </div>
+        <div className="flex gap-2.5 mt-4">
+          <button type="button" onClick={onClose} disabled={busy} className="flex-1 py-2.5 bg-transparent hover:bg-white/5 text-text-secondary rounded-lg text-[12px] font-medium cursor-pointer border border-white/10 disabled:opacity-40">
+            {t('common.cancel')}
+          </button>
+          <button
+            type="button"
+            disabled={busy || counts[target] === 0}
+            onClick={() => void onRun(target)}
+            className="flex-1 py-2.5 bg-err/15 hover:bg-err/25 text-err rounded-lg text-[12px] font-semibold cursor-pointer border border-err/25 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {busy ? t('cleanup.starting') : t('cleanup.run', { type: selected.title, count: counts[target] })}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // --- Login Page ---
 
 function LoginPage({ onSuccess }: { onSuccess: () => void }) {
@@ -423,7 +523,13 @@ function LoginPage({ onSuccess }: { onSuccess: () => void }) {
 
 // --- Header ---
 
-type DashboardPage = 'accounts' | 'settings'
+type DashboardPage = 'dashboard' | 'accounts' | 'settings'
+
+function dashboardPageFromHash(): DashboardPage {
+  if (window.location.hash === '#accounts') return 'accounts'
+  if (window.location.hash === '#settings') return 'settings'
+  return 'dashboard'
+}
 
 function displayVersion(version: string): string {
   const value = (version || 'dev').trim()
@@ -484,6 +590,12 @@ function Header({ query, onQuery, onLogout, authRequired, activePage, onPageChan
         </span>
       </div>
       <nav className="flex items-center rounded-lg bg-black/20 p-1 border border-white/[.05] max-md:order-2 max-md:w-full">
+        <button
+          onClick={() => onPageChange('dashboard')}
+          className={`inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-medium cursor-pointer border-none transition-colors max-md:flex-1 ${activePage === 'dashboard' ? 'bg-white/10 text-white shadow-sm' : 'bg-transparent text-text-muted hover:text-text-primary'}`}
+        >
+          <IconDashboard /> {t('header.dashboard')}
+        </button>
         <button
           onClick={() => onPageChange('accounts')}
           className={`px-3 py-1.5 rounded-md text-[12px] font-medium cursor-pointer border-none transition-colors max-md:flex-1 ${activePage === 'accounts' ? 'bg-white/10 text-white shadow-sm' : 'bg-transparent text-text-muted hover:text-text-primary'}`}
@@ -674,6 +786,25 @@ interface AccountGroup {
   accounts: AccountInfo[]
 }
 
+function workspacePlanPriority(plan: string): number {
+  switch ((plan || '').trim().toLowerCase()) {
+    case 'enterprise': return 50
+    case 'business': return 40
+    case 'team': return 30
+    case 'plus':
+    case 'personal_pro': return 20
+    case 'personal':
+    case 'free': return 10
+    default: return 0
+  }
+}
+
+function isWorkspaceUsable(account: AccountInfo): boolean {
+  const quotaBlocked = !account.quota_unlimited && (account.permanent || account.exhausted)
+  return !account.disabled && !account.auth_invalid && !account.no_workspace &&
+    !account.ai_disabled && !account.temporarily_unavailable && !quotaBlocked
+}
+
 function accountLoginKey(account: AccountInfo): string {
   const loginID = account.login_id?.trim()
   if (loginID) return `login:${loginID}`
@@ -695,41 +826,10 @@ function groupWorkspaceAccounts(accounts: AccountInfo[]): AccountGroup[] {
     if (existing) {
       existing.accounts.push(account)
     } else {
-      grouped.set(key, { id: account.account_id, accounts: [account] })
+      grouped.set(key, { id: key, accounts: [account] })
     }
   }
   return Array.from(grouped.values())
-}
-
-function GroupCheckbox({
-  checked,
-  indeterminate,
-  label,
-  onChange,
-}: {
-  checked: boolean
-  indeterminate: boolean
-  label: string
-  onChange: () => void
-}) {
-  const ref = useRef<HTMLInputElement>(null)
-  useEffect(() => {
-    if (ref.current) ref.current.indeterminate = indeterminate
-  }, [indeterminate])
-  return (
-    <input
-      ref={ref}
-      type="checkbox"
-      checked={checked}
-      onClick={event => event.stopPropagation()}
-      onChange={event => {
-        event.stopPropagation()
-        onChange()
-      }}
-      className="w-4 h-4 shrink-0 accent-notion-blue cursor-pointer"
-      aria-label={label}
-    />
-  )
 }
 
 function AccountCard({
@@ -738,12 +838,14 @@ function AccountCard({
   selected,
   onToggleSelected,
   embedded = false,
+  headerAction,
 }: {
   account: AccountInfo
   onChanged: () => void
   selected: boolean
   onToggleSelected: () => void
   embedded?: boolean
+  headerAction?: React.ReactNode
 }) {
   const { t, i18n } = useTranslation()
   const [showModels, setShowModels] = useState(false)
@@ -841,6 +943,7 @@ function AccountCard({
           </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          {headerAction}
           <div className={`w-2 h-2 rounded-full ${dotCls}`} />
           <AccountMenu account={account} onChanged={onChanged} />
         </div>
@@ -950,109 +1053,117 @@ function AccountGroupCard({
   group,
   selectedAccounts,
   onToggleWorkspace,
-  onToggleGroup,
   onChanged,
 }: {
   group: AccountGroup
   selectedAccounts: Map<string, string>
   onToggleWorkspace: (account: AccountInfo) => void
-  onToggleGroup: (accounts: AccountInfo[]) => void
   onChanged: () => void
 }) {
   const { t } = useTranslation()
-  const [expanded, setExpanded] = useState(group.accounts.length === 1)
-  const primary = group.accounts[0]
-  const accountIDs = group.accounts.map(account => account.account_id).filter(Boolean)
-  const selectedCount = accountIDs.filter(accountID => selectedAccounts.has(accountID)).length
-  const allSelected = accountIDs.length > 0 && selectedCount === accountIDs.length
-  const partiallySelected = selectedCount > 0 && !allSelected
-  const plans = Array.from(new Set(group.accounts.map(account => account.plan).filter(Boolean)))
-  const usableCount = group.accounts.filter(account => {
-    const quotaBlocked = !account.quota_unlimited && (account.permanent || account.exhausted)
-    return !account.disabled && !account.auth_invalid && !account.no_workspace &&
-      !account.ai_disabled && !account.temporarily_unavailable && !quotaBlocked
-  }).length
-  const displayName = primary.name || primary.email || t('account.unnamed_login')
-  const displayEmail = primary.email || t('account.email_unavailable')
+  const orderedAccounts = useMemo(
+    () => [...group.accounts].sort((left, right) => {
+      const usability = Number(isWorkspaceUsable(right)) - Number(isWorkspaceUsable(left))
+      if (usability !== 0) return usability
+      const tier = workspacePlanPriority(right.plan) - workspacePlanPriority(left.plan)
+      if (tier !== 0) return tier
+      return (left.space || '').localeCompare(right.space || '')
+    }),
+    [group.accounts],
+  )
+  const [activeAccountID, setActiveAccountID] = useState(() => orderedAccounts[0]?.account_id || '')
+  const [switcherOpen, setSwitcherOpen] = useState(false)
+  const switcherRef = useRef<HTMLDivElement>(null)
+  const activeAccount = orderedAccounts.find(account => account.account_id === activeAccountID) || orderedAccounts[0]
 
   useEffect(() => {
-    if (group.accounts.length === 1) setExpanded(true)
-  }, [group.accounts.length])
+    if (!activeAccount || activeAccount.account_id === activeAccountID) return
+    setActiveAccountID(activeAccount.account_id)
+  }, [activeAccount, activeAccountID])
 
-  const toggleExpanded = () => setExpanded(value => !value)
+  useEffect(() => {
+    if (!switcherOpen) return
+    const closeOnOutside = (event: PointerEvent) => {
+      if (!switcherRef.current?.contains(event.target as Node)) setSwitcherOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSwitcherOpen(false)
+    }
+    window.addEventListener('pointerdown', closeOnOutside)
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      window.removeEventListener('pointerdown', closeOnOutside)
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [switcherOpen])
 
-  return (
-    <section className={`rounded-lg border bg-bg-card transition-colors ${selectedCount > 0 ? 'border-notion-blue/50' : 'border-white/[0.04]'}`}>
-      <div
-        className="flex items-center gap-3 p-4 cursor-pointer hover:bg-bg-card-hover rounded-lg max-sm:p-3"
-        onClick={toggleExpanded}
-        onKeyDown={event => {
-          if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault()
-            toggleExpanded()
-          }
+  if (!activeAccount) return null
+
+  const workspaceSwitcher = orderedAccounts.length > 1 ? (
+    <div ref={switcherRef} className="relative">
+      <button
+        type="button"
+        onClick={event => {
+          event.stopPropagation()
+          setSwitcherOpen(open => !open)
         }}
-        role="button"
-        tabIndex={0}
-        aria-expanded={expanded}
+        className={`inline-flex items-center gap-1 px-2 py-1 rounded border text-[10px] cursor-pointer transition-colors ${switcherOpen ? 'bg-white/10 border-white/15 text-text-primary' : 'bg-white/[.04] border-white/[.07] text-text-secondary hover:text-text-primary hover:bg-white/[.07]'}`}
+        aria-haspopup="listbox"
+        aria-expanded={switcherOpen}
+        title={t('account.switch_workspace')}
       >
-        <GroupCheckbox
-          checked={allSelected}
-          indeterminate={partiallySelected}
-          label={t('account.select_login', { email: displayEmail })}
-          onChange={() => onToggleGroup(group.accounts)}
-        />
+        {t('account.workspaces_count', { count: orderedAccounts.length })} <span>{switcherOpen ? '▴' : '▾'}</span>
+      </button>
+      {switcherOpen && (
         <div
-          className="w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold text-white shrink-0"
-          style={{ background: avatarColor(displayName) }}
+          className="absolute right-0 top-[calc(100%+6px)] z-40 w-72 max-w-[75vw] max-h-72 overflow-auto rounded-lg border border-white/10 bg-[#202020] shadow-2xl shadow-black/50 p-1.5"
+          role="listbox"
+          onClick={event => event.stopPropagation()}
         >
-          {avatarLetter(displayName)}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="text-[13px] font-semibold truncate">{displayName}</span>
-            <span className="text-[10px] rounded-full bg-white/[0.06] px-2 py-0.5 text-text-secondary shrink-0">
-              {t('account.workspaces_count', { count: group.accounts.length })}
-            </span>
-          </div>
-          <div className="text-[11px] text-text-secondary truncate">{displayEmail}</div>
-          <div className="mt-1 text-[10px] text-text-muted truncate">
-            {t('account.workspace_health', { available: usableCount, total: group.accounts.length })}
-            {plans.length > 0 ? ` · ${plans.join(' / ')}` : ''}
-          </div>
-        </div>
-        <div className="text-right shrink-0">
-          {selectedCount > 0 && (
-            <div className="text-[10px] text-notion-blue mb-0.5">
-              {t('account.workspaces_selected', { count: selectedCount })}
-            </div>
-          )}
-          <div className="text-[11px] text-text-secondary">
-            {expanded ? t('account.collapse_workspaces') : t('account.expand_workspaces')} {expanded ? '▴' : '▾'}
-          </div>
-        </div>
-      </div>
-
-      {expanded && (
-        <div className="border-t border-border p-2.5 bg-bg-secondary/30 rounded-b-lg">
-          <div className="mb-2 px-1 text-[10px] text-text-muted">
-            {t('account.auto_routing_note')}
-          </div>
-          <div className="grid grid-cols-1 gap-2">
-            {group.accounts.map(account => (
-              <AccountCard
+          {orderedAccounts.map(account => {
+            const usable = isWorkspaceUsable(account)
+            const current = account.account_id === activeAccount.account_id
+            return (
+              <button
                 key={account.account_id}
-                account={account}
-                onChanged={onChanged}
-                selected={selectedAccounts.has(account.account_id)}
-                onToggleSelected={() => onToggleWorkspace(account)}
-                embedded
-              />
-            ))}
-          </div>
+                type="button"
+                role="option"
+                aria-selected={current}
+                onClick={() => {
+                  setActiveAccountID(account.account_id)
+                  setSwitcherOpen(false)
+                }}
+                className={`w-full flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left border-none cursor-pointer transition-colors ${current ? 'bg-notion-blue/15' : 'bg-transparent hover:bg-white/[.05]'}`}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${usable ? 'bg-ok' : 'bg-err'}`} />
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[11px] font-medium text-text-primary truncate">{account.space || t('account.unnamed_workspace')}</span>
+                  <span className="block text-[10px] text-text-muted truncate">
+                    {account.plan || 'unknown'} · {account.quota_unlimited
+                      ? t('account.unlimited_now')
+                      : t('account.basic_estimated', { count: fmt(account.remaining || 0) })}
+                  </span>
+                </span>
+                {current && <span className="text-[10px] text-notion-blue">✓</span>}
+              </button>
+            )
+          })}
         </div>
       )}
-    </section>
+    </div>
+  ) : undefined
+
+  return (
+    <div className="relative w-full">
+      <AccountCard
+        key={activeAccount.account_id}
+        account={activeAccount}
+        onChanged={onChanged}
+        selected={selectedAccounts.has(activeAccount.account_id)}
+        onToggleSelected={() => onToggleWorkspace(activeAccount)}
+        headerAction={workspaceSwitcher}
+      />
+    </div>
   )
 }
 
@@ -1063,6 +1174,7 @@ const accountBatchActionKeys: Record<AccountBatchJobAction, string> = {
   delete: 'batch.delete',
   delete_missing_personal_instructions: 'batch.delete_missing',
   delete_exhausted: 'batch.delete_exhausted',
+  delete_no_workspace: 'batch.delete_no_workspace',
 }
 
 const accountStatusFilterOptions: Array<{ value: AccountStatusFilter; labelKey: string }> = [
@@ -1150,6 +1262,371 @@ function AccountBatchProgress({
   )
 }
 
+interface PoolSummaryView {
+  exhausted: number
+  exhaustedOnly: number
+  noWorkspace: number
+  aiDisabled: number
+  authInvalid: number
+  disabled: number
+  otherUnavailable: number
+  availableRate: number
+  totalResearchUsage: number
+  totalRemaining: number
+  totalSpaceRemaining: number
+  totalUserRemaining: number
+  totalPremiumBalance: number
+  totalPremiumLimit: number
+  premiumAccounts: number
+  unlimitedAccounts: number
+  sameBasicQuota: boolean
+}
+
+function DashboardHome({
+  data,
+  summary,
+  loginCount,
+  tokenStats,
+  settings,
+  versionStatus,
+  appVersion,
+  refreshStatus,
+  refreshing,
+  quotaRefreshing,
+  refreshTime,
+  onOpenBest,
+  onRefreshQuota,
+  onRefreshData,
+  onAddAccount,
+  onManageAccounts,
+  onShowAccounts,
+  onOpenHistory,
+  onOpenSettings,
+}: {
+  data: DashboardData
+  summary: PoolSummaryView
+  loginCount: number
+  tokenStats: TokenStats | null
+  settings: SearchSettings | null
+  versionStatus: DeploymentVersionStatus | null
+  appVersion: string
+  refreshStatus: RefreshStatus | null
+  refreshing: boolean
+  quotaRefreshing: boolean
+  refreshTime: string
+  onOpenBest: () => void
+  onRefreshQuota: () => void
+  onRefreshData: () => void
+  onAddAccount: () => void
+  onManageAccounts: () => void
+  onShowAccounts: (status: AccountStatusFilter) => void
+  onOpenHistory: () => void
+  onOpenSettings: () => void
+}) {
+  const { t, i18n } = useTranslation()
+  const allIssues: Array<{
+    status: AccountStatusFilter
+    count: number
+    label: string
+    detail: string
+    dot: string
+  }> = [
+    { status: 'exhausted', count: summary.exhaustedOnly, label: t('dashboard.issue_exhausted'), detail: t('dashboard.issue_exhausted_help'), dot: 'bg-warn' },
+    { status: 'auth_invalid', count: summary.authInvalid, label: t('dashboard.issue_auth'), detail: t('dashboard.issue_auth_help'), dot: 'bg-err' },
+    { status: 'no_workspace', count: summary.noWorkspace, label: t('dashboard.issue_workspace'), detail: t('dashboard.issue_workspace_help'), dot: 'bg-err' },
+    { status: 'ai_disabled', count: summary.aiDisabled, label: t('dashboard.issue_ai'), detail: t('dashboard.issue_ai_help'), dot: 'bg-warn' },
+    { status: 'disabled', count: summary.disabled, label: t('dashboard.issue_disabled'), detail: t('dashboard.issue_disabled_help'), dot: 'bg-text-muted' },
+    { status: 'temporarily_unavailable', count: summary.otherUnavailable, label: t('dashboard.issue_temporary'), detail: t('dashboard.issue_temporary_help'), dot: 'bg-notion-blue' },
+  ]
+  const issues = allIssues.filter(issue => issue.count > 0)
+  const attentionTotal = issues.reduce((total, issue) => total + issue.count, 0)
+  const healthSegments = [
+    { key: 'available', count: data.available, color: 'bg-ok', label: t('dashboard.health_available') },
+    { key: 'exhausted', count: summary.exhaustedOnly, color: 'bg-warn', label: t('dashboard.health_exhausted') },
+    { key: 'auth', count: summary.authInvalid + summary.noWorkspace, color: 'bg-err', label: t('dashboard.health_blocked') },
+    { key: 'other', count: summary.aiDisabled + summary.disabled + summary.otherUnavailable, color: 'bg-text-muted', label: t('dashboard.health_other') },
+  ].filter(segment => segment.count > 0)
+  const lastSevenDays = tokenStats?.by_day.slice(-7) ?? []
+  const maxDayTokens = Math.max(1, ...lastSevenDays.map(day => day.total))
+  const requestCount = tokenStats?.last_24h.requests
+  const toolPolicy = settings?.tool_choice_policy
+    ? t(`api.tool_choice_${settings.tool_choice_policy}`)
+    : t('dashboard.unknown')
+  const version = displayVersion(versionStatus?.current_version || appVersion)
+
+  return (
+    <div>
+      <div className="flex items-start justify-between gap-5 mb-6 max-md:flex-col max-md:items-stretch">
+        <div>
+          <h1 className="text-[20px] font-semibold text-text-primary">{t('dashboard.title')}</h1>
+          <p className="text-[12px] text-text-muted mt-1">{t('dashboard.subtitle')}</p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap max-sm:grid max-sm:grid-cols-2">
+          <button
+            onClick={onOpenBest}
+            disabled={data.available === 0}
+            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 bg-white hover:bg-white/90 text-[#111] rounded-md text-[12px] font-medium cursor-pointer transition-colors border-none disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <IconZap /> {t('actions.open_best_account')}
+          </button>
+          <button
+            onClick={onRefreshQuota}
+            disabled={quotaRefreshing || refreshStatus?.refreshing}
+            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[12px] font-medium cursor-pointer transition-colors border border-border disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <IconRefresh /> {t('actions.refresh_quota')}
+          </button>
+          <button
+            onClick={onAddAccount}
+            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 bg-bg-card hover:bg-bg-card-hover text-text-primary rounded-md text-[12px] font-medium cursor-pointer transition-colors border border-border"
+          >
+            <IconPlus /> {t('actions.add_account')}
+          </button>
+        </div>
+      </div>
+
+      {refreshStatus?.refreshing && (
+        <div className="bg-notion-blue/10 border border-notion-blue/20 rounded-lg p-3 mb-5 flex items-center gap-3">
+          <div className="w-4 h-4 border-2 border-notion-blue/30 border-t-notion-blue rounded-full animate-spin shrink-0" />
+          <div className="flex-1 min-w-0">
+            <div className="text-[12px] font-medium text-[#5c9ce6]">
+              {t('common.status_refreshing', { current: refreshStatus.done, total: refreshStatus.total })}
+            </div>
+            <div className="h-1.5 bg-white/[.06] rounded-full overflow-hidden mt-1.5">
+              <div
+                className="h-full bg-notion-blue rounded-full transition-all duration-500"
+                style={{ width: `${refreshStatus.total > 0 ? (refreshStatus.done / refreshStatus.total) * 100 : 0}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+      {!refreshStatus?.refreshing && (refreshStatus?.failed ?? 0) > 0 && (
+        <div className="bg-warn/10 border border-warn/20 rounded-lg px-3 py-2.5 mb-5 text-[11px] text-warn">
+          {t('common.status_refresh_failed', { count: refreshStatus?.failed ?? 0 })}
+        </div>
+      )}
+
+      <section className="grid grid-cols-4 border-y border-white/[.06] divide-x divide-white/[.06] mb-6 max-lg:grid-cols-2 max-lg:[&>*:nth-child(3)]:border-t max-lg:[&>*:nth-child(4)]:border-t max-sm:grid-cols-1 max-sm:divide-x-0 max-sm:[&>*]:border-t max-sm:[&>*:first-child]:border-t-0">
+        <StatCard
+          label={t('dashboard.available_workspaces')}
+          value={`${data.available} / ${data.total}`}
+          sub={t('stats.ratio', { percent: summary.availableRate })}
+          color="var(--color-ok)"
+          icon={<IconShield />}
+        />
+        <StatCard
+          label={t('dashboard.login_accounts')}
+          value={loginCount}
+          sub={t('dashboard.workspace_count', { count: data.total })}
+        />
+        <StatCard
+          label={t('stats.basic_estimated')}
+          value={fmt(summary.totalRemaining)}
+          sub={summary.unlimitedAccounts > 0
+            ? t('dashboard.limited_and_unlimited', { count: summary.unlimitedAccounts })
+            : t('dashboard.limited_accounts_only')}
+        />
+        <StatCard
+          label={t('dashboard.last_24h')}
+          value={requestCount === undefined ? '—' : requestCount}
+          sub={tokenStats
+            ? t('dashboard.tokens_in_out', {
+                input: formatTokens(tokenStats.last_24h.input),
+                output: formatTokens(tokenStats.last_24h.output),
+              })
+            : t('stats.no_usage')}
+          color="var(--color-notion-blue)"
+          icon={<IconActivity />}
+        />
+      </section>
+
+      <div className="grid grid-cols-[minmax(0,1.7fr)_minmax(280px,1fr)] gap-4 mb-4 max-lg:grid-cols-1">
+        <section className="bg-bg-card border border-border rounded-lg p-5 max-sm:p-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-[14px] font-semibold text-text-primary flex items-center gap-2">
+                <IconShield /> {t('dashboard.pool_health')}
+              </h2>
+              <p className="text-[11px] text-text-muted mt-1">{t('dashboard.pool_health_help')}</p>
+            </div>
+            <span className={`text-[11px] font-medium px-2 py-1 rounded border shrink-0 ${attentionTotal === 0 ? 'text-ok bg-ok/10 border-ok/20' : 'text-warn bg-warn/10 border-warn/20'}`}>
+              {attentionTotal === 0 ? t('dashboard.healthy') : t('dashboard.attention_count', { count: attentionTotal })}
+            </span>
+          </div>
+          <div className="flex h-2 rounded overflow-hidden bg-white/[.04] mt-5" aria-label={t('dashboard.pool_health')}>
+            {healthSegments.map(segment => (
+              <div
+                key={segment.key}
+                className={`${segment.color} min-w-[3px]`}
+                style={{ width: `${data.total > 0 ? (segment.count / data.total) * 100 : 0}%` }}
+                title={`${segment.label}: ${segment.count}`}
+              />
+            ))}
+          </div>
+          <div className="flex items-center gap-x-5 gap-y-2 flex-wrap mt-3">
+            {healthSegments.map(segment => (
+              <div key={segment.key} className="flex items-center gap-1.5 text-[11px] text-text-secondary">
+                <span className={`w-1.5 h-1.5 rounded-full ${segment.color}`} />
+                <span>{segment.label}</span>
+                <strong className="text-text-primary tabular-nums">{segment.count}</strong>
+              </div>
+            ))}
+          </div>
+          <div className="mt-6 pt-5 border-t border-white/[.06]">
+            <TotalQuotaBar summary={data.summary} />
+          </div>
+        </section>
+
+        <section className="bg-bg-card border border-border rounded-lg overflow-hidden">
+          <div className="px-4 py-4 border-b border-white/[.06]">
+            <h2 className="text-[14px] font-semibold text-text-primary">{t('dashboard.needs_attention')}</h2>
+            <p className="text-[11px] text-text-muted mt-1">{t('dashboard.needs_attention_help')}</p>
+          </div>
+          {issues.length === 0 ? (
+            <div className="px-4 py-8 text-center">
+              <div className="w-8 h-8 rounded-full bg-ok/10 text-ok flex items-center justify-center mx-auto mb-3"><IconShield /></div>
+              <div className="text-[12px] text-text-primary font-medium">{t('dashboard.no_attention')}</div>
+              <div className="text-[11px] text-text-muted mt-1">{t('dashboard.no_attention_help')}</div>
+            </div>
+          ) : (
+            <div className="divide-y divide-white/[.05]">
+              {issues.map(issue => (
+                <button
+                  key={issue.status}
+                  onClick={() => onShowAccounts(issue.status)}
+                  className="w-full flex items-center gap-3 px-4 py-3 text-left bg-transparent hover:bg-white/[.025] cursor-pointer border-none transition-colors"
+                >
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${issue.dot}`} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[12px] font-medium text-text-primary">{issue.label}</span>
+                    <span className="block text-[10px] text-text-muted mt-0.5 truncate">{issue.detail}</span>
+                  </span>
+                  <span className="text-[12px] font-semibold text-text-primary tabular-nums">{issue.count}</span>
+                  <span className="text-text-muted"><IconArrowRight /></span>
+                </button>
+              ))}
+            </div>
+          )}
+          <button
+            onClick={onManageAccounts}
+            className="w-full flex items-center justify-between px-4 py-3 border-0 border-t border-white/[.06] bg-white/[.015] hover:bg-white/[.04] text-[11px] text-text-secondary hover:text-text-primary cursor-pointer transition-colors"
+          >
+            <span>{t('dashboard.manage_all_accounts')}</span><IconArrowRight />
+          </button>
+        </section>
+      </div>
+
+      <div className="grid grid-cols-[minmax(0,1.7fr)_minmax(280px,1fr)] gap-4 max-lg:grid-cols-1">
+        <section className="bg-bg-card border border-border rounded-lg p-5 max-sm:p-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h2 className="text-[14px] font-semibold text-text-primary flex items-center gap-2"><IconActivity /> {t('dashboard.traffic')}</h2>
+              <p className="text-[11px] text-text-muted mt-1">
+                {tokenStats
+                  ? t('dashboard.traffic_total', {
+                      tokens: formatTokens(tokenStats.total.total),
+                      requests: tokenStats.total.requests ?? 0,
+                    })
+                  : t('stats.no_usage')}
+              </p>
+            </div>
+            <button onClick={onOpenHistory} className="inline-flex items-center gap-1.5 text-[11px] text-text-secondary hover:text-text-primary bg-transparent border-none cursor-pointer">
+              {t('api.request_history')} <IconArrowRight />
+            </button>
+          </div>
+          {lastSevenDays.length > 0 ? (
+            <div className="mt-5">
+              <div className="h-28 flex items-end gap-2 border-b border-white/[.06]">
+                {lastSevenDays.map(day => {
+                  const totalHeight = Math.max(4, (day.total / maxDayTokens) * 100)
+                  const outputShare = day.total > 0 ? (day.output / day.total) * 100 : 0
+                  return (
+                    <div key={day.date} className="flex-1 h-full flex items-end group">
+                      <div
+                        className="w-full bg-notion-blue/55 group-hover:bg-notion-blue/75 transition-colors rounded-t-sm overflow-hidden relative"
+                        style={{ height: `${totalHeight}%` }}
+                        title={`${day.date} · ${formatTokens(day.total)}`}
+                      >
+                        <div className="absolute bottom-0 inset-x-0 bg-[#9b72cf]/80" style={{ height: `${outputShare}%` }} />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+              <div className="flex gap-2 mt-2">
+                {lastSevenDays.map(day => (
+                  <div key={day.date} className="flex-1 text-center text-[9px] text-text-muted tabular-nums">
+                    {new Date(`${day.date}T00:00:00`).toLocaleDateString(i18n.language === 'zh' ? 'zh-CN' : 'en-US', { month: 'numeric', day: 'numeric' })}
+                  </div>
+                ))}
+              </div>
+              <div className="flex items-center gap-4 mt-3 text-[10px] text-text-muted">
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-sm bg-notion-blue/70" />{t('dashboard.input_tokens')}</span>
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-sm bg-[#9b72cf]/80" />{t('dashboard.output_tokens')}</span>
+              </div>
+            </div>
+          ) : (
+            <div className="h-36 flex items-center justify-center text-[11px] text-text-muted">{t('dashboard.no_traffic')}</div>
+          )}
+        </section>
+
+        <section className="bg-bg-card border border-border rounded-lg overflow-hidden">
+          <div className="px-4 py-4 border-b border-white/[.06] flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-[14px] font-semibold text-text-primary">{t('dashboard.runtime')}</h2>
+              <p className="text-[11px] text-text-muted mt-1">{t('dashboard.runtime_help')}</p>
+            </div>
+            <span className={`w-2 h-2 mt-1.5 rounded-full ${versionStatus?.status === 'update_available' ? 'bg-warn' : 'bg-ok'}`} />
+          </div>
+          <dl className="divide-y divide-white/[.05]">
+            <div className="flex items-center justify-between gap-4 px-4 py-3">
+              <dt className="text-[11px] text-text-muted">{t('dashboard.deployment')}</dt>
+              <dd className="text-[11px] text-text-primary font-mono">{version}</dd>
+            </div>
+            <div className="flex items-center justify-between gap-4 px-4 py-3">
+              <dt className="text-[11px] text-text-muted">{t('api.tool_bridge')}</dt>
+              <dd className={`text-[11px] font-medium ${settings?.enable_tool_bridge ? 'text-ok' : 'text-text-secondary'}`}>
+                {settings ? (settings.enable_tool_bridge ? t('api.enabled') : t('api.disabled')) : t('dashboard.unknown')}
+              </dd>
+            </div>
+            <div className="flex items-center justify-between gap-4 px-4 py-3">
+              <dt className="text-[11px] text-text-muted">{t('api.tool_choice_policy')}</dt>
+              <dd className="text-[11px] text-text-primary">{toolPolicy}</dd>
+            </div>
+            <div className="flex items-center justify-between gap-4 px-4 py-3">
+              <dt className="text-[11px] text-text-muted">{t('dashboard.searches')}</dt>
+              <dd className="text-[11px] text-text-primary">
+                {settings
+                  ? `${settings.enable_web_search ? t('dashboard.web') : '—'} · ${settings.enable_workspace_search ? t('dashboard.workspace') : '—'}`
+                  : t('dashboard.unknown')}
+              </dd>
+            </div>
+          </dl>
+          <div className="px-4 py-3 border-t border-white/[.06] flex items-center justify-between gap-3">
+            <span className="text-[10px] text-text-muted">
+              {refreshTime ? t('actions.updated_at', { time: refreshTime }) : ''}
+            </span>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={onRefreshData}
+                disabled={refreshing}
+                className={`text-text-muted hover:text-text-primary bg-transparent border-none cursor-pointer p-0.5 flex disabled:opacity-40 ${refreshing ? 'animate-spin' : ''}`}
+                title={t('actions.refresh_data')}
+              >
+                <IconRefresh />
+              </button>
+              <button onClick={onOpenSettings} className="inline-flex items-center gap-1.5 text-[11px] text-text-secondary hover:text-text-primary bg-transparent border-none cursor-pointer">
+                {t('dashboard.open_settings')} <IconArrowRight />
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   const { t, i18n } = useTranslation()
   const [authState, setAuthState] = useState<'checking' | 'login' | 'authenticated'>('checking')
@@ -1182,7 +1659,8 @@ export default function App() {
   const [requestHistoryOpen, setRequestHistoryOpen] = useState(false)
   const [copiedField, setCopiedField] = useState<'key' | 'base' | null>(null)
   const [showAddModal, setShowAddModal] = useState(false)
-  const [activePage, setActivePage] = useState<DashboardPage>(() => window.location.hash === '#settings' ? 'settings' : 'accounts')
+  const [showCleanupModal, setShowCleanupModal] = useState(false)
+  const [activePage, setActivePage] = useState<DashboardPage>(dashboardPageFromHash)
   const appVersion = document.querySelector('meta[name="app-version"]')?.getAttribute('content') || 'dev'
   const copyToClipboard = async (text: string, field: 'key' | 'base') => {
     await navigator.clipboard.writeText(text)
@@ -1201,6 +1679,7 @@ export default function App() {
   const backupFileInputRef = useRef<HTMLInputElement>(null)
   const PAGE_SIZE = 20
   const completedBatchJobsRef = useRef<Set<string>>(new Set())
+  const loadDataGenerationRef = useRef(0)
 
   // Debounced query: typing in the search box shouldn't fire a request
   // on every keystroke; we wait 250ms after the user stops typing and
@@ -1213,7 +1692,16 @@ export default function App() {
   }, [query])
 
   useEffect(() => {
-    const syncPageFromHash = () => setActivePage(window.location.hash === '#settings' ? 'settings' : 'accounts')
+    const syncPageFromHash = () => {
+      const nextPage = dashboardPageFromHash()
+      setActivePage(nextPage)
+      if (nextPage === 'dashboard') {
+        setQuery('')
+        setDebouncedQuery('')
+        setStatusFilter('all')
+        setPage(0)
+      }
+    }
     window.addEventListener('hashchange', syncPageFromHash)
     return () => window.removeEventListener('hashchange', syncPageFromHash)
   }, [])
@@ -1225,9 +1713,23 @@ export default function App() {
   }, [activePage])
 
   const changePage = (nextPage: DashboardPage) => {
+    if (nextPage === 'dashboard') {
+      setQuery('')
+      setDebouncedQuery('')
+      setStatusFilter('all')
+      setPage(0)
+    }
     setActivePage(nextPage)
-    const nextHash = nextPage === 'settings' ? '#settings' : '#accounts'
+    const nextHash = `#${nextPage}`
     if (window.location.hash !== nextHash) window.history.replaceState(null, '', nextHash)
+  }
+
+  const showAccountsWithFilter = (status: AccountStatusFilter) => {
+    setQuery('')
+    setDebouncedQuery('')
+    setStatusFilter(status)
+    setPage(0)
+    changePage('accounts')
   }
 
   // Check auth on mount
@@ -1249,8 +1751,10 @@ export default function App() {
   // workspace. Fetch all filtered workspace pages first so a login is never
   // split into duplicate cards at a server-page boundary.
   const loadData = useCallback(async () => {
+    const generation = ++loadDataGenerationRef.current
     try {
       const d = await fetchAllDashboardData({ query: debouncedQuery, status: statusFilter })
+      if (generation !== loadDataGenerationRef.current) return
       setData(d)
       setError(null)
       setRefreshTime(new Date().toLocaleTimeString('zh-CN'))
@@ -1258,15 +1762,27 @@ export default function App() {
         setRefreshStatus(d.refresh)
       }
     } catch (e: any) {
+      if (generation !== loadDataGenerationRef.current) return
       setError(e.message || 'Unknown error')
     } finally {
-      setLoading(false)
+      if (generation === loadDataGenerationRef.current) setLoading(false)
     }
   }, [debouncedQuery, statusFilter])
 
   useEffect(() => {
     if (authState === 'authenticated') loadData()
   }, [authState, loadData])
+
+  // Health changes are produced by API traffic as well as manual quota
+  // refreshes. Poll the in-memory admin snapshot while an operational page is
+  // visible so a confirmed 401 appears promptly without calling Notion again.
+  useEffect(() => {
+    if (authState !== 'authenticated' || activePage === 'settings') return
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible' && !refreshStatus?.refreshing) void loadData()
+    }, 10_000)
+    return () => window.clearInterval(interval)
+  }, [activePage, authState, loadData, refreshStatus?.refreshing])
 
   // Settings + token stats are pool-wide and don't change with the
   // current page/query, so we only fetch them on auth — not on every
@@ -1334,7 +1850,7 @@ export default function App() {
     if (!activeBatchJob || activeBatchJob.state === 'running' || completedBatchJobsRef.current.has(activeBatchJob.id)) return
     completedBatchJobsRef.current.add(activeBatchJob.id)
     window.localStorage.removeItem('notion-manager-active-account-batch-job')
-    if (['delete', 'delete_missing_personal_instructions', 'delete_exhausted'].includes(activeBatchJob.action)) {
+    if (['delete', 'delete_missing_personal_instructions', 'delete_exhausted', 'delete_no_workspace'].includes(activeBatchJob.action)) {
       setSelectedAccounts(new Map())
     }
     loadData()
@@ -1397,7 +1913,10 @@ export default function App() {
 
   const refresh = async () => {
     setRefreshing(true)
-    await loadData()
+    await Promise.all([
+      loadData(),
+      fetchTokenStats().then(setTokenStats).catch(() => {}),
+    ])
     setRefreshing(false)
   }
 
@@ -1415,28 +1934,31 @@ export default function App() {
     action: AccountBatchJobAction,
     accountIds: string[],
     legacyEmails: string[] = [],
-  ) => {
-    if ((accountIds.length === 0 && legacyEmails.length === 0) || batchStartingAction || activeBatchJob?.state === 'running') return
+  ): Promise<boolean> => {
+    if ((accountIds.length === 0 && legacyEmails.length === 0) || batchStartingAction || activeBatchJob?.state === 'running') return false
     setBatchStartingAction(action)
     try {
       const job = await startAccountBatchJob(action, accountIds, 10, legacyEmails)
       setActiveBatchJob(job)
       window.localStorage.setItem('notion-manager-active-account-batch-job', job.id)
+      return true
     } catch (e: any) {
       window.alert(t('batch.start_failed', { error: e?.message || t('common.request_failed') }))
+      return false
     } finally {
       setBatchStartingAction(null)
     }
   }
 
-  const launchAllPoolBatch = async (action: AccountBatchJobAction) => {
+  const launchAllPoolBatch = async (action: AccountBatchJobAction): Promise<boolean> => {
     try {
       const accounts = await fetchAccountSelection('', 'all')
       const accountIds = accounts.flatMap(account => account.account_id ? [account.account_id] : [])
       const legacyEmails = accounts.flatMap(account => !account.account_id && account.email ? [account.email] : [])
-      await launchAccountBatch(action, accountIds, legacyEmails)
+      return await launchAccountBatch(action, accountIds, legacyEmails)
     } catch (e: any) {
       window.alert(t('batch.fetch_all_failed', { error: e?.message || t('common.request_failed') }))
+      return false
     }
   }
 
@@ -1445,14 +1967,14 @@ export default function App() {
     await launchAllPoolBatch('check_personal_instructions')
   }
 
-  const handleDeleteMissingPersonalInstructions = async () => {
-    if ((data?.total ?? 0) === 0 || activeBatchJob?.state === 'running') return
+  const handleDeleteMissingPersonalInstructions = async (): Promise<boolean> => {
+    if ((data?.total ?? 0) === 0 || activeBatchJob?.state === 'running') return false
     const knownMissing = data?.summary?.personal_instructions_missing ?? 0
     const confirmed = window.confirm(
       t('batch.confirm_delete_missing', { total: data?.total ?? 0, missing: knownMissing }),
     )
-    if (!confirmed) return
-    await launchAllPoolBatch('delete_missing_personal_instructions')
+    if (!confirmed) return false
+    return await launchAllPoolBatch('delete_missing_personal_instructions')
   }
 
   const handleBulkSelected = async (action: Extract<AccountBatchJobAction, 'delete' | 'disable' | 'enable' | 'check_personal_instructions'>) => {
@@ -1523,14 +2045,55 @@ export default function App() {
     window.localStorage.removeItem('notion-manager-active-account-batch-job')
   }
 
-  const handleDeleteExhaustedTrials = async () => {
+  const handleDeleteExhaustedTrials = async (): Promise<boolean> => {
     const count = data?.summary?.exhausted_trials ?? 0
-    if (count <= 0 || activeBatchJob?.state === 'running') return
+    if (count <= 0 || activeBatchJob?.state === 'running') return false
     const confirmed = window.confirm(
       t('batch.confirm_delete_exhausted', { count }),
     )
-    if (!confirmed) return
-    await launchAllPoolBatch('delete_exhausted')
+    if (!confirmed) return false
+    return await launchAllPoolBatch('delete_exhausted')
+  }
+
+  const handleDeleteFilteredAccounts = async (
+    status: Extract<AccountStatusFilter, 'auth_invalid' | 'no_workspace'>,
+    count: number,
+    action: Extract<AccountBatchJobAction, 'delete' | 'delete_no_workspace'>,
+  ): Promise<boolean> => {
+    if (count <= 0 || activeBatchJob?.state === 'running') return false
+    const confirmed = window.confirm(t('cleanup.confirm', {
+      type: status === 'auth_invalid' ? t('cleanup.auth_invalid') : t('cleanup.no_workspace'),
+      count,
+    }))
+    if (!confirmed) return false
+    try {
+      const accounts = await fetchAccountSelection('', status)
+      const accountIds = accounts.flatMap(account => account.account_id ? [account.account_id] : [])
+      const legacyEmails = accounts.flatMap(account => !account.account_id && account.email ? [account.email] : [])
+      return await launchAccountBatch(action, accountIds, legacyEmails)
+    } catch (e: any) {
+      window.alert(t('batch.fetch_all_failed', { error: e?.message || t('common.request_failed') }))
+      return false
+    }
+  }
+
+  const handleCleanupTarget = async (target: CleanupTarget) => {
+    let started = false
+    switch (target) {
+      case 'auth_invalid':
+        started = await handleDeleteFilteredAccounts('auth_invalid', summary?.authInvalid ?? 0, 'delete')
+        break
+      case 'no_workspace':
+        started = await handleDeleteFilteredAccounts('no_workspace', summary?.noWorkspace ?? 0, 'delete_no_workspace')
+        break
+      case 'exhausted':
+        started = await handleDeleteExhaustedTrials()
+        break
+      case 'personal_missing':
+        started = await handleDeleteMissingPersonalInstructions()
+        break
+    }
+    if (started) setShowCleanupModal(false)
   }
 
   const toggleSetting = async (key: 'enable_web_search' | 'enable_workspace_search' | 'ask_mode_default' | 'debug_logging') => {
@@ -1665,21 +2228,6 @@ export default function App() {
     })
   }
 
-  const toggleSelectedGroup = (groupAccounts: AccountInfo[]) => {
-    const groupAccountIDs = groupAccounts.map(account => account.account_id).filter(Boolean)
-    if (groupAccountIDs.length === 0) return
-    setSelectedAccounts(current => {
-      const next = new Map(current)
-      const allSelected = groupAccountIDs.every(accountID => next.has(accountID))
-      groupAccounts.forEach(account => {
-        if (!account.account_id) return
-        if (allSelected) next.delete(account.account_id)
-        else next.set(account.account_id, account.email)
-      })
-      return next
-    })
-  }
-
   const toggleCurrentPageSelection = () => {
     setSelectedAccounts(current => {
       const next = new Map(current)
@@ -1702,7 +2250,7 @@ export default function App() {
     if (page > 0 && page >= totalPages) setPage(Math.max(0, totalPages - 1))
   }, [page, totalPages])
 
-  const summary = useMemo(() => {
+  const summary = useMemo<PoolSummaryView | null>(() => {
     if (!data) return null
     const s = data.summary
     // Note: backend's AvailableCount already excludes no_workspace, so
@@ -1797,6 +2345,30 @@ export default function App() {
       />
 
       <main className="max-w-[1280px] mx-auto px-6 py-6 max-sm:px-3 max-sm:py-4">
+        {activePage === 'dashboard' && summary && data && (
+          <DashboardHome
+            data={data}
+            summary={summary}
+            loginCount={accountGroups.length}
+            tokenStats={tokenStats}
+            settings={settings}
+            versionStatus={versionStatus}
+            appVersion={appVersion}
+            refreshStatus={refreshStatus}
+            refreshing={refreshing}
+            quotaRefreshing={quotaRefreshing}
+            refreshTime={refreshTime}
+            onOpenBest={openBestProxy}
+            onRefreshQuota={handleQuotaRefresh}
+            onRefreshData={refresh}
+            onAddAccount={() => setShowAddModal(true)}
+            onManageAccounts={() => changePage('accounts')}
+            onShowAccounts={showAccountsWithFilter}
+            onOpenHistory={() => setRequestHistoryOpen(true)}
+            onOpenSettings={() => changePage('settings')}
+          />
+        )}
+
         {/* Summary */}
         {activePage === 'accounts' && summary && (
           <div className="grid grid-cols-5 divide-x divide-white/[.05] mb-6 max-lg:grid-cols-3 max-md:grid-cols-2 max-md:divide-x-0 max-sm:mb-4">
@@ -1862,6 +2434,11 @@ export default function App() {
             </div>
           </div>
         )}
+        {activePage === 'accounts' && !refreshStatus?.refreshing && (refreshStatus?.failed ?? 0) > 0 && (
+          <div className="bg-warn/10 border border-warn/20 rounded-lg px-3 py-2.5 mb-5 text-[12px] text-warn">
+            {t('common.status_refresh_failed', { count: refreshStatus?.failed ?? 0 })}
+          </div>
+        )}
 
         {/* Actions */}
         {activePage === 'accounts' && <div className="flex items-center gap-2.5 mb-5 flex-wrap max-sm:grid max-sm:grid-cols-2 max-sm:gap-2 max-sm:[&>button]:justify-center max-sm:[&>button]:px-2 max-sm:[&>button]:text-[12px]">
@@ -1894,22 +2471,12 @@ export default function App() {
             <IconActivity /> {batchStartingAction === 'check_personal_instructions' ? t('actions.starting') : t('actions.check_instructions')}
           </button>
           <button
-            onClick={handleDeleteMissingPersonalInstructions}
-            disabled={batchBusy || (data?.total ?? 0) === 0}
+            onClick={() => setShowCleanupModal(true)}
+            disabled={batchBusy || (data?.total ?? 0) === 0 || !!refreshStatus?.refreshing}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-err/10 hover:bg-err/20 text-err rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-err/25 disabled:opacity-40 disabled:cursor-not-allowed"
-            title={t('actions.delete_missing_help')}
+            title={t('cleanup.subtitle')}
           >
-            <IconTrash /> {batchStartingAction === 'delete_missing_personal_instructions'
-              ? t('actions.starting')
-              : t('actions.delete_missing', { count: data?.summary?.personal_instructions_missing ?? 0 })}
-          </button>
-          <button
-            onClick={handleDeleteExhaustedTrials}
-            disabled={batchBusy || (data?.summary?.exhausted_trials ?? 0) <= 0 || !!refreshStatus?.refreshing}
-            className="inline-flex items-center gap-1.5 px-4 py-2 bg-err/10 hover:bg-err/20 text-err rounded-md text-[13px] font-medium cursor-pointer transition-colors border border-err/25 disabled:opacity-40 disabled:cursor-not-allowed"
-            title={t('actions.cleanup_trials_help')}
-          >
-            <IconTrash /> {batchStartingAction === 'delete_exhausted' ? t('actions.starting') : t('actions.cleanup_trials', { count: data?.summary?.exhausted_trials ?? 0 })}
+            <IconTrash /> {t('cleanup.button')}
           </button>
           <button
             onClick={() => setShowAddModal(true)}
@@ -2317,14 +2884,13 @@ export default function App() {
             {t('common.no_matching_accounts')}
           </div>
         ) : (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(380px,1fr))] gap-2.5 mb-4 max-sm:grid-cols-1">
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(380px,1fr))] items-start gap-2.5 mb-4 max-sm:grid-cols-1">
             {pagedGroups.map(group => (
               <AccountGroupCard
                 key={group.id}
                 group={group}
                 selectedAccounts={selectedAccounts}
                 onToggleWorkspace={toggleSelectedAccount}
-                onToggleGroup={toggleSelectedGroup}
                 onChanged={loadData}
               />
             ))}
@@ -2373,6 +2939,19 @@ export default function App() {
         <AddAccountModal
           onClose={() => setShowAddModal(false)}
           onSuccess={loadData}
+        />
+      )}
+      {showCleanupModal && summary && (
+        <CleanupModal
+          counts={{
+            auth_invalid: summary.authInvalid,
+            exhausted: data?.summary?.exhausted_trials ?? 0,
+            no_workspace: summary.noWorkspace,
+            personal_missing: data?.summary?.personal_instructions_missing ?? 0,
+          }}
+          busy={batchBusy}
+          onClose={() => setShowCleanupModal(false)}
+          onRun={handleCleanupTarget}
         />
       )}
 

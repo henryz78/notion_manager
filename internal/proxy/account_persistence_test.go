@@ -35,6 +35,104 @@ func makeTestAccount(userID, email, spaceID, spaceName string, spaceUsage, space
 	return acc
 }
 
+func TestAuthInvalidPersistsAcrossAllWorkspacesAndRestart(t *testing.T) {
+	dir := t.TempDir()
+	first := makeTestAccount("shared-user", "shared@example.com", "space-a", "A", 1, 100)
+	second := makeTestAccount("shared-user", "shared@example.com", "space-b", "B", 1, 100)
+	first.TokenV2 = "shared-token"
+	second.TokenV2 = "shared-token"
+	for _, account := range []*Account{first, second} {
+		if _, err := SaveAccountToFile(account, dir); err != nil {
+			t.Fatalf("SaveAccountToFile: %v", err)
+		}
+	}
+
+	pool := NewAccountPool()
+	if err := pool.LoadFromDir(dir); err != nil {
+		t.Fatalf("LoadFromDir: %v", err)
+	}
+	active := pool.FindByAccountID(first.AccountID)
+	if active == nil {
+		t.Fatal("first workspace not loaded")
+	}
+	if !pool.RecordAuthFailure(active, 0) {
+		t.Fatal("confirmed 401 should invalidate login immediately")
+	}
+	for _, detail := range pool.GetAccountDetails() {
+		if detail["auth_invalid"] != true {
+			t.Fatalf("sibling workspace stayed usable: %#v", detail)
+		}
+	}
+
+	reloaded := NewAccountPool()
+	if err := reloaded.LoadFromDir(dir); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.AvailableCount() != 0 {
+		t.Fatalf("restarted pool resurrected invalid login: %#v", reloaded.GetAccountDetails())
+	}
+	for _, detail := range reloaded.GetAccountDetails() {
+		if detail["auth_invalid"] != true {
+			t.Fatalf("persisted auth_invalid missing after restart: %#v", detail)
+		}
+	}
+}
+
+func TestLate401FromReplacedCredentialCannotInvalidateNewLogin(t *testing.T) {
+	dir := t.TempDir()
+	old := makeTestAccount("same-user", "same@example.com", "same-space", "Workspace", 1, 100)
+	old.TokenV2 = "old-token"
+	replacement := makeTestAccount("same-user", "same@example.com", "same-space", "Workspace", 1, 100)
+	replacement.TokenV2 = "new-token"
+	if _, err := SaveAccountToFile(replacement, dir); err != nil {
+		t.Fatalf("save replacement: %v", err)
+	}
+
+	pool := NewAccountPool()
+	pool.accountsDir = dir
+	pool.accounts = []*Account{replacement}
+	if pool.RecordAuthFailure(old, 0) {
+		t.Fatal("late 401 from a replaced account instance must be ignored")
+	}
+	if pool.isAuthInvalid(replacement) {
+		t.Fatal("replacement login was marked auth-invalid")
+	}
+
+	reloaded := NewAccountPool()
+	if err := reloaded.LoadFromDir(dir); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.AvailableCount() != 1 {
+		t.Fatalf("replacement did not survive restart: %#v", reloaded.GetAccountDetails())
+	}
+}
+
+func TestAuthFailurePersistenceUsesCredentialCompareAndSwap(t *testing.T) {
+	dir := t.TempDir()
+	old := makeTestAccount("same-user", "same@example.com", "same-space", "Workspace", 1, 100)
+	old.TokenV2 = "old-token"
+	replacement := makeTestAccount("same-user", "same@example.com", "same-space", "Workspace", 1, 100)
+	replacement.TokenV2 = "new-token"
+	if _, err := SaveAccountToFile(replacement, dir); err != nil {
+		t.Fatalf("save replacement: %v", err)
+	}
+
+	pool := NewAccountPool()
+	pool.accountsDir = dir
+	pool.accounts = []*Account{old}
+	if !pool.RecordAuthFailure(old, 0) {
+		t.Fatal("current in-memory login should be marked invalid")
+	}
+
+	reloaded := NewAccountPool()
+	if err := reloaded.LoadFromDir(dir); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.AvailableCount() != 1 {
+		t.Fatalf("old failure overwrote the newer credential on disk: %#v", reloaded.GetAccountDetails())
+	}
+}
+
 func readJSONFile(t *testing.T, path string) map[string]interface{} {
 	t.Helper()
 	data, err := os.ReadFile(path)

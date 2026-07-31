@@ -10,9 +10,14 @@ import (
 )
 
 func TestWorkspacePreferencePrioritizesUsableIncludedAIPlan(t *testing.T) {
+	enabledEnterprise := workspacePreference(notionWorkspaceMetadata{PlanType: "enterprise", AIEnabled: true})
+	enabledBusiness := workspacePreference(notionWorkspaceMetadata{PlanType: "business", AIEnabled: true})
 	enabledTeam := workspacePreference(notionWorkspaceMetadata{PlanType: "team", AIEnabled: true})
 	enabledPlus := workspacePreference(notionWorkspaceMetadata{PlanType: "plus", AIEnabled: true})
 	disabledTeam := workspacePreference(notionWorkspaceMetadata{PlanType: "team", AIEnabled: false})
+	if enabledEnterprise <= enabledBusiness || enabledBusiness <= enabledTeam {
+		t.Fatalf("paid hierarchy scores: enterprise=%d business=%d team=%d", enabledEnterprise, enabledBusiness, enabledTeam)
+	}
 	if enabledTeam <= enabledPlus {
 		t.Fatalf("enabled Team score=%d, want greater than enabled Plus=%d", enabledTeam, enabledPlus)
 	}

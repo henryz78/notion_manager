@@ -35,7 +35,6 @@ func lockAccountFilePath(path string) (func(), error) {
 
 const (
 	defaultAccountFailureCooldown = 2 * time.Minute
-	authInvalidFailureThreshold   = 2
 	accountRestoreConflictMessage = "account restore is in progress; retry after it finishes"
 )
 
@@ -43,6 +42,10 @@ type AccountPool struct {
 	mu       sync.RWMutex
 	accounts []*Account
 	index    atomic.Uint64
+	// accountsDir is set when the pool loads its workspace files. Durable
+	// health transitions (notably a revoked login cookie) use it to persist
+	// only the affected account files immediately.
+	accountsDir string
 
 	// Account file mutations and backup restore share this state. A restore
 	// starts only while no mutation is active; new mutations cannot start
@@ -56,6 +59,7 @@ type AccountPool struct {
 	refreshing    bool
 	refreshDone   int
 	refreshTotal  int
+	refreshFailed int
 	lastRefreshAt *time.Time
 
 	// Per-account live quota refresh state. A routing check is singleflight:
@@ -338,6 +342,20 @@ func writeManualDisabledState(target map[string]interface{}, disabled bool) {
 	}
 }
 
+func writePersistedHealthState(target map[string]interface{}, state accountHealthSnapshot) {
+	if state.AuthInvalid {
+		target["auth_invalid"] = true
+		target["last_failure_reason"] = "auth_invalid"
+		if state.LastFailureAt != nil {
+			target["last_failure_at"] = state.LastFailureAt.Format(time.RFC3339)
+		}
+		return
+	}
+	delete(target, "auth_invalid")
+	delete(target, "last_failure_reason")
+	delete(target, "last_failure_at")
+}
+
 func (acc *Account) healthSnapshot() accountHealthSnapshot {
 	if acc == nil {
 		return accountHealthSnapshot{}
@@ -408,6 +426,7 @@ func (p *AccountPool) LoadFromDir(dir string) error {
 	if err != nil {
 		return fmt.Errorf("read accounts dir: %w", err)
 	}
+	p.accountsDir = dir
 
 	seen := make(map[string]bool)
 	for _, entry := range entries {
@@ -454,6 +473,7 @@ func (p *AccountPool) LoadFromDir(dir string) error {
 		// re-probe every account before the pool can refuse known-bad
 		// ones.
 		loadPersistedWorkspace(data, &acc)
+		loadPersistedHealth(data, &acc)
 		registerModelEntries(acc.Models)
 		p.accounts = append(p.accounts, &acc)
 		log.Printf("[account] loaded: %s (%s) [%s] workspace=%s",
@@ -475,6 +495,7 @@ func (p *AccountPool) LoadFromDir(dir string) error {
 func (p *AccountPool) ReloadFromDir(dir string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.accountsDir = dir
 
 	known := make(map[string]bool, len(p.accounts))
 	for _, acc := range p.accounts {
@@ -518,6 +539,7 @@ func (p *AccountPool) ReloadFromDir(dir string) {
 		}
 		acc.QuotaInfo = loadPersistedQuotaInfo(data)
 		loadPersistedWorkspace(data, &acc)
+		loadPersistedHealth(data, &acc)
 		registerModelEntries(acc.Models)
 		p.accounts = append(p.accounts, &acc)
 		if acc.AccountID != "" {
@@ -583,6 +605,7 @@ func loadAccountByIDFromDirLocked(dir, accountID string) (*Account, error) {
 		}
 		acc.QuotaInfo = loadPersistedQuotaInfo(data)
 		loadPersistedWorkspace(data, &acc)
+		loadPersistedHealth(data, &acc)
 		match = &acc
 	}
 	if match == nil {
@@ -613,6 +636,9 @@ func (p *AccountPool) ActivateAccountByIDFromDir(dir, accountID string) error {
 	if err != nil {
 		return err
 	}
+	p.mu.Lock()
+	p.accountsDir = dir
+	p.mu.Unlock()
 	p.AddAccount(account)
 	return nil
 }
@@ -656,33 +682,13 @@ func (p *AccountPool) Next() *Account {
 	return p.pickNextRoundRobin(nil)
 }
 
-// NextForResearch returns the next usable account for research mode. Current
-// public docs only guarantee Research Mode on Business and Enterprise and do
-// not publish a numeric trial limit, so routing must not hard-code "/3".
-// Included-AI plans are preferred; trial accounts remain a fallback and the
-// real request result decides eligibility.
+// NextForResearch returns the best usable account for research mode using the
+// same deterministic product-tier preference as ordinary new conversations.
+// The real request result still decides feature eligibility.
 func (p *AccountPool) NextForResearch() *Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	n := len(p.accounts)
-	if n == 0 {
-		return nil
-	}
-	start := p.index.Add(1) - 1
-	var fallback *Account
-	for i := 0; i < n; i++ {
-		acc := p.accounts[(start+uint64(i))%uint64(n)]
-		if p.isUnusable(acc) {
-			continue
-		}
-		if planIncludesFullNotionAI(acc.planTypeSnapshot()) {
-			return acc
-		}
-		if fallback == nil {
-			fallback = acc
-		}
-	}
-	return fallback // nil if all exhausted
+	return p.pickBestAccountLocked(nil)
 }
 
 // NextExcluding returns the next available account excluding the given ones (for retry)
@@ -719,8 +725,9 @@ func (p *AccountPool) pickNextRoundRobin(exclude map[*Account]bool) *Account {
 //
 // Selection rules:
 //  1. Skip exhausted/excluded accounts.
-//  2. Prefer included-AI paid plans, then other eligible trial accounts.
-//     Private Space/User/Premium counters are not used as plan evidence.
+//  2. Prefer Enterprise > Business > Team > Plus/Personal/Free while keeping
+//     included-AI paid plans above limited trials. Private Space/User/Premium
+//     counters are not used as plan evidence.
 //  3. If no scored account is available (e.g. all accounts are unrefreshed),
 //     fall back to the first usable account in rotation order so freshly
 //     loaded accounts can still serve traffic before the first refresh
@@ -825,37 +832,60 @@ func (p *AccountPool) MarkTemporarilyUnavailable(acc *Account, reason string, co
 	log.Printf("[health] temporarily disabled %s for %s (%s)", acc.UserEmail, cooldown, reason)
 }
 
-// RecordAuthFailure records a failed account authentication attempt. The first
-// auth error only cools the account down; repeated consecutive auth errors mark
-// the account invalid until a refresh/reimport clears the runtime state.
-func (p *AccountPool) RecordAuthFailure(acc *Account, cooldown time.Duration) bool {
+// RecordAuthFailure records a confirmed login authentication failure. A 401
+// invalidates every workspace that shares the same Notion login immediately:
+// retrying sibling workspaces only repeats the same revoked cookie. The state
+// is persisted per workspace so a service restart cannot resurrect the login.
+func (p *AccountPool) RecordAuthFailure(acc *Account, _ time.Duration) bool {
 	if acc == nil {
 		return false
 	}
-	if cooldown <= 0 {
-		cooldown = defaultAccountFailureCooldown
-	}
 	now := time.Now()
-	until := now.Add(cooldown)
-
-	acc.mu.Lock()
-	acc.AuthFailureCount++
-	count := acc.AuthFailureCount
-	if count >= authInvalidFailureThreshold {
-		acc.AuthInvalid = true
-		acc.TemporaryUnavailableUntil = nil
-		acc.LastFailureReason = "auth_invalid"
-		acc.LastFailureAt = &now
-		acc.mu.Unlock()
-		log.Printf("[health] marked %s auth invalid after %d consecutive auth failures", acc.UserEmail, count)
-		return true
+	p.mu.RLock()
+	accountsDir := p.accountsDir
+	affected := make([]*Account, 0, 1)
+	currentFailure := false
+	for _, candidate := range p.accounts {
+		if candidate == acc && candidate.TokenV2 == acc.TokenV2 {
+			currentFailure = true
+		}
+		sameLogin := candidate == acc
+		if !sameLogin {
+			sameLogin = candidate.TokenV2 != "" && candidate.TokenV2 == acc.TokenV2
+		}
+		if sameLogin && candidate != acc && acc.UserID != "" {
+			sameLogin = candidate.UserID == acc.UserID
+		}
+		if sameLogin {
+			affected = append(affected, candidate)
+		}
 	}
-	acc.TemporaryUnavailableUntil = &until
-	acc.LastFailureReason = "auth_error"
-	acc.LastFailureAt = &now
-	acc.mu.Unlock()
-	log.Printf("[health] temporarily disabled %s for %s (auth_error %d/%d)", acc.UserEmail, cooldown, count, authInvalidFailureThreshold)
-	return false
+	p.mu.RUnlock()
+	if !currentFailure {
+		log.Printf("[health] ignored stale auth failure for replaced login %s", acc.UserEmail)
+		return false
+	}
+
+	for _, candidate := range affected {
+		candidate.mu.Lock()
+		candidate.AuthFailureCount = 1
+		candidate.AuthInvalid = true
+		candidate.TemporaryUnavailableUntil = nil
+		candidate.LastFailureReason = "auth_invalid"
+		candidate.LastFailureAt = cloneTimePtr(&now)
+		candidate.mu.Unlock()
+	}
+	log.Printf("[health] marked login %s auth invalid across %d workspace(s)", acc.UserEmail, len(affected))
+
+	if accountsDir != "" {
+		for _, candidate := range affected {
+			if err := saveAccountFile(accountsDir, candidate); err != nil {
+				log.Printf("[health] persist auth-invalid %s workspace=%s failed: %v",
+					candidate.UserEmail, candidate.ShortSpaceID(), err)
+			}
+		}
+	}
+	return true
 }
 
 func (p *AccountPool) ClearTemporaryUnavailable(acc *Account) {
@@ -864,10 +894,11 @@ func (p *AccountPool) ClearTemporaryUnavailable(acc *Account) {
 	}
 	acc.mu.Lock()
 	acc.TemporaryUnavailableUntil = nil
-	acc.LastFailureReason = ""
-	acc.LastFailureAt = nil
-	acc.AuthFailureCount = 0
-	acc.AuthInvalid = false
+	if !acc.AuthInvalid {
+		acc.LastFailureReason = ""
+		acc.LastFailureAt = nil
+		acc.AuthFailureCount = 0
+	}
 	acc.mu.Unlock()
 }
 
@@ -988,11 +1019,16 @@ func (p *AccountPool) applyQuotaInfo(acc *Account, info *QuotaInfo) quotaApplyRe
 		}
 		acc.QuotaExhaustedAt = nil
 		acc.PermanentlyExhausted = false
-		acc.TemporaryUnavailableUntil = nil
-		acc.LastFailureReason = ""
-		acc.LastFailureAt = nil
-		acc.AuthFailureCount = 0
-		acc.AuthInvalid = false
+		// Quota eligibility is not proof that inference authentication works:
+		// Notion can keep this endpoint available while the AI endpoint returns
+		// 401. Preserve a confirmed auth-invalid state until new credentials
+		// are imported.
+		if !acc.AuthInvalid {
+			acc.TemporaryUnavailableUntil = nil
+			acc.LastFailureReason = ""
+			acc.LastFailureAt = nil
+			acc.AuthFailureCount = 0
+		}
 		return res
 	}
 	res.NowExhausted = true
@@ -1386,6 +1422,7 @@ func (p *AccountPool) GetRefreshStatus() map[string]interface{} {
 		"refreshing": p.refreshing,
 		"done":       p.refreshDone,
 		"total":      p.refreshTotal,
+		"failed":     p.refreshFailed,
 	}
 	if p.lastRefreshAt != nil {
 		status["last_refresh_at"] = p.lastRefreshAt.Format(time.RFC3339)
@@ -1428,8 +1465,22 @@ func (p *AccountPool) beginRefresh() (func(), bool) {
 	}
 	p.refreshing = true
 	p.refreshDone = 0
+	p.refreshFailed = 0
 	p.refreshMu.Unlock()
 	return releaseMutation, true
+}
+
+func (p *AccountPool) recordRefreshAuthFailure(acc *Account, err error) bool {
+	if acc == nil || err == nil {
+		return false
+	}
+	if failure := classifyAccountAttemptError(err); failure.Reason == "auth_error" {
+		if !p.isAuthInvalid(acc) {
+			p.RecordAuthFailure(acc, 0)
+		}
+		return true
+	}
+	return false
 }
 
 func (p *AccountPool) refreshAll(accountsDir string, releaseMutation func()) {
@@ -1460,7 +1511,6 @@ func (p *AccountPool) refreshAll(accountsDir string, releaseMutation func()) {
 	var (
 		disabledNow   atomic.Int64
 		recoveredNow  atomic.Int64
-		failedChecks  atomic.Int64
 		workspaceLost atomic.Int64
 	)
 	var wg sync.WaitGroup
@@ -1472,12 +1522,28 @@ func (p *AccountPool) refreshAll(accountsDir string, releaseMutation func()) {
 		go func(acc *Account) {
 			defer wg.Done()
 			defer func() { <-sem }() // release semaphore slot
+			checkFailed := false
+			defer func() {
+				p.refreshMu.Lock()
+				p.refreshDone++
+				if checkFailed {
+					p.refreshFailed++
+				}
+				p.refreshMu.Unlock()
+			}()
+			if p.isAuthInvalid(acc) {
+				return
+			}
 
 			// 1. Refresh workspace accessibility and plan first. Quota policy
 			// must use the current plan, not the value captured at import time.
 			workspace, err := workspaceProbe(acc)
 			if err != nil {
+				checkFailed = true
 				log.Printf("[refresh] %s (%s): workspace probe failed: %v", acc.UserName, acc.UserEmail, err)
+				if p.recordRefreshAuthFailure(acc, err) {
+					return
+				}
 			} else {
 				prev, changed, planChanged := p.applyWorkspaceProfile(acc, workspace)
 				if planChanged {
@@ -1497,8 +1563,11 @@ func (p *AccountPool) refreshAll(accountsDir string, releaseMutation func()) {
 			quotaGeneration := p.nextQuotaGeneration(acc)
 			info, err := quotaFetcher(acc)
 			if err != nil {
+				checkFailed = true
 				log.Printf("[refresh] %s (%s): quota check failed: %v", acc.UserName, acc.UserEmail, err)
-				failedChecks.Add(1)
+				if p.recordRefreshAuthFailure(acc, err) {
+					return
+				}
 			} else {
 				res, applied := p.applyQuotaInfoIfCurrent(acc, info, quotaGeneration)
 				if !applied {
@@ -1537,15 +1606,15 @@ func (p *AccountPool) refreshAll(accountsDir string, releaseMutation func()) {
 			// 3. Fetch models
 			models, err := modelsFetcher(acc)
 			if err != nil {
+				checkFailed = true
 				log.Printf("[refresh] %s (%s): model fetch failed: %v", acc.UserName, acc.UserEmail, err)
+				if p.recordRefreshAuthFailure(acc, err) {
+					return
+				}
 			} else if len(models) > 0 {
 				acc.setModels(models)
 				log.Printf("[refresh] %s (%s): fetched %d models", acc.UserName, acc.UserEmail, len(models))
 			}
-
-			p.refreshMu.Lock()
-			p.refreshDone++
-			p.refreshMu.Unlock()
 		}(acc)
 	}
 	wg.Wait()
@@ -1557,7 +1626,7 @@ func (p *AccountPool) refreshAll(accountsDir string, releaseMutation func()) {
 
 	available := p.AvailableCount()
 	log.Printf("[refresh] complete: %d/%d available, disabled=%d, recovered=%d, no_workspace=%d, check_errors=%d",
-		available, len(accs), disabledNow.Load(), recoveredNow.Load(), workspaceLost.Load(), failedChecks.Load())
+		available, len(accs), disabledNow.Load(), recoveredNow.Load(), workspaceLost.Load(), p.GetRefreshStatus()["failed"])
 }
 
 // normalizeModelName converts display name like "GPT-5.2" to a user-friendly alias like "gpt-5.2"
@@ -1773,6 +1842,9 @@ func saveAccountFile(dir string, acc *Account) error {
 		if accountIDFromRaw(existing) != accountID {
 			return fmt.Errorf("account identity changed while saving %s", acc.UserEmail)
 		}
+		if latestToken, _ := existing["token_v2"].(string); acc.TokenV2 != "" && latestToken != acc.TokenV2 {
+			return fmt.Errorf("account credential changed while saving %s", acc.UserEmail)
+		}
 		// Migrate legacy files only after the locked re-read so the new field
 		// is not lost and a same-path replacement cannot inherit another
 		// account's refreshed state.
@@ -1815,6 +1887,7 @@ func saveAccountFile(dir string, acc *Account) error {
 	existing["plan_type"] = state.Profile.PlanType
 	writePersonalInstructionsState(existing, state.PersonalInstructions)
 	writeManualDisabledState(existing, state.Health.ManuallyDisabled)
+	writePersistedHealthState(existing, state.Health)
 	if state.Profile.WorkspaceCheckedAt != nil {
 		existing["space_count"] = state.Profile.SpaceCount
 		existing["workspace_checked_at"] = state.Profile.WorkspaceCheckedAt.Format(time.RFC3339)
@@ -2163,6 +2236,27 @@ func loadPersistedWorkspace(data []byte, acc *Account) {
 	}
 }
 
+// loadPersistedHealth restores only durable login failures. Temporary network,
+// rate-limit, and upstream cooldowns deliberately disappear on restart.
+func loadPersistedHealth(data []byte, acc *Account) {
+	var raw struct {
+		AuthInvalid       bool   `json:"auth_invalid"`
+		LastFailureAt     string `json:"last_failure_at"`
+		LastFailureReason string `json:"last_failure_reason"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil || !raw.AuthInvalid {
+		return
+	}
+	acc.AuthInvalid = true
+	acc.AuthFailureCount = 1
+	acc.LastFailureReason = "auth_invalid"
+	if raw.LastFailureAt != "" {
+		if failedAt, err := time.Parse(time.RFC3339, raw.LastFailureAt); err == nil {
+			acc.LastFailureAt = &failedAt
+		}
+	}
+}
+
 // loadPersistedQuotaInfo parses the persisted quota_info (snake_case keys) from raw account JSON.
 // Returns nil if quota_info is not present or cannot be parsed.
 func loadPersistedQuotaInfo(data []byte) *QuotaInfo {
@@ -2237,20 +2331,22 @@ func basicRemaining(info *QuotaInfo) int {
 // Higher = more preferred when picking the "best" account.
 //
 //   - Unknown quota: -1 (fallback until refreshed).
-//   - Included-AI paid plans: 2.
-//   - Other eligible trial accounts: 1.
+//   - Included-AI paid plans: 100 + their product-tier rank.
+//   - Other eligible trial accounts: 1 + their product-tier rank.
 func accountQuotaPriority(acc *Account) int {
 	if acc == nil {
 		return -1
 	}
-	if planIncludesFullNotionAI(acc.planTypeSnapshot()) {
-		return 2
+	plan := acc.planTypeSnapshot()
+	planPriority := workspacePlanPriority(plan)
+	if planIncludesFullNotionAI(plan) {
+		return 100 + planPriority
 	}
 	quota := acc.quotaInfoSnapshot()
 	if quota == nil {
 		return -1
 	}
-	return 1
+	return 1 + planPriority
 }
 
 func generateUUIDv4() string {

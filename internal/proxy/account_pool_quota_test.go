@@ -36,6 +36,23 @@ func TestNextBestPrefersFullNotionAIPlan(t *testing.T) {
 	}
 }
 
+func TestNextBestUsesWorkspacePlanHierarchy(t *testing.T) {
+	team := &Account{UserEmail: "team@example.com", PlanType: "team"}
+	business := &Account{UserEmail: "business@example.com", PlanType: "business"}
+	enterprise := &Account{UserEmail: "enterprise@example.com", PlanType: "enterprise"}
+	pool := newPool(team, business, enterprise)
+
+	if got := pool.NextBest(); got != enterprise {
+		t.Fatalf("expected Enterprise first, got %#v", got)
+	}
+	if got := pool.NextBestExcluding(map[*Account]bool{enterprise: true}); got != business {
+		t.Fatalf("expected Business after Enterprise, got %#v", got)
+	}
+	if got := pool.NextBestExcluding(map[*Account]bool{enterprise: true, business: true}); got != team {
+		t.Fatalf("expected Team after Business, got %#v", got)
+	}
+}
+
 func TestNextBestExcludingUsesServiceTiers(t *testing.T) {
 	a := &Account{
 		UserEmail: "a@example.com",
@@ -368,8 +385,8 @@ func TestRefreshAccountQuotaCachedTeamIgnoresLegacyBasicEligibility(t *testing.T
 	if calls.Load() != 0 {
 		t.Fatalf("included-AI plan made %d synchronous quota call(s)", calls.Load())
 	}
-	if got := accountQuotaPriority(&Account{PlanType: "team"}); got != 2 {
-		t.Fatalf("Team without cached quota priority=%d, want 2", got)
+	if got := accountQuotaPriority(&Account{PlanType: "team"}); got != 130 {
+		t.Fatalf("Team without cached quota priority=%d, want 130", got)
 	}
 }
 
@@ -479,6 +496,94 @@ func TestRefreshAllStopsIgnoringLegacyQuotaAfterPlanDowngrade(t *testing.T) {
 	}
 	if !pool.isQuotaExhausted(acc) {
 		t.Fatal("downgraded complimentary plan still ignored exhausted V1 state")
+	}
+}
+
+func TestRefreshAllStopsAtFirst401AndReportsFailedAccount(t *testing.T) {
+	originalQuotaFetcher := quotaFetcher
+	originalModelsFetcher := modelsFetcher
+	originalWorkspaceProbe := workspaceProbe
+	t.Cleanup(func() {
+		quotaFetcher = originalQuotaFetcher
+		modelsFetcher = originalModelsFetcher
+		workspaceProbe = originalWorkspaceProbe
+	})
+
+	tests := []struct {
+		name          string
+		workspaceErr  error
+		quotaErr      error
+		modelsErr     error
+		wantWorkspace int32
+		wantQuota     int32
+		wantModels    int32
+	}{
+		{
+			name:          "workspace endpoint",
+			workspaceErr:  errors.New("loadUserContent API error 401: unauthorized"),
+			wantWorkspace: 1,
+		},
+		{
+			name:          "quota endpoint",
+			quotaErr:      errors.New("V1 API error 401: unauthorized"),
+			wantWorkspace: 1,
+			wantQuota:     1,
+		},
+		{
+			name:          "models endpoint",
+			modelsErr:     errors.New("notion API error 401: unauthorized"),
+			wantWorkspace: 1,
+			wantQuota:     1,
+			wantModels:    1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var workspaceCalls, quotaCalls, modelCalls atomic.Int32
+			workspaceProbe = func(*Account) (WorkspaceProbeResult, error) {
+				workspaceCalls.Add(1)
+				if tt.workspaceErr != nil {
+					return WorkspaceProbeResult{}, tt.workspaceErr
+				}
+				return WorkspaceProbeResult{Count: 1}, nil
+			}
+			quotaFetcher = func(*Account) (*QuotaInfo, error) {
+				quotaCalls.Add(1)
+				if tt.quotaErr != nil {
+					return nil, tt.quotaErr
+				}
+				return &QuotaInfo{IsEligible: true}, nil
+			}
+			modelsFetcher = func(*Account) ([]ModelEntry, error) {
+				modelCalls.Add(1)
+				if tt.modelsErr != nil {
+					return nil, tt.modelsErr
+				}
+				return []ModelEntry{{ID: "model-id", Name: "Model"}}, nil
+			}
+
+			acc := &Account{UserEmail: "expired@example.com", UserID: "user-1"}
+			pool := newPool(acc)
+			pool.RefreshAll("")
+
+			if got := workspaceCalls.Load(); got != tt.wantWorkspace {
+				t.Fatalf("workspace calls=%d want=%d", got, tt.wantWorkspace)
+			}
+			if got := quotaCalls.Load(); got != tt.wantQuota {
+				t.Fatalf("quota calls=%d want=%d", got, tt.wantQuota)
+			}
+			if got := modelCalls.Load(); got != tt.wantModels {
+				t.Fatalf("model calls=%d want=%d", got, tt.wantModels)
+			}
+			if !pool.isAuthInvalid(acc) {
+				t.Fatal("first explicit 401 should mark the login auth-invalid")
+			}
+			status := pool.GetRefreshStatus()
+			if got := status["failed"]; got != 1 {
+				t.Fatalf("refresh failed=%#v want=1", got)
+			}
+		})
 	}
 }
 

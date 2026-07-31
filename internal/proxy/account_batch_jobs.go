@@ -19,6 +19,7 @@ const (
 	AccountBatchDelete          = "delete"
 	AccountBatchDeleteMissing   = "delete_missing_personal_instructions"
 	AccountBatchDeleteExhausted = "delete_exhausted"
+	AccountBatchDeleteNoSpace   = "delete_no_workspace"
 
 	accountBatchHistoryLimit = 20
 	accountBatchMaxAccounts  = 20000
@@ -163,7 +164,8 @@ func normalizeAccountBatchAction(action string) string {
 	action = strings.ToLower(strings.TrimSpace(action))
 	switch action {
 	case AccountBatchCheckPersonal, AccountBatchDisable, AccountBatchEnable,
-		AccountBatchDelete, AccountBatchDeleteMissing, AccountBatchDeleteExhausted:
+		AccountBatchDelete, AccountBatchDeleteMissing, AccountBatchDeleteExhausted,
+		AccountBatchDeleteNoSpace:
 		return action
 	default:
 		return ""
@@ -390,6 +392,30 @@ func (m *AccountBatchManager) execute(action string, account *Account) accountBa
 			return accountBatchExecution{status: "failed", message: deleteErr.Error()}
 		}
 		return accountBatchExecution{status: "success", message: "已删除用完试用额度的账号"}
+	case AccountBatchDeleteNoSpace:
+		workspace, err := workspaceProbe(account)
+		if err != nil {
+			m.pool.recordRefreshAuthFailure(account, err)
+			return accountBatchExecution{status: "failed", message: truncateForLog(err.Error(), 300)}
+		}
+		m.pool.applyWorkspaceProfile(account, workspace)
+		if workspace.Count > 0 {
+			if err := saveAccountFile(m.accountsDir, account); err != nil {
+				return accountBatchExecution{status: "failed", message: err.Error()}
+			}
+			return accountBatchExecution{status: "skipped", message: "实时复核后已有可访问工作区，已保留"}
+		}
+		account.EnsureAccountID()
+		var deleteErr error
+		if account.AccountID == "" {
+			deleteErr = deleteAccountByIdentity(m.pool, m.accountsDir, account.UserEmail, account.TokenV2)
+		} else {
+			deleteErr = deleteAccountByAccountIdentity(m.pool, m.accountsDir, account.AccountID, account.UserEmail, account.TokenV2)
+		}
+		if deleteErr != nil {
+			return accountBatchExecution{status: "failed", message: deleteErr.Error()}
+		}
+		return accountBatchExecution{status: "success", message: "实时确认无可访问工作区，已删除"}
 	default:
 		return accountBatchExecution{status: "failed", message: "未知操作"}
 	}

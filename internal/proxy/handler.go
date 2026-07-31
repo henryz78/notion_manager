@@ -611,6 +611,26 @@ func planIncludesFullNotionAI(plan string) bool {
 	}
 }
 
+// workspacePlanPriority is the shared deterministic workspace preference used
+// by discovery, routing, and dashboard ordering. It reflects product tiers,
+// not private credit counters.
+func workspacePlanPriority(plan string) int {
+	switch strings.ToLower(strings.TrimSpace(plan)) {
+	case "enterprise":
+		return 50
+	case "business":
+		return 40
+	case "team":
+		return 30
+	case "plus", "personal_pro":
+		return 20
+	case "personal", "free":
+		return 10
+	default:
+		return 0
+	}
+}
+
 // isFreePlan is retained as the internal complimentary/trial predicate used by
 // failover code. Private Premium credit fields are deliberately not considered:
 // they are diagnostics, not an authoritative workspace-plan identifier.

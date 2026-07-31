@@ -107,6 +107,7 @@ export interface RefreshStatus {
   refreshing: boolean
   done: number
   total: number
+  failed?: number
   last_refresh_at?: string
   error?: string
 }

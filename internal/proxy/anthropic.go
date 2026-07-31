@@ -1037,8 +1037,9 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					if selection == 0 {
 						acc = pool.NextForResearch()
 					} else {
-						// Research-mode fallback also rotates through the pool.
-						acc = pool.NextExcluding(tried)
+						// Research-mode failover keeps the same product-tier
+						// preference among accounts not yet tried.
+						acc = pool.NextBestExcluding(tried)
 					}
 				} else if selection == 0 {
 					// New-conversation routing prefers included-AI plans without

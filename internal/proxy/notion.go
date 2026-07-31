@@ -2291,13 +2291,9 @@ func decodeNotionWorkspaceMetadata(raw json.RawMessage, fallbackID string) (noti
 func workspacePreference(metadata notionWorkspaceMetadata) int {
 	score := 0
 	if metadata.AIEnabled {
-		score += 100
+		score += 1000
 	}
-	if planIncludesFullNotionAI(metadata.PlanType) {
-		score += 20
-	} else if isComplimentaryPlanType(metadata.PlanType) {
-		score += 10
-	}
+	score += workspacePlanPriority(metadata.PlanType)
 	return score
 }
 

@@ -198,7 +198,7 @@ func matchAccountQuery(a map[string]interface{}, qLower string) bool {
 //  3. Auth-invalid accounts to the bottom.
 //  4. Accounts with no accessible workspace to the bottom.
 //  5. Quota-exhausted accounts to the bottom.
-//  6. Included-AI paid plans, then trial plans.
+//  6. Enterprise, Business, Team, Plus, then Personal/Free.
 //  7. Stable fallback by name (lower-cased). Private quota counters are not
 //     used for ordering because their public semantics are undocumented.
 func sortAccountDetails(accounts []map[string]interface{}) {
@@ -233,10 +233,7 @@ func sortAccountDetails(accounts []map[string]interface{}) {
 }
 
 func notionAITierMap(a map[string]interface{}) int {
-	if planIncludesFullNotionAI(mapString(a, "plan")) {
-		return 1
-	}
-	return 0
+	return workspacePlanPriority(mapString(a, "plan"))
 }
 
 // paginateAccounts returns the slice [page*pageSize : page*pageSize+pageSize].

@@ -187,7 +187,8 @@ Account cards expose persistent cross-page selection. `GET
 /admin/accounts/selection` returns the emails for the active query/status
 filter, enabling true select-all without exposing account tokens. Selected
 account work uses `/admin/account-batch-jobs`: check, disable, enable, delete,
-delete missing-personal-instructions, and exhausted-trial cleanup. Jobs default
+delete missing-personal-instructions, exhausted-trial cleanup, and live-rechecked
+no-workspace cleanup. Jobs default
 to concurrency 10 (server cap 20), report live step progress, preserve the last
 20 snapshots in `accounts/.account_batch_jobs.json`, restore after browser
 refresh, and allow failed-only retry. A service restart marks in-flight work as
@@ -213,6 +214,9 @@ worker pools.
 
 ### Dashboard Navigation & Version
 
+- `#dashboard` is the default operational overview: pool health, quota
+  diagnostics, API traffic, actionable account issues, and key runtime
+  settings.
 - `#accounts` is the account-pool page: summary, quota diagnostics, actions, search, cards, and pagination.
 - `#settings` is the settings/history page: API connection details, proxy, feature toggles, request history, registration jobs, and version details.
 - The Go dashboard handler injects `<meta name="app-version">`; render its short form in the header and preserve the full value in the title.
@@ -223,9 +227,11 @@ worker pools.
 - All component code lives in `App.tsx` (single-file for now; split when it grows)
 - No external UI library — TailwindCSS utility classes only
 - Responsive: 5-col summary grid → 2-col on tablet → 1-col on mobile
-- Account cards are sorted server-side by health, then included-AI workspace
-  plan (Team/Business/Enterprise), then stable account name. Private V2 credit
+- Account cards are sorted server-side by health, then workspace plan
+  (Enterprise > Business > Team > Plus/Personal/Free), then stable account name. Private V2 credit
   fields are diagnostic-only and never participate in plan detection or ranking.
+- Workspaces sharing one Notion login render as one normal full card with a
+  floating workspace switcher; the switcher must not stretch neighboring cards.
 - Search is debounced 250ms and forwarded to the server as `?q=`; the
   server filters across all accounts on email/name/plan/workspace
 - Pagination: 20 cards per page, fetched on demand (`?page=&page_size=`)

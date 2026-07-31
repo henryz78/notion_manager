@@ -43,19 +43,12 @@ func classifyAccountAttemptError(err error) accountAttemptFailure {
 		strings.Contains(msg, "unexpected eof") {
 		return accountAttemptFailure{Retryable: true, Reason: "network_error"}
 	}
-	if strings.Contains(msg, "unauthorized") ||
-		strings.Contains(msg, "forbidden") ||
-		strings.Contains(msg, "invalid token") ||
-		strings.Contains(msg, "token_v2") {
-		return accountAttemptFailure{Retryable: true, Reason: "auth_error"}
-	}
-	if strings.Contains(msg, "rate limit") || strings.Contains(msg, "too many requests") {
-		return accountAttemptFailure{Retryable: true, Reason: "rate_limited"}
-	}
 	if code, ok := notionAPIStatusCode(msg); ok {
 		switch {
-		case code == 401 || code == 403:
+		case code == 401:
 			return accountAttemptFailure{Retryable: true, Reason: "auth_error"}
+		case code == 403:
+			return accountAttemptFailure{Retryable: true, Reason: "permission_denied"}
 		case code == 429:
 			return accountAttemptFailure{Retryable: true, Reason: "rate_limited"}
 		case code >= 500 && code <= 599:
@@ -64,11 +57,28 @@ func classifyAccountAttemptError(err error) accountAttemptFailure {
 			return accountAttemptFailure{Retryable: false, Reason: "api_error"}
 		}
 	}
+	if strings.Contains(msg, "unauthorized") ||
+		strings.Contains(msg, "invalid token") {
+		return accountAttemptFailure{Retryable: true, Reason: "auth_suspected"}
+	}
+	if strings.Contains(msg, "forbidden") ||
+		strings.Contains(msg, "permission denied") {
+		return accountAttemptFailure{Retryable: true, Reason: "permission_denied"}
+	}
+	if strings.Contains(msg, "rate limit") || strings.Contains(msg, "too many requests") {
+		return accountAttemptFailure{Retryable: true, Reason: "rate_limited"}
+	}
 	return accountAttemptFailure{Retryable: false, Reason: "api_error"}
 }
 
 func notionAPIStatusCode(msg string) (int, bool) {
-	for _, marker := range []string{"notion api error ", "notion researcher api error "} {
+	for _, marker := range []string{
+		"notion api error ",
+		"notion researcher api error ",
+		"loadusercontent api error ",
+		"v1 api error ",
+		"api error ",
+	} {
 		idx := strings.Index(msg, marker)
 		if idx < 0 {
 			continue

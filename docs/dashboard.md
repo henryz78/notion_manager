@@ -23,8 +23,9 @@ Login uses client-side SHA256(salt + password) so the plaintext password never t
 
 ## Page layout
 
-The dashboard header now switches between two focused pages:
+The dashboard header switches between three focused pages:
 
+- **Dashboard** — pool health, quota signals, API traffic, actionable issues, and runtime configuration
 - **Accounts** — pool summary, quota diagnostics, refresh/add/register/cleanup actions, search, and account cards
 - **Settings & history** — API key/base URL, global proxy, feature toggles, request history, registration jobs, and the running build version
 
@@ -38,15 +39,17 @@ version is also available in the `X-Notion-Manager-Version` response header on
 `/dashboard/` lists every account in the pool with:
 
 - Email, plan type, workspace
+- Workspaces from one Notion login are shown as one full account card with a workspace switcher. The default workspace prefers Enterprise → Business → Team → Plus/Personal/Free
 - Private-API diagnostic counters (basic / premium / space / user / research), clearly labeled as non-public schema
 - Discovered models, last-checked timestamp
 - Default Notion Agent personal-instructions status: configured, missing, failed, or not checked
 - Per-row actions: **Open proxy**, **Copy token**, **Disable/enable account**, **Delete account**
 - Filter by available, disabled, exhausted, invalid-cookie, no-workspace, temporarily unavailable, or personal-instructions state. `GET /admin/accounts/selection` returns only emails matching the current search/filter for true select-all across every page; it never returns tokens
 - Account checkboxes support cross-page selection. Bulk actions: copy emails, check selected personal instructions, disable, enable, delete, and clear selection
-- Checks, enable/disable, deletion, missing-instructions cleanup, and exhausted-trial cleanup use `/admin/account-batch-jobs`. Jobs run with 10 workers by default (maximum 20), expose live progress, survive browser refresh, and allow retrying failed items
+- Checks, enable/disable, deletion, missing-instructions cleanup, exhausted-trial cleanup, and no-workspace cleanup use `/admin/account-batch-jobs`. Jobs run with 10 workers by default (maximum 20), expose live progress, survive browser refresh, and allow retrying failed items
 - Only one pool-wide batch job may run at a time. A second dashboard tab receives and displays the existing job instead of starting duplicate mutations
 - The personal-instructions probe reads only whether a page is bound; it never loads or stores the page ID or instruction text. Missing-instructions cleanup re-checks each account and retains probe failures
+- No-workspace cleanup re-probes every candidate immediately before deletion and keeps recovered accounts or probe failures
 - Bulk cleanup for Free / Plus accounts explicitly disabled after exhausting complimentary AI responses. It requires confirmation and excludes Business / Enterprise, temporary failures, invalid cookies, and no-workspace accounts
 
 Manual disable persists `disabled: true` in the matching account JSON. The
@@ -109,8 +112,8 @@ Editable knobs are persisted into the active config file: local launches use
 
 ## Opening the local Notion proxy
 
-1. Click the best account or a specific account in the dashboard
-2. The browser hits `/proxy/start?best=true` or `/proxy/start?email=<email>`
+1. Click the best account or a specific workspace card in the dashboard
+2. The browser hits `/proxy/start?best=true` or `/proxy/start?account_id=<account_id>`
 3. The server creates `np_session`, then redirects to `/ai`
 4. Notion HTML, API requests, assets, and realtime connections all flow through that account
 5. Accounts whose Notion workspace is missing return `409` instead of redirecting (the dashboard surfaces a "no workspace" badge so the user picks another account)
@@ -125,5 +128,5 @@ The reverse proxy auto-handles:
 ## Account ops
 
 - **Delete** — `DELETE /admin/accounts/{email}` removes the matching JSON file from `accounts/` and drops the live pool entry. Useful for retired accounts so they don't poison the picker
-- **Refresh** — `POST /admin/refresh` runs the quota / models check across the whole pool. The endpoint returns `started: false` if a refresh is already in flight
+- **Check account status** — `POST /admin/refresh` checks workspace access, the official quota signal, and the model list across the whole pool. A confirmed HTTP 401 from any check immediately disables every workspace that shares that login and persists across restarts; quota/model success cannot clear it. Network, 403, 429, and 5xx failures keep the prior state and are reported as incomplete checks. The endpoint returns `started: false` if a refresh is already in flight
 - **Settings** — `PUT /admin/settings` is idempotent and persists to the active config file via YAML node manipulation (so comments survive)

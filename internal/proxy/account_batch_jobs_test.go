@@ -215,3 +215,54 @@ func TestHandleAccountBatchJobsAcceptsMixedIDsAndLegacyEmails(t *testing.T) {
 		t.Fatalf("job=%+v", finished)
 	}
 }
+
+func TestDeleteNoWorkspaceBatchRechecksBeforeDeleting(t *testing.T) {
+	originalWorkspaceProbe := workspaceProbe
+	t.Cleanup(func() { workspaceProbe = originalWorkspaceProbe })
+
+	dir := t.TempDir()
+	recovered := &Account{
+		TokenV2:   "recovered-token",
+		UserID:    "recovered-user",
+		UserEmail: "recovered@example.com",
+		SpaceID:   "recovered-space",
+	}
+	stillMissing := &Account{
+		TokenV2:   "missing-token",
+		UserID:    "missing-user",
+		UserEmail: "missing@example.com",
+		SpaceID:   "missing-space",
+	}
+	for _, account := range []*Account{recovered, stillMissing} {
+		if _, err := SaveAccountToFile(account, dir); err != nil {
+			t.Fatalf("save %s: %v", account.UserEmail, err)
+		}
+	}
+	workspaceProbe = func(account *Account) (WorkspaceProbeResult, error) {
+		if account == recovered {
+			return WorkspaceProbeResult{Count: 1, PlanType: "business", AIEnabled: true}, nil
+		}
+		return WorkspaceProbeResult{Count: 0}, nil
+	}
+
+	pool := NewAccountPool()
+	pool.accounts = []*Account{recovered, stillMissing}
+	manager, err := NewAccountBatchManager(pool, dir, "")
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	job, err := manager.Start(AccountBatchDeleteNoSpace, []string{recovered.AccountID, stillMissing.AccountID}, 2)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	finished := waitForAccountBatchJob(t, manager, job.ID)
+	if finished.Succeeded != 1 || finished.Skipped != 1 || finished.Failed != 0 {
+		t.Fatalf("unexpected cleanup result: %+v", finished)
+	}
+	if pool.FindByAccountID(recovered.AccountID) == nil {
+		t.Fatal("recovered workspace was deleted")
+	}
+	if got := pool.FindByAccountID(stillMissing.AccountID); got != nil {
+		t.Fatalf("confirmed no-workspace account was retained: %#v", got)
+	}
+}

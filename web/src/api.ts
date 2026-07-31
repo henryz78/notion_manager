@@ -475,6 +475,7 @@ export type AccountBatchJobAction =
   | 'delete'
   | 'delete_missing_personal_instructions'
   | 'delete_exhausted'
+  | 'delete_no_workspace'
 
 export interface AccountBatchJobStep {
   account_id?: string

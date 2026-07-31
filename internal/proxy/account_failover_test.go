@@ -14,10 +14,14 @@ func TestClassifyAccountAttemptErrorRetryableStatuses(t *testing.T) {
 		reason string
 	}{
 		{name: "auth 401", err: errors.New("notion API error 401: unauthorized"), reason: "auth_error"},
-		{name: "auth 403", err: errors.New("notion API error 403: forbidden"), reason: "auth_error"},
+		{name: "workspace auth 401", err: errors.New("loadUserContent API error 401: unauthorized"), reason: "auth_error"},
+		{name: "quota auth 401", err: errors.New("V1 API error 401: unauthorized"), reason: "auth_error"},
+		{name: "researcher auth 401", err: errors.New("notion researcher API error 401: unauthorized"), reason: "auth_error"},
+		{name: "permission 403", err: errors.New("notion API error 403: forbidden"), reason: "permission_denied"},
 		{name: "rate limit", err: errors.New("notion API error 429: rate limited"), reason: "rate_limited"},
 		{name: "upstream unavailable", err: errors.New("notion API error 503: service unavailable"), reason: "upstream_5xx"},
 		{name: "network", err: errors.New("send request: connection reset by peer"), reason: "network_error"},
+		{name: "unstructured unauthorized", err: errors.New("upstream said unauthorized"), reason: "auth_suspected"},
 	}
 
 	for _, tt := range tests {
@@ -54,7 +58,7 @@ func TestRequestSpecificFailuresDoNotQuarantineAccounts(t *testing.T) {
 			t.Fatalf("%s must not affect later requests", reason)
 		}
 	}
-	for _, reason := range []string{"auth_error", "rate_limited", "upstream_5xx", "network_error"} {
+	for _, reason := range []string{"auth_error", "auth_suspected", "permission_denied", "rate_limited", "upstream_5xx", "network_error"} {
 		if !shouldQuarantineAccountFailure(reason) {
 			t.Fatalf("%s should temporarily protect account selection", reason)
 		}
