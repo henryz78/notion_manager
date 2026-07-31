@@ -9,7 +9,7 @@
   --color-bg-input: #2f2f2f;
   --color-text-primary: #ebebea;
   --color-text-secondary: #9b9a97;
-  --color-text-muted: #5a5a5a;
+  --color-text-muted: #858481;
   --color-notion-blue: #2383e2;
   --color-notion-blue-hover: #1a73d4;
   --color-ok: #4dab9a;
@@ -30,6 +30,13 @@ body {
   color: var(--color-text-primary);
   line-height: 1.5;
   min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-notion-blue) 80%, white);
+  outline-offset: 2px;
 }
 
 ::-webkit-scrollbar {

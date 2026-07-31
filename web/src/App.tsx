@@ -575,8 +575,8 @@ function Header({ query, onQuery, onLogout, authRequired, activePage, onPageChan
   }, [])
 
   return (
-    <header className="sticky top-0 z-50 flex items-center gap-5 px-6 py-2.5 border-b border-border bg-bg-secondary/90 backdrop-blur-xl max-md:flex-wrap max-md:gap-2 max-md:px-3">
-      <div className="flex items-center gap-2.5 min-w-0 max-md:flex-1">
+    <header className="sticky top-0 z-50 flex items-center gap-5 px-6 py-2.5 border-b border-border bg-bg-secondary/95 backdrop-blur-xl max-md:flex-wrap max-md:gap-2 max-md:px-3 max-sm:py-2">
+      <div className="flex items-center gap-2.5 min-w-0 max-md:flex-1 max-sm:hidden">
         <div className="w-7 h-7 bg-[#333] rounded-md flex items-center justify-center text-sm font-extrabold text-white">N</div>
         <span className="text-[15px] font-semibold tracking-tight">
           notion-manager
@@ -589,7 +589,7 @@ function Header({ query, onQuery, onLogout, authRequired, activePage, onPageChan
           {displayVersion(version)}
         </span>
       </div>
-      <nav className="flex items-center rounded-lg bg-black/20 p-1 border border-white/[.05] max-md:order-2 max-md:w-full">
+      <nav className="flex items-center rounded-lg bg-black/20 p-1 border border-white/[.05] max-md:order-2 max-md:w-full max-sm:order-1">
         <button
           onClick={() => onPageChange('dashboard')}
           className={`inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-medium cursor-pointer border-none transition-colors max-md:flex-1 ${activePage === 'dashboard' ? 'bg-white/10 text-white shadow-sm' : 'bg-transparent text-text-muted hover:text-text-primary'}`}
@@ -609,7 +609,7 @@ function Header({ query, onQuery, onLogout, authRequired, activePage, onPageChan
           {t('header.settings')}
         </button>
       </nav>
-      <div className="flex items-center gap-3 ml-auto max-md:order-3 max-md:ml-0 max-md:w-full">
+      <div className="flex items-center gap-3 ml-auto max-md:order-3 max-md:ml-0 max-md:w-full max-sm:order-2 max-sm:gap-2 max-sm:justify-end">
         {activePage === 'accounts' && <div className="relative w-72 max-md:flex-1">
           <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
@@ -621,7 +621,7 @@ function Header({ query, onQuery, onLogout, authRequired, activePage, onPageChan
             placeholder={t('header.search_placeholder')}
             className="w-full py-1.5 pl-8 pr-10 bg-bg-input border border-border rounded-md text-[13px] text-text-primary outline-none focus:border-white/20 transition-colors placeholder:text-text-muted"
           />
-          <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] text-text-muted bg-bg-card border border-border rounded px-1.5 py-0.5">/</kbd>
+          <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[11px] text-text-muted bg-bg-card border border-border rounded px-1.5 py-0.5 max-sm:hidden">/</kbd>
         </div>}
         {authRequired && (
           <button
@@ -640,7 +640,7 @@ function Header({ query, onQuery, onLogout, authRequired, activePage, onPageChan
 
 function StatCard({ label, value, sub, color, icon }: { label: string; value: string | number; sub: string; color?: string; icon?: React.ReactNode }) {
   return (
-    <div className="px-6 py-5 max-sm:px-3 max-sm:py-3">
+    <div className="px-6 py-5 max-sm:px-3.5 max-sm:py-3">
       <div className="text-[11px] text-text-secondary uppercase tracking-wider mb-1 flex items-center gap-1.5">
         {icon}
         <span>{label}</span>
@@ -718,11 +718,11 @@ function TotalQuotaBar({ summary }: { summary?: AccountSummary | null }) {
   )
 
   return (
-    <div className="mb-5 space-y-3">
+    <div className="mb-5 space-y-3 max-sm:mb-3 max-sm:space-y-2">
       <div className="flex justify-between items-center">
         <span className="text-[11px] text-text-secondary uppercase tracking-wider flex items-center gap-1.5"><IconBarChart /> {t('stats.diagnostics')}</span>
         {totalPremiumLimit > 0 && (
-          <span className="text-[12px] text-text-muted tabular-nums">
+          <span className="text-[12px] text-text-muted tabular-nums max-sm:hidden">
             Premium balance <span className="text-[#7eb8ff] font-semibold">{fmt(totalPremiumBalance)}</span> · monthly limit {fmt(totalPremiumLimit)}
           </span>
         )}
@@ -735,7 +735,7 @@ function TotalQuotaBar({ summary }: { summary?: AccountSummary | null }) {
           <OverviewBar label="User raw" usage={totalUserUsage} limit={totalUserLimit} />
         </>
       )}
-      <div className="text-[10px] text-text-muted leading-relaxed">
+      <div className="text-[10px] text-text-muted leading-relaxed max-sm:hidden">
         {t('stats.diagnostics_note')}
       </div>
     </div>
@@ -1407,7 +1407,7 @@ function DashboardHome({
         </div>
       )}
 
-      <section className="grid grid-cols-4 border-y border-white/[.06] divide-x divide-white/[.06] mb-6 max-lg:grid-cols-2 max-lg:[&>*:nth-child(3)]:border-t max-lg:[&>*:nth-child(4)]:border-t max-sm:grid-cols-1 max-sm:divide-x-0 max-sm:[&>*]:border-t max-sm:[&>*:first-child]:border-t-0">
+      <section className="grid grid-cols-4 border-y border-white/[.06] divide-x divide-white/[.06] mb-6 max-lg:grid-cols-2 max-lg:[&>*:nth-child(3)]:border-t max-lg:[&>*:nth-child(4)]:border-t max-sm:grid-cols-2 max-sm:divide-x-0 max-sm:border-y-0 max-sm:gap-2 max-sm:[&>*]:rounded-lg max-sm:[&>*]:border max-sm:[&>*]:border-border max-sm:[&>*]:bg-bg-card">
         <StatCard
           label={t('dashboard.available_workspaces')}
           value={`${data.available} / ${data.total}`}
@@ -1535,7 +1535,7 @@ function DashboardHome({
               {t('api.request_history')} <IconArrowRight />
             </button>
           </div>
-          {lastSevenDays.length > 0 ? (
+          {lastSevenDays.length > 1 ? (
             <div className="mt-5">
               <div className="h-28 flex items-end gap-2 border-b border-white/[.06]">
                 {lastSevenDays.map(day => {
@@ -1564,6 +1564,18 @@ function DashboardHome({
               <div className="flex items-center gap-4 mt-3 text-[10px] text-text-muted">
                 <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-sm bg-notion-blue/70" />{t('dashboard.input_tokens')}</span>
                 <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-sm bg-[#9b72cf]/80" />{t('dashboard.output_tokens')}</span>
+              </div>
+            </div>
+          ) : lastSevenDays.length === 1 ? (
+            <div className="mt-5 h-28 rounded-md border border-white/[.06] bg-black/10 flex items-center justify-center text-center px-4">
+              <div>
+                <div className="text-2xl font-semibold text-notion-blue tabular-nums">{formatTokens(lastSevenDays[0].total)}</div>
+                <div className="text-[11px] text-text-secondary mt-1">
+                  {new Date(`${lastSevenDays[0].date}T00:00:00`).toLocaleDateString(i18n.language === 'zh' ? 'zh-CN' : 'en-US', { month: 'long', day: 'numeric' })}
+                </div>
+                <div className="text-[10px] text-text-muted mt-2">
+                  {t('dashboard.input_tokens')} {formatTokens(lastSevenDays[0].input)} · {t('dashboard.output_tokens')} {formatTokens(lastSevenDays[0].output)}
+                </div>
               </div>
             </div>
           ) : (
@@ -2371,7 +2383,7 @@ export default function App() {
 
         {/* Summary */}
         {activePage === 'accounts' && summary && (
-          <div className="grid grid-cols-5 divide-x divide-white/[.05] mb-6 max-lg:grid-cols-3 max-md:grid-cols-2 max-md:divide-x-0 max-sm:mb-4">
+          <div className="grid grid-cols-5 divide-x divide-white/[.05] mb-6 max-lg:grid-cols-3 max-md:grid-cols-2 max-md:divide-x-0 max-sm:gap-2 max-sm:mb-3 max-sm:[&>*]:rounded-lg max-sm:[&>*]:border max-sm:[&>*]:border-border max-sm:[&>*]:bg-bg-card max-sm:[&>*:last-child]:col-span-2">
             <StatCard
               label={t('stats.total_accounts')} value={data!.total}
               sub={accountSummaryParts}
@@ -2441,7 +2453,7 @@ export default function App() {
         )}
 
         {/* Actions */}
-        {activePage === 'accounts' && <div className="flex items-center gap-2.5 mb-5 flex-wrap max-sm:grid max-sm:grid-cols-2 max-sm:gap-2 max-sm:[&>button]:justify-center max-sm:[&>button]:px-2 max-sm:[&>button]:text-[12px]">
+        {activePage === 'accounts' && <div className="flex items-center gap-2.5 mb-5 flex-wrap max-sm:grid max-sm:grid-cols-2 max-sm:gap-2 max-sm:[&>button]:w-full max-sm:[&>button]:justify-center max-sm:[&>button]:px-3 max-sm:[&>button]:text-[12px] max-sm:[&>button:last-of-type]:col-span-2">
           <button
             onClick={openBestProxy}
             className="inline-flex items-center gap-1.5 px-4 py-2 bg-white hover:bg-white/90 text-[#111] rounded-md text-[13px] font-medium cursor-pointer transition-colors border-none"
@@ -2491,7 +2503,7 @@ export default function App() {
             <IconUserPlus size={13} /> {t('actions.register_account')}
           </button>
           {refreshTime && (
-            <span className="text-[11px] text-text-muted max-sm:col-span-2">
+            <span className="text-[11px] text-text-muted max-sm:hidden">
               {t('actions.updated_at', { time: refreshTime })}
               {refreshStatus?.last_refresh_at && !refreshStatus.refreshing && (
                 <> · {t('actions.quota_refreshed_at', { time: new Date(refreshStatus.last_refresh_at).toLocaleTimeString(i18n.language === 'zh' ? 'zh-CN' : 'en-US') })}</>
@@ -2506,8 +2518,8 @@ export default function App() {
               <h2 className="text-[18px] font-semibold text-text-primary">{t('api.settings_and_history')}</h2>
               <p className="text-[12px] text-text-muted mt-1">{t('api.settings_description')}</p>
             </div>
-            <div className="grid grid-cols-4 gap-3 max-xl:grid-cols-2 max-sm:grid-cols-1">
-              <div className="bg-bg-card border border-border rounded-lg p-4">
+            <div className="grid grid-cols-4 gap-3 max-xl:grid-cols-2 max-sm:grid-cols-2 max-sm:gap-2">
+              <div className="bg-bg-card border border-border rounded-lg p-4 max-sm:p-3">
                 <div className="flex items-center justify-between gap-2">
                   <div className="text-[11px] text-text-muted uppercase tracking-wider">{t('api.deployment_version')}</div>
                   <button
@@ -2535,19 +2547,19 @@ export default function App() {
               </div>
               <button
                 onClick={() => setRequestHistoryOpen(true)}
-                className="text-left bg-bg-card hover:bg-bg-card-hover border border-border rounded-lg p-4 cursor-pointer transition-colors"
+                className="text-left bg-bg-card hover:bg-bg-card-hover border border-border rounded-lg p-4 cursor-pointer transition-colors max-sm:p-3"
               >
                 <div className="flex items-center gap-2 text-[13px] font-medium"><IconActivity /> {t('api.request_history')}</div>
                 <div className="text-[11px] text-text-muted mt-2">{t('api.request_history_help')}</div>
               </button>
               <button
                 onClick={() => setHistoryOpen(true)}
-                className="text-left bg-bg-card hover:bg-bg-card-hover border border-border rounded-lg p-4 cursor-pointer transition-colors"
+                className="text-left bg-bg-card hover:bg-bg-card-hover border border-border rounded-lg p-4 cursor-pointer transition-colors max-sm:col-span-2 max-sm:p-3"
               >
                 <div className="flex items-center gap-2 text-[13px] font-medium"><IconHistory size={13} /> {t('api.register_history')}</div>
                 <div className="text-[11px] text-text-muted mt-2">{t('api.register_history_help')}</div>
               </button>
-              <div className="bg-bg-card border border-border rounded-lg p-4 min-w-0">
+              <div className="bg-bg-card border border-border rounded-lg p-4 min-w-0 max-sm:col-span-2 max-sm:p-3">
                 <div className="flex items-center gap-2 text-[13px] font-medium"><IconDatabase size={14} /> {t('api.data_backup')}</div>
                 <div className="text-[11px] text-text-muted mt-2 leading-relaxed">{t('api.data_backup_help')}</div>
                 <div className="text-[10px] text-warn mt-2">{t('api.data_backup_warning')}</div>
@@ -2826,7 +2838,7 @@ export default function App() {
             {t('common.selected', { count: selectedAccounts.size })}
             {selectedOnPage > 0 && selectedAccounts.size !== selectedOnPage ? t('common.selected_page', { count: selectedOnPage }) : ''}
           </span>
-          <div className="flex items-center gap-2 flex-wrap max-sm:grid max-sm:grid-cols-2 max-sm:w-full">
+          {selectedAccounts.size > 0 && <div className="flex items-center gap-2 flex-wrap max-sm:grid max-sm:grid-cols-2 max-sm:w-full">
             <button
               onClick={copySelectedEmails}
               disabled={selectedAccounts.size === 0 || batchBusy}
@@ -2869,7 +2881,7 @@ export default function App() {
             >
               {t('common.clear_selection')}
             </button>
-          </div>
+          </div>}
         </div>
 
         {/* Section Title */}
