@@ -422,14 +422,11 @@ func buildPartialContinuationContent(messages []ChatMessage) string {
 			if content.Len() > 0 {
 				content.WriteString("\n\n")
 			}
-			content.WriteString("TOOL_RESULT")
+			content.WriteString("Completed action result")
 			if message.Name != "" {
-				content.WriteString(" name=")
+				content.WriteString(" (")
 				content.WriteString(message.Name)
-			}
-			if message.ToolCallID != "" {
-				content.WriteString(" tool_call_id=")
-				content.WriteString(message.ToolCallID)
+				content.WriteString(")")
 			}
 			content.WriteString(":\n")
 			content.WriteString(message.Content)
@@ -441,7 +438,7 @@ func buildPartialContinuationContent(messages []ChatMessage) string {
 			if content.Len() > 0 {
 				content.WriteString("\n\n")
 			}
-			content.WriteString("USER:\n")
+			content.WriteString("Next user message:\n")
 			content.WriteString(userContent)
 		}
 	}

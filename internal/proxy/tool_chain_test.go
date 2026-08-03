@@ -76,6 +76,29 @@ func TestToolChoiceNoneBypassesInjection(t *testing.T) {
 	}
 }
 
+func TestForcedToolInjectionUsesSingleRequiredRouteContract(t *testing.T) {
+	messages := []ChatMessage{{Role: "user", Content: "what time is it"}}
+	tools := []Tool{
+		{Type: "function", Function: ToolFunction{Name: "action_1", Description: "unrelated", Parameters: map[string]interface{}{"type": "object"}}},
+		{Type: "function", Function: ToolFunction{Name: "action_2", Description: "get the current time", Parameters: map[string]interface{}{"type": "object"}}},
+	}
+
+	got := injectToolsIntoMessages(cloneChatMessages(messages), tools, map[string]interface{}{
+		"type":     "function",
+		"function": map[string]interface{}{"name": "action_2"},
+	})
+	if len(got) != 1 {
+		t.Fatalf("messages len = %d, want 1", len(got))
+	}
+	content := got[0].Content
+	if !strings.Contains(content, "exactly one label") {
+		t.Fatalf("forced tool did not use required-route framing: %s", content)
+	}
+	if !strings.Contains(content, "Label: action_2") || strings.Contains(content, "Label: action_1") {
+		t.Fatalf("forced tool list was not restricted to action_2: %s", content)
+	}
+}
+
 func TestToolProtocolPrefixState(t *testing.T) {
 	tests := []struct {
 		input     string

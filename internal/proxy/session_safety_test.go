@@ -82,9 +82,14 @@ func TestPartialContinuationContentIncludesToolResultsWithoutTools(t *testing.T)
 	}
 
 	content := buildPartialContinuationContent(messages)
-	for _, expected := range []string{"TOOL_RESULT", "call-1", "lookup", `{"value":42}`, "Use that result."} {
+	for _, expected := range []string{"Completed action result", "lookup", `{"value":42}`, "Use that result."} {
 		if !strings.Contains(content, expected) {
 			t.Fatalf("partial continuation omitted %q: %s", expected, content)
+		}
+	}
+	for _, protocolMarker := range []string{"TOOL_RESULT", "tool_call_id", "call-1"} {
+		if strings.Contains(content, protocolMarker) {
+			t.Fatalf("partial continuation leaked protocol marker %q: %s", protocolMarker, content)
 		}
 	}
 	if strings.Contains(content, "old question that must not be replayed") {

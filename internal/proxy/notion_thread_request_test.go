@@ -282,9 +282,14 @@ func TestCallInferencePartialTranscriptCarriesToolResultWithoutTools(t *testing.
 		t.Fatal(err)
 	}
 	transcript := string(encoded)
-	for _, expected := range []string{"TOOL_RESULT", "call-1", "lookup", "cobalt", "answer using that result"} {
+	for _, expected := range []string{"Completed action result", "lookup", "cobalt", "answer using that result"} {
 		if !strings.Contains(transcript, expected) {
 			t.Fatalf("partial transcript is missing %q: %s", expected, transcript)
+		}
+	}
+	for _, protocolMarker := range []string{"TOOL_RESULT", "tool_call_id", "call-1"} {
+		if strings.Contains(transcript, protocolMarker) {
+			t.Fatalf("partial transcript leaked protocol marker %q: %s", protocolMarker, transcript)
 		}
 	}
 	if strings.Contains(transcript, "look it up") {
@@ -409,6 +414,27 @@ func TestStableMetadataContinuesThreadWhenModelAndToolChoiceChange(t *testing.T)
 	}
 	assertWorkflowModelConfig(t, requests[0].Transcript, "workflow-model-first")
 	assertWorkflowModelConfig(t, requests[1].Transcript, "workflow-model-second")
+}
+
+func TestPartialContinuationDescribesToolResultWithoutProtocolMarkers(t *testing.T) {
+	messages := []ChatMessage{
+		{Role: "user", Content: "look up the value"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-secret", Function: ToolCallFunction{Name: "lookup", Arguments: `{}`}}}},
+		{Role: "tool", ToolCallID: "call-secret", Name: "lookup", Content: "VALUE_42"},
+		{Role: "user", Content: "now explain it"},
+	}
+
+	content := buildPartialContinuationContent(messages)
+	for _, marker := range []string{"VALUE_42", "lookup", "now explain it"} {
+		if !strings.Contains(content, marker) {
+			t.Fatalf("continuation dropped %q: %s", marker, content)
+		}
+	}
+	for _, protocolMarker := range []string{"TOOL_RESULT", "tool_call_id", "call-secret"} {
+		if strings.Contains(content, protocolMarker) {
+			t.Fatalf("continuation leaked protocol marker %q: %s", protocolMarker, content)
+		}
+	}
 }
 
 func TestAnthropicHandlerPreservesAgentRepliesAcrossContinuationAndAccountSwitch(t *testing.T) {

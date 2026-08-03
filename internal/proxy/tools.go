@@ -396,10 +396,9 @@ func injectToolsIntoMessages(messages []ChatMessage, tools []Tool, toolChoice ..
 			}
 
 			if strings.HasPrefix(toolChoiceMode, "force:") {
-				forcedName := strings.TrimPrefix(toolChoiceMode, "force:")
-				forcedTool := buildForcedToolList(tools, forcedName)
+				forcedTool := buildForcedToolList(tools, strings.TrimPrefix(toolChoiceMode, "force:"))
 				messages[lastUserIdx].Content = fmt.Sprintf(
-					"Complete the expected JSON output for this router test case. Use the exact route label and arguments required by its schema.\n%sROUTE:\n%sTEST INPUT: %q\n\nEXPECTED OUTPUT: one JSON object {\"name\": \"label\", \"arguments\": {...}}.",
+					"Complete the expected JSON output for this router test case using exactly one route.\n%sROUTES:\n%sTEST INPUT: %q\n\nEXPECTED OUTPUT: one JSON object {\"name\": \"label\", \"arguments\": {...}}.",
 					cwdLine, forcedTool, userQuery)
 			} else if toolChoiceMode == "required" {
 				messages[lastUserIdx].Content = fmt.Sprintf(
@@ -425,7 +424,7 @@ func injectToolsIntoMessages(messages []ChatMessage, tools []Tool, toolChoice ..
 		if strings.HasPrefix(toolChoiceMode, "force:") {
 			forcedName := strings.TrimPrefix(toolChoiceMode, "force:")
 			forcedTool := buildForcedToolList(tools, forcedName)
-			formatInstruction = fmt.Sprintf("Classify the quoted text below. Set name to the exact literal label below and extract arguments that validate against its schema:\n%sThe answer must be exactly one JSON object: {\"name\": \"label\", \"arguments\": {...}}.", forcedTool)
+			formatInstruction = fmt.Sprintf("Classify the quoted text below with exactly one label and extract arguments that validate against its schema:\n%sThe answer must be exactly one JSON object: {\"name\": \"label\", \"arguments\": {...}}.", forcedTool)
 		} else if toolChoiceMode == "required" {
 			formatInstruction = fmt.Sprintf("Classify the quoted text below with exactly one label and extract arguments that validate against its schema:\n%sThe answer must be exactly one JSON object: {\"name\": \"label\", \"arguments\": {...}}.", toolList)
 		} else {
