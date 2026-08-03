@@ -1045,10 +1045,12 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 				} else {
 					lease, leaseErr = pool.LeaseAccount(sessionAccount)
 					if errors.Is(leaseErr, ErrAllNotionLoginsBusy) {
-						log.Printf("[concurrency] stored Notion thread login is busy; replaying on another login")
-						invalidateSession("new_thread_account_switch")
-						lease = nil
-						leaseErr = nil
+						// The real Notion thread belongs to this login. A temporary
+						// concurrency limit must not silently migrate the conversation
+						// and turn an ordinary retry into a full-history replay.
+						log.Printf("[concurrency] stored Notion thread login is busy; preserving the thread for client retry")
+						allNotionLoginsBusy = true
+						break
 					} else if leaseErr == nil && lease != nil {
 						acc = lease.Account()
 					}

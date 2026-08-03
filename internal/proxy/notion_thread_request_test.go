@@ -483,6 +483,9 @@ func TestAnthropicHandlerPreservesAgentRepliesAcrossContinuationAndAccountSwitch
 		captured = append(captured, capturedRequest{UserID: userID, Body: body})
 		reply := "My marker is cobalt."
 		switch {
+		case body.IsPartialTranscript && storedAgentReplies[body.ThreadID] == "I can see both previous assistant answers after the account switch.":
+			reply = "I continued incrementally on account B."
+			storedAgentReplies[body.ThreadID] = reply
 		case body.IsPartialTranscript && storedAgentReplies[body.ThreadID] == "My marker is cobalt.":
 			reply = "I remember my previous answer: cobalt."
 			storedAgentReplies[body.ThreadID] = reply
@@ -575,11 +578,29 @@ func TestAnthropicHandlerPreservesAgentRepliesAcrossContinuationAndAccountSwitch
 	if !strings.Contains(third, "both previous assistant answers") {
 		t.Fatalf("account-switch replay lost assistant history: %q", third)
 	}
+	fourth := callAnthropicHandlerForText(t, handler, AnthropicRequest{
+		Model: "gpt-test", MaxTokens: 100, Metadata: metadata,
+		Messages: []AnthropicMessage{
+			{Role: "user", Content: firstUserContent},
+			{Role: "assistant", Content: first},
+			{Role: "user", Content: []interface{}{
+				map[string]interface{}{"type": "text", "text": "What marker did you choose?"},
+				documentBlock("new-attachment"),
+			}},
+			{Role: "assistant", Content: second},
+			{Role: "user", Content: "Summarize both of your previous answers."},
+			{Role: "assistant", Content: third},
+			{Role: "user", Content: "Continue once more."},
+		},
+	})
+	if fourth != "I continued incrementally on account B." {
+		t.Fatalf("post-migration turn did not continue incrementally: %q", fourth)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(captured) != 3 {
-		t.Fatalf("captured request count=%d, want 3", len(captured))
+	if len(captured) != 4 {
+		t.Fatalf("captured request count=%d, want 4", len(captured))
 	}
 	if captured[0].UserID != "user-a" || captured[0].Body.CreateThread ||
 		captured[1].UserID != "user-a" || !captured[1].Body.IsPartialTranscript {
@@ -587,6 +608,9 @@ func TestAnthropicHandlerPreservesAgentRepliesAcrossContinuationAndAccountSwitch
 	}
 	if captured[2].UserID != "user-b" || captured[2].Body.CreateThread || captured[2].Body.IsPartialTranscript {
 		t.Fatalf("account switch did not perform a complete fresh-thread replay: %#v", captured[2])
+	}
+	if captured[3].UserID != "user-b" || captured[3].Body.ThreadID != captured[2].Body.ThreadID || !captured[3].Body.IsPartialTranscript {
+		t.Fatalf("post-migration request did not continue account B's thread: %#v", captured[3])
 	}
 	if len(uploads) != 6 {
 		t.Fatalf("upload count=%d, want first-turn 2 + continuation 1 + account-switch replay 3: %#v", len(uploads), uploads)
@@ -614,6 +638,111 @@ func TestAnthropicHandlerPreservesAgentRepliesAcrossContinuationAndAccountSwitch
 		uploads[4].Data != "old-attachment-two" ||
 		uploads[5].Data != "new-attachment" {
 		t.Fatalf("continuation re-uploaded history or lost new attachment: %#v", uploads)
+	}
+}
+
+func TestBusyBoundLoginPreservesThreadForRetry(t *testing.T) {
+	previousBase := NotionAPIBase
+	previousConfig := AppConfig
+	previousModels := SnapshotModelMap()
+	previousClientOverride := chromeHTTPClientForTest
+	previousRoutingQuotaFetcher := routingQuotaFetcher
+	AppConfig = DefaultConfig()
+	ReplaceModelMap(map[string]string{"gpt-test": "workflow-model-id"})
+	globalSessionManager.Clear()
+	routingQuotaFetcher = func(*Account) (*QuotaInfo, error) {
+		return &QuotaInfo{IsEligible: true}, nil
+	}
+	t.Cleanup(func() {
+		globalSessionManager.Clear()
+		NotionAPIBase = previousBase
+		AppConfig = previousConfig
+		ReplaceModelMap(previousModels)
+		chromeHTTPClientForTest = previousClientOverride
+		routingQuotaFetcher = previousRoutingQuotaFetcher
+	})
+
+	var mu sync.Mutex
+	var requests []NotionInferenceRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body NotionInferenceRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		requests = append(requests, body)
+		callNumber := len(requests)
+		mu.Unlock()
+		reply := "first answer"
+		if callNumber == 2 {
+			reply = "continued after retry"
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		fmt.Fprintf(w, `{"type":"agent-inference","id":"step%d","value":[{"type":"text","content":%q}],"finishedAt":1,"inputTokens":10,"outputTokens":1}`+"\n", callNumber, reply)
+	}))
+	defer server.Close()
+	NotionAPIBase = server.URL
+	chromeHTTPClientForTest = func(time.Duration) *http.Client { return server.Client() }
+
+	account := &Account{
+		UserID: "busy-user", UserEmail: "busy@example.com", SpaceID: "busy-space",
+		PlanType: "team", ClientVersion: DefaultClientVersion, TokenV2: "busy-token",
+	}
+	pool := newPool(account)
+	handler := HandleAnthropicMessages(pool)
+	metadata := map[string]interface{}{"session_id": "busy-thread-session"}
+	first := callAnthropicHandlerForText(t, handler, AnthropicRequest{
+		Model: "gpt-test", MaxTokens: 100, Metadata: metadata,
+		Messages: []AnthropicMessage{{Role: "user", Content: "first"}},
+	})
+
+	firstLease, err := pool.LeaseAccount(account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondLease, err := pool.LeaseAccount(account)
+	if err != nil {
+		firstLease.Release()
+		t.Fatal(err)
+	}
+	defer firstLease.Release()
+	defer secondLease.Release()
+
+	continuation := AnthropicRequest{
+		Model: "gpt-test", MaxTokens: 100, Metadata: metadata,
+		Messages: []AnthropicMessage{
+			{Role: "user", Content: "first"},
+			{Role: "assistant", Content: first},
+			{Role: "user", Content: "second"},
+		},
+	}
+	raw, err := json.Marshal(continuation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(raw)))
+	if recorder.Code != http.StatusTooManyRequests || !strings.Contains(recorder.Body.String(), "busy") {
+		t.Fatalf("busy continuation status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	mu.Lock()
+	if len(requests) != 1 {
+		mu.Unlock()
+		t.Fatalf("busy continuation unexpectedly called upstream %d times", len(requests))
+	}
+	firstThreadID := requests[0].ThreadID
+	mu.Unlock()
+
+	firstLease.Release()
+	secondLease.Release()
+	if got := callAnthropicHandlerForText(t, handler, continuation); got != "continued after retry" {
+		t.Fatalf("retry reply=%q", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requests) != 2 || requests[1].ThreadID != firstThreadID || !requests[1].IsPartialTranscript {
+		t.Fatalf("busy retry did not preserve the real thread: %#v", requests)
 	}
 }
 

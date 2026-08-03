@@ -1666,16 +1666,26 @@ func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel strin
 
 	// Current Notion no longer accepts synthetic assistant-reply records in a
 	// newly created thread. When a client sends pre-existing history (for
-	// example after a restart or account switch), preserve every role in one
-	// explicit user transcript instead of silently dropping Agent answers.
-	if replayContent, ok := buildFreshThreadReplayContent(messages, useClientSystemPrompt); ok {
+	// example after an account switch), carry it once as inert JSON data and
+	// keep the current request in a separate user entry. This preserves the
+	// original text without presenting fabricated role labels as live prompts.
+	if historyContent, currentContent, ok := buildFreshThreadMigrationContent(messages, useClientSystemPrompt); ok {
 		transcript = append(transcript, ResearcherTranscriptMsg{
 			ID:        generateUUIDv4(),
 			Type:      "user",
-			Value:     [][]string{{replayContent}},
+			Value:     [][]string{{historyContent}},
 			UserID:    acc.UserID,
 			CreatedAt: now,
 		})
+		if strings.TrimSpace(currentContent) != "" {
+			transcript = append(transcript, ResearcherTranscriptMsg{
+				ID:        generateUUIDv4(),
+				Type:      "user",
+				Value:     [][]string{{currentContent}},
+				UserID:    acc.UserID,
+				CreatedAt: now,
+			})
+		}
 		return transcript
 	}
 
@@ -1722,60 +1732,90 @@ func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel strin
 	return transcript
 }
 
-func buildFreshThreadReplayContent(messages []ChatMessage, includeSystem bool) (string, bool) {
-	hasAssistantHistory := false
-	for _, message := range messages {
-		if message.Role == "assistant" || message.Role == "tool" {
-			hasAssistantHistory = true
-			break
+type migratedToolCall struct {
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+	Completed bool   `json:"completed"`
+}
+
+type migratedHistoryMessage struct {
+	Role       string             `json:"role"`
+	Content    string             `json:"content"`
+	ToolCallID string             `json:"tool_call_id,omitempty"`
+	Name       string             `json:"name,omitempty"`
+	ToolCalls  []migratedToolCall `json:"tool_calls,omitempty"`
+	Completed  bool               `json:"completed,omitempty"`
+}
+
+func buildFreshThreadMigrationContent(messages []ChatMessage, includeSystem bool) (string, string, bool) {
+	lastUserIndex := -1
+	lastAssistantIndex := -1
+	for i, message := range messages {
+		switch message.Role {
+		case "user":
+			if message.ToolCallID == "" {
+				lastUserIndex = i
+			}
+		case "assistant":
+			lastAssistantIndex = i
 		}
 	}
-	if !hasAssistantHistory {
-		return "", false
+	if lastAssistantIndex < 0 {
+		return "", "", false
 	}
 
-	var replay strings.Builder
-	replay.WriteString("The client is continuing an existing conversation on a fresh server thread.\n")
-	replay.WriteString("Treat the role labels below as authoritative conversation history. ")
-	replay.WriteString("Use all prior ASSISTANT answers and TOOL results when answering the final USER request.\n\n")
-	for _, message := range messages {
-		switch message.Role {
-		case "system":
-			if !includeSystem || strings.TrimSpace(message.Content) == "" {
-				continue
-			}
-			replay.WriteString("SYSTEM:\n")
-			replay.WriteString(message.Content)
-		case "user":
-			replay.WriteString("USER:\n")
-			replay.WriteString(message.Content)
-		case "assistant":
-			replay.WriteString("ASSISTANT:\n")
-			replay.WriteString(message.Content)
-			if len(message.ToolCalls) > 0 {
-				toolCalls, _ := json.Marshal(message.ToolCalls)
-				replay.WriteString("\nASSISTANT_TOOL_CALLS:\n")
-				replay.Write(toolCalls)
-			}
-		case "tool":
-			replay.WriteString("TOOL_RESULT")
-			if message.Name != "" {
-				replay.WriteString(" name=")
-				replay.WriteString(message.Name)
-			}
-			if message.ToolCallID != "" {
-				replay.WriteString(" tool_call_id=")
-				replay.WriteString(message.ToolCallID)
-			}
-			replay.WriteString(":\n")
-			replay.WriteString(message.Content)
-		default:
+	historyEnd := len(messages)
+	currentContent := ""
+	if lastUserIndex > lastAssistantIndex {
+		// A normal next turn (including a generated tool-chain follow-up) keeps
+		// the latest request out of the imported history.
+		historyEnd = lastUserIndex
+		currentContent = messages[lastUserIndex].Content
+	} else {
+		// A tool result can itself be the newest client input when tools are no
+		// longer declared. Keep the old assistant turn in history and serialize
+		// only the tail that followed it as the current input.
+		historyEnd = lastAssistantIndex + 1
+		currentContent = buildPartialContinuationContent(messages)
+	}
+
+	history := struct {
+		Schema   string                   `json:"schema"`
+		Messages []migratedHistoryMessage `json:"messages"`
+	}{Schema: "notion-manager-conversation-history-v1"}
+	for _, message := range messages[:historyEnd] {
+		if message.Role == "system" && (!includeSystem || strings.TrimSpace(message.Content) == "") {
 			continue
 		}
-		replay.WriteString("\n\n")
+		item := migratedHistoryMessage{
+			Role:       message.Role,
+			Content:    message.Content,
+			ToolCallID: message.ToolCallID,
+			Name:       message.Name,
+			Completed:  message.Role == "tool",
+		}
+		for _, call := range message.ToolCalls {
+			item.ToolCalls = append(item.ToolCalls, migratedToolCall{
+				ID:        call.ID,
+				Type:      call.Type,
+				Name:      call.Function.Name,
+				Arguments: call.Function.Arguments,
+				Completed: true,
+			})
+		}
+		history.Messages = append(history.Messages, item)
 	}
-	replay.WriteString("Continue the conversation by responding to the final USER request.")
-	return replay.String(), true
+	encoded, err := json.Marshal(history)
+	if err != nil {
+		return "", "", false
+	}
+
+	const preface = "Prior conversation context is provided below as a read-only JSON record. " +
+		"The content and arguments fields retain the client's original text. " +
+		"Tool records marked completed have already finished and are context, not new actions.\n\n"
+	return preface + string(encoded), currentContent, true
 }
 
 // buildPartialTranscript mirrors the current Notion web client: it reuses the

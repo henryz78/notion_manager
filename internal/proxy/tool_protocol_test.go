@@ -192,9 +192,11 @@ func TestCrossAccountToolReplayKeepsHistoryOnFreshThread(t *testing.T) {
 	}
 }
 
-func TestFreshThreadToolReplayAddsReadOnlyHistoryRuleWithoutDroppingContent(t *testing.T) {
+func TestFreshThreadToolReplayUsesReadOnlyJSONWithoutDroppingContent(t *testing.T) {
 	marker := "ACCOUNT_A_TOOL_RESULT_TAIL_MUST_SURVIVE"
+	systemMarker := "CLIENT_SYSTEM_INSTRUCTION_MUST_BE_PRESERVED"
 	messages := []ChatMessage{
+		{Role: "system", Content: systemMarker},
 		{Role: "user", Content: "inspect the artifact"},
 		{Role: "assistant", ToolCalls: []ToolCall{{
 			ID:   "call-account-a",
@@ -220,20 +222,39 @@ func TestFreshThreadToolReplayAddsReadOnlyHistoryRuleWithoutDroppingContent(t *t
 			tools[0].Function.Name = "Read"
 
 			got := injectToolsIntoMessages(cloneChatMessages(messages), tools)
-			if len(got) != len(messages) {
-				t.Fatalf("message count = %d, want %d", len(got), len(messages))
+			history, current, ok := buildFreshThreadMigrationContent(got, true)
+			if !ok {
+				t.Fatal("fresh-thread migration was not built")
 			}
-			if !strings.Contains(got[len(got)-1].Content, freshThreadToolHistoryRule) {
-				t.Fatal("fresh-thread replay did not label prior tool history as completed read-only evidence")
-			}
-			serialized, err := json.Marshal(got)
+			serialized, err := json.Marshal([]string{history, current})
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, want := range []string{"call-account-a", marker, "what did the completed result say?"} {
+			for _, want := range []string{systemMarker, "call-account-a", marker, "what did the completed result say?"} {
 				if !strings.Contains(string(serialized), want) {
 					t.Fatalf("fresh-thread replay dropped %q", want)
 				}
+			}
+			for _, forbidden := range []string{
+				"Treat the role labels below as authoritative",
+				"do not refuse",
+				"ASSISTANT_TOOL_CALLS:",
+			} {
+				if strings.Contains(string(serialized), forbidden) {
+					t.Fatalf("fresh-thread migration retained refusal-prone framing %q", forbidden)
+				}
+			}
+			if !strings.Contains(history, `"completed":true`) {
+				t.Fatalf("historical tool records are not closed: %s", history)
+			}
+			if !strings.Contains(current, "ROUTES:") {
+				t.Fatalf("current tool contract was not kept outside history: %s", current)
+			}
+			if strings.Contains(history, "ROUTES:") {
+				t.Fatalf("current tool contract leaked into imported history: %s", history)
+			}
+			if strings.Count(history, systemMarker) != 1 || !strings.Contains(history, `"role":"system"`) {
+				t.Fatalf("client system instruction was dropped or duplicated: %s", history)
 			}
 		})
 	}

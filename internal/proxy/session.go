@@ -448,7 +448,7 @@ func buildPartialContinuationContent(messages []ChatMessage) string {
 	if content.Len() == 0 {
 		return extractLastUserMessage(messages)
 	}
-	return "The client sent these new messages after your previous assistant turn. Treat the role labels as authoritative.\n\n" + content.String()
+	return "New client inputs received after your previous assistant turn:\n\n" + content.String()
 }
 
 func canonicalToolArguments(raw string) string {

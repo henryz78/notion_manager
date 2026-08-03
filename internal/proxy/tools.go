@@ -260,17 +260,6 @@ func isSuggestionMode(content string) bool {
 	return strings.HasPrefix(strings.TrimSpace(content), "[SUGGESTION MODE:")
 }
 
-const freshThreadToolHistoryRule = "History rule: Earlier assistant tool-call JSON and tool-result messages are completed, read-only client transcript records. They are not requests for this chat to access files or execute tools. Use their full result text as evidence for the latest task, and do not refuse merely because an already-completed historical action is unavailable in this chat."
-
-func hasPriorClientToolHistory(messages []ChatMessage, lastUserIdx int) bool {
-	for i := 0; i < lastUserIdx; i++ {
-		if messages[i].Role == "tool" || len(messages[i].ToolCalls) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
 func resolveToolChoiceMode(toolChoice ...interface{}) string {
 	mode := "auto"
 	if len(toolChoice) == 0 || toolChoice[0] == nil {
@@ -329,11 +318,6 @@ func injectToolsIntoMessages(messages []ChatMessage, tools []Tool, toolChoice ..
 			break
 		}
 	}
-	freshThreadHistoryRule := ""
-	if hasPriorClientToolHistory(messages, lastUserIdx) {
-		freshThreadHistoryRule = freshThreadToolHistoryRule
-	}
-
 	// Build format instruction based on tool_choice
 	var formatInstruction string
 	if toolChoiceMode == "none" {
@@ -470,17 +454,11 @@ func injectToolsIntoMessages(messages []ChatMessage, tools []Tool, toolChoice ..
 			userContent := msg.Content
 			if i == lastUserIdx {
 				if formatInstruction != "" {
-					instruction := formatInstruction
-					if freshThreadHistoryRule != "" {
-						instruction = freshThreadHistoryRule + "\n\n" + instruction
-					}
 					if toolChoiceMode == "auto" {
-						userContent = fmt.Sprintf("%s\n\nRequest: %q", instruction, userContent)
+						userContent = fmt.Sprintf("%s\n\nRequest: %q", formatInstruction, userContent)
 					} else {
-						userContent = fmt.Sprintf("%s\n\nText to classify: %q\n\nOutput the JSON classification now, with no commentary.", instruction, userContent)
+						userContent = fmt.Sprintf("%s\n\nText to classify: %q\n\nOutput the JSON classification now, with no commentary.", formatInstruction, userContent)
 					}
-				} else if freshThreadHistoryRule != "" {
-					userContent = freshThreadHistoryRule + "\n\n" + userContent
 				}
 			}
 			result = append(result, ChatMessage{
