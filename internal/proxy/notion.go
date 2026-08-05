@@ -1415,6 +1415,7 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 				attachments,
 				session,
 				personalInstructionsPageID,
+				opt.ToolBridgeContract,
 			),
 			CreateThread:            false,
 			IsPartialTranscript:     true,
@@ -1469,6 +1470,7 @@ func CallInference(acc *Account, messages []ChatMessage, model string, disableBu
 				useClientSystemPrompt,
 				usePersonalInstructions,
 				personalInstructionsPageID,
+				opt.ToolBridgeContract,
 			),
 			CreateThread:            createThread,
 			IsPartialTranscript:     false,
@@ -1551,8 +1553,8 @@ func effectiveDisableBuiltinTools(configuredDisable, usePersonalInstructions, ha
 	// The official default Agent path uses Notion's workflow prompt chain
 	// with isCustomAgent=false and supplies the instructions page via the
 	// transcript context. Do not let disable_notion_prompt turn that chain
-	// off while this mode is active. Client tool-bridge prompts remain in
-	// the user transcript and continue to work as before.
+	// off while this mode is active. The client tool bridge is represented by
+	// its own stable transcript entry and continues to work in this mode.
 	if usePersonalInstructions {
 		return false
 	}
@@ -1634,7 +1636,7 @@ func buildContextValue(acc *Account, datetime, personalInstructionsPageID string
 
 // buildFullTranscript builds a complete transcript for the first turn of a conversation.
 // Uses ResearcherTranscriptMsg (with id field) to match Notion's real client format.
-func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel string, disableBuiltinTools bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, configID, contextID, now string, useClientSystemPrompt bool, usePersonalInstructions bool, personalInstructionsPageID string) []interface{} {
+func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel string, disableBuiltinTools bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, configID, contextID, now string, useClientSystemPrompt bool, usePersonalInstructions bool, personalInstructionsPageID string, bridgeContracts ...string) []interface{} {
 	hasAttachments := len(attachments) > 0
 	configValue := buildConfigValue(notionModel, disableBuiltinTools, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, hasAttachments, false)
 	if !usePersonalInstructions {
@@ -1657,6 +1659,15 @@ func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel strin
 			Type:  "context",
 			Value: contextValue,
 		},
+	}
+	if contract := firstNonEmptyString(bridgeContracts); contract != "" {
+		transcript = append(transcript, ResearcherTranscriptMsg{
+			ID:        generateUUIDv4(),
+			Type:      "user",
+			Value:     [][]string{{contract}},
+			UserID:    acc.UserID,
+			CreatedAt: now,
+		})
 	}
 
 	// Insert attachment entries before user messages (matches Notion web behavior).
@@ -1693,7 +1704,8 @@ func buildFullTranscript(acc *Account, messages []ChatMessage, notionModel strin
 	// Client system messages and Notion personal instructions are independent:
 	// enabled client system messages are prepended to the first user message,
 	// while personal instructions are activated separately through context.
-	// Tool/function-call bridge instructions already live in user messages.
+	// The tool bridge contract, when present, is appended as its own stable
+	// entry above and is not mixed into client messages.
 	// User messages → "user" type with id, userId, createdAt
 	var systemPrompt string
 	for _, msg := range messages {
@@ -1747,6 +1759,15 @@ type migratedHistoryMessage struct {
 	Name       string             `json:"name,omitempty"`
 	ToolCalls  []migratedToolCall `json:"tool_calls,omitempty"`
 	Completed  bool               `json:"completed,omitempty"`
+}
+
+func firstNonEmptyString(values []string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func buildFreshThreadMigrationContent(messages []ChatMessage, includeSystem bool) (string, string, bool) {
@@ -1820,7 +1841,8 @@ func buildFreshThreadMigrationContent(messages []ChatMessage, includeSystem bool
 
 // buildPartialTranscript mirrors the current Notion web client: it reuses the
 // original config/context entry IDs, includes one updated-config placeholder
-// per completed server turn, and appends only the new client user step.
+// per completed server turn, optionally adds one bridge-contract update, and
+// appends only the new client user step.
 func buildPartialTranscript(
 	acc *Account,
 	newUserContent string,
@@ -1832,6 +1854,7 @@ func buildPartialTranscript(
 	attachments []UploadedAttachment,
 	session *Session,
 	personalInstructionsPageID string,
+	bridgeContracts ...string,
 ) []interface{} {
 	hasAttachments := len(attachments) > 0
 	configValue := buildConfigValue(
@@ -1858,6 +1881,15 @@ func buildPartialTranscript(
 			Type:  "context",
 			Value: contextValue,
 		},
+	}
+	if contract := firstNonEmptyString(bridgeContracts); contract != "" {
+		transcript = append(transcript, ResearcherTranscriptMsg{
+			ID:        generateUUIDv4(),
+			Type:      "user",
+			Value:     [][]string{{contract}},
+			UserID:    acc.UserID,
+			CreatedAt: time.Now().Format(time.RFC3339Nano),
+		})
 	}
 	for _, id := range session.UpdatedConfigIDs {
 		transcript = append(transcript, UpdatedConfigMsg{

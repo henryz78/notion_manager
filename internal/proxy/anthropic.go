@@ -478,6 +478,8 @@ type AnthropicUsage struct {
 	OutputTokens int `json:"output_tokens"`
 }
 
+const anthropicJSONContentType = "application/json; charset=utf-8"
+
 func lastAssistantAnthropicMessageIndex(messages []AnthropicMessage) int {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == "assistant" {
@@ -865,8 +867,8 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			return
 		}
 		// Preserve the exact client-visible history for safe unsalted session
-		// chaining. Tool schemas and structured-output prompts injected below
-		// are request-local implementation details and must not enter the key.
+		// chaining. Translated tool schemas and structured-output constraints
+		// below are request-local implementation details and must not enter the key.
 		sessionIdentityMessages := cloneChatMessages(messages)
 		if len(fileAttachments) > 0 {
 			log.Printf("[upload-debug] extracted %d file attachment(s) from request", len(fileAttachments))
@@ -1008,7 +1010,7 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			}
 		}
 
-		// Snapshot the original (pre-injection) messages so failover to a
+		// Snapshot the original (pre-bridge) messages so failover to a
 		// fresh account can rebuild a self-contained prompt that carries the
 		// full conversation history (the user's "spread the chat to a new
 		// account" requirement).
@@ -1096,28 +1098,20 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 			tried[acc] = true
 
 			// Build the request payload for this attempt. We always start
-			// from the pristine `originalMessages` snapshot so a per-attempt
-			// tool injection (which mutates messages in place for large tool
-			// sets) cannot leak into subsequent retries on a different
-			// account.
+			// from the pristine `originalMessages` snapshot so account failover
+			// and thread migration never copy gateway-generated route wrappers
+			// into the client's history.
 			attemptMessages := cloneChatMessages(originalMessages)
 			if hasTools {
 				attemptMessages = aliasToolNamesInMessages(attemptMessages, originalToToolAlias)
-				attemptMessages = injectToolsIntoMessages(attemptMessages, bridgeTools, aliasToolChoice(req.ToolChoice, originalToToolAlias))
-				if DebugLoggingEnabled() && accountCalls == 0 {
-					log.Printf("[debug] === After tool injection (%d messages) ===", len(attemptMessages))
-					for i, m := range attemptMessages {
-						preview := truncateForLog(m.Content, 300)
-						log.Printf("[debug]   [%d] role=%s toolcalls=%d content_len=%d: %s",
-							i, m.Role, len(m.ToolCalls), len(m.Content), preview)
-					}
-				}
 			}
 
 			requestMessages := attemptMessages
 			currentSession := session
 			wasContinuation := false
 			cacheSession := false
+			bridgeFingerprint := ""
+			bridgeContract := ""
 			if !isResearcher {
 				if fingerprint != "" {
 					currentSession, wasContinuation, cacheSession = lockConversationSessionForRequest(
@@ -1172,6 +1166,35 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 						session = nil
 						cacheSession = false
 					}
+				}
+			}
+
+			// The full tool contract is a session-level transcript entry. It is
+			// sent only for a new thread or when the client tool schemas change;
+			// ordinary turns keep the raw user message untouched.
+			if currentSession != nil && hasTools {
+				bridgeFingerprint = toolBridgeFingerprint(bridgeTools)
+				if currentSession.TurnCount == 0 || currentSession.ToolBridgeFingerprint != bridgeFingerprint {
+					bridgeContract = buildToolBridgeContract(bridgeTools, currentSession.ToolBridgeFingerprint != "")
+				}
+			}
+			if hasTools {
+				if directive := toolBridgeDirective(toolChoiceMode, originalToToolAlias); directive != "" {
+					requestMessages = addToolBridgeDirective(requestMessages, directive)
+				}
+			} else if currentSession != nil && currentSession.ToolBridgeFingerprint != "" {
+				// A previous turn may have installed a tool contract while this
+				// request explicitly has no tools. Make that per-request override
+				// explicit so an old contract cannot cause a tool-shaped answer.
+				requestMessages = addToolBridgeDirective(requestMessages,
+					"Tool mode for this request: none. Do not call any tool; answer naturally.")
+			}
+			if DebugLoggingEnabled() && accountCalls == 0 {
+				log.Printf("[debug] === Prepared request (%d messages, bridge_contract=%v) ===", len(requestMessages), bridgeContract != "")
+				for i, m := range requestMessages {
+					preview := truncateForLog(m.Content, 300)
+					log.Printf("[debug]   [%d] role=%s toolcalls=%d content_len=%d: %s",
+						i, m.Role, len(m.ToolCalls), len(m.Content), preview)
 				}
 			}
 
@@ -1240,12 +1263,15 @@ func HandleAnthropicMessages(pool *AccountPool) http.HandlerFunc {
 					reqErr = handleResearcherNonStream(r.Context(), w, acc, requestMessages, model, requestID, hasThinking, requestDiagnostic)
 				}
 			} else if req.Stream {
-				reqErr = handleAnthropicStream(r.Context(), w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, toolChoiceMode, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic)
+				reqErr = handleAnthropicStream(r.Context(), w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, toolChoiceMode, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic, bridgeContract)
 			} else {
-				reqErr = handleAnthropicNonStream(r.Context(), w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, toolChoiceMode, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic)
+				reqErr = handleAnthropicNonStream(r.Context(), w, acc, requestMessages, model, requestID, hasTools, len(bridgeTools) > 0, allowedToolNames, toolAliasToOriginal, toolChoiceMode, hasThinking, enableWebSearch, enableWorkspaceSearch, useReadOnlyMode, uploadedAttachments, req.OutputConfig, currentSession, requestDiagnostic, bridgeContract)
 			}
 			if currentSession != nil {
 				if reqErr == nil {
+					if hasTools && bridgeFingerprint != "" {
+						currentSession.ToolBridgeFingerprint = bridgeFingerprint
+					}
 					completeConversationSessionLocked(currentSession, rawMessageCount, model)
 					if cacheSession {
 						globalSessionManager.Set(fingerprint, currentSession)
@@ -2133,7 +2159,8 @@ func (stream *incrementalToolStream) FlushText() string {
 // handleAnthropicStream streams thinking and ordinary text as it arrives. Only
 // a response that begins like a tool protocol is buffered until it can be
 // validated and converted into tool_use events.
-func handleAnthropicStream(ctx context.Context, w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, toolChoiceMode string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic) error {
+func handleAnthropicStream(ctx context.Context, w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, toolChoiceMode string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic, bridgeContracts ...string) error {
+	bridgeContract := firstNonEmptyString(bridgeContracts)
 	if !hasTools {
 		callOpts := CallOptions{
 			Context:               ctx,
@@ -2144,6 +2171,7 @@ func handleAnthropicStream(ctx context.Context, w http.ResponseWriter, acc *Acco
 			Attachments:           attachments,
 			RequestID:             requestID,
 			Session:               session,
+			ToolBridgeContract:    bridgeContract,
 			RequestDiagnostic:     requestDiagnostic,
 		}
 		return streamAnthropicTextResponse(w, acc, messages, model, requestID, hasThinking, AppConfig.Proxy.DisableNotionPrompt, outputConfig, callOpts)
@@ -2255,6 +2283,7 @@ func handleAnthropicStream(ctx context.Context, w http.ResponseWriter, acc *Acco
 		KnownToolCallURLs:     &knownToolCallURLs,
 		RequestID:             requestID,
 		Session:               session,
+		ToolBridgeContract:    bridgeContract,
 		RequestDiagnostic:     requestDiagnostic,
 	}
 	if hasThinking {
@@ -2412,7 +2441,8 @@ func handleAnthropicStream(ctx context.Context, w http.ResponseWriter, acc *Acco
 }
 
 // handleAnthropicNonStream handles non-streaming Anthropic response
-func handleAnthropicNonStream(ctx context.Context, w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, toolChoiceMode string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic) error {
+func handleAnthropicNonStream(ctx context.Context, w http.ResponseWriter, acc *Account, messages []ChatMessage, model, requestID string, hasTools, hasBridgedClientTools bool, allowedToolNames map[string]struct{}, toolAliasToOriginal map[string]string, toolChoiceMode string, hasThinking bool, enableWebSearch bool, enableWorkspaceSearch *bool, useReadOnlyMode bool, attachments []UploadedAttachment, outputConfig *AnthropicOutputConfig, session *Session, requestDiagnostic *RequestDiagnostic, bridgeContracts ...string) error {
+	bridgeContract := firstNonEmptyString(bridgeContracts)
 	var fullContent strings.Builder
 	var finalUsage *UsageInfo
 	defer func() {
@@ -2439,6 +2469,7 @@ func handleAnthropicNonStream(ctx context.Context, w http.ResponseWriter, acc *A
 		KnownToolCallURLs:     &knownToolCallURLs,
 		RequestID:             requestID,
 		Session:               session,
+		ToolBridgeContract:    bridgeContract,
 		RequestDiagnostic:     requestDiagnostic,
 	}
 	if hasThinking {
@@ -2455,7 +2486,7 @@ func handleAnthropicNonStream(ctx context.Context, w http.ResponseWriter, acc *A
 	var err error
 	if hasTools {
 		callOpts.NativeToolUses = &nativeToolUses
-		// Format-based injection: tools embedded in user messages, use normal chat path
+		// Client tools are represented by the session-level bridge contract.
 		err = CallInference(acc, messages, model, AppConfig.Proxy.DisableNotionPrompt, func(delta string, done bool, usage *UsageInfo) {
 			if delta != "" {
 				fullContent.WriteString(delta)
@@ -2613,7 +2644,7 @@ func handleAnthropicNonStream(ctx context.Context, w http.ResponseWriter, acc *A
 
 	session.publishAssistantContinuation(continuationMessageFromBlocks(contentBlocks))
 	LogAPIOutputJSON(requestID, "anthropic non-stream response", resp)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", anthropicJSONContentType)
 	json.NewEncoder(w).Encode(resp)
 	return nil
 }
@@ -3073,7 +3104,7 @@ func handleResearcherNonStream(ctx context.Context, w http.ResponseWriter, acc *
 	}
 
 	LogAPIOutputJSON(requestID, "anthropic researcher non-stream response", resp)
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", anthropicJSONContentType)
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(resp)
 
@@ -3115,7 +3146,7 @@ func writeAnthropicError(w http.ResponseWriter, requestID string, status int, me
 	}
 	LogAPIOutputJSON(requestID, fmt.Sprintf("anthropic error status=%d", status), payload)
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", anthropicJSONContentType)
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(payload)
 }

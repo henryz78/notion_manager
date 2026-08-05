@@ -171,28 +171,32 @@ func TestCrossAccountToolReplayKeepsHistoryOnFreshThread(t *testing.T) {
 	}
 	tools[0].Function.Name = "Read"
 
-	replayed := injectToolsIntoMessages(cloneChatMessages(history), tools)
-	if len(replayed) != len(history)+1 {
-		t.Fatalf("fresh account replay has %d messages, want %d", len(replayed), len(history)+1)
-	}
+	replayed := cloneChatMessages(history)
 	transcript := buildFullTranscript(
 		&Account{UserID: "account-b-user", UserEmail: "b@example.com"}, replayed,
 		"model", false, false, nil, false, nil, "config-b", "context-b",
-		"2026-07-26T00:00:00Z", true, false, "",
+		"2026-07-26T00:00:00Z", true, false, "", buildToolBridgeContract(tools, false),
 	)
 	raw, err := json.Marshal(transcript)
 	if err != nil {
 		t.Fatal(err)
 	}
 	serialized := string(raw)
-	for _, want := range []string{"call-a", marker, "account-b-user", "Completed action results"} {
+	for _, want := range []string{"call-a", marker, "account-b-user", "Completed action result", toolBridgeContractMarker} {
 		if !strings.Contains(serialized, want) {
 			t.Fatalf("fresh account transcript dropped %q", want)
 		}
 	}
+	if strings.Contains(serialized, "ROUTES:") {
+		t.Fatalf("fresh account transcript retained the old per-request route wrapper: %s", serialized)
+	}
 }
 
 func TestFreshThreadToolReplayUsesReadOnlyJSONWithoutDroppingContent(t *testing.T) {
+	previous := AppConfig
+	AppConfig = DefaultConfig()
+	t.Cleanup(func() { AppConfig = previous })
+
 	marker := "ACCOUNT_A_TOOL_RESULT_TAIL_MUST_SURVIVE"
 	systemMarker := "CLIENT_SYSTEM_INSTRUCTION_MUST_BE_PRESERVED"
 	messages := []ChatMessage{
@@ -221,10 +225,19 @@ func TestFreshThreadToolReplayUsesReadOnlyJSONWithoutDroppingContent(t *testing.
 			}
 			tools[0].Function.Name = "Read"
 
-			got := injectToolsIntoMessages(cloneChatMessages(messages), tools)
+			got := cloneChatMessages(messages)
 			history, current, ok := buildFreshThreadMigrationContent(got, true)
 			if !ok {
 				t.Fatal("fresh-thread migration was not built")
+			}
+			transcript := buildFullTranscript(
+				&Account{UserID: "account-b-user", UserEmail: "b@example.com"}, got,
+				"model", false, false, nil, false, nil, "config-b", "context-b",
+				"2026-07-26T00:00:00Z", true, false, "", buildToolBridgeContract(tools, false),
+			)
+			transcriptRaw, err := json.Marshal(transcript)
+			if err != nil {
+				t.Fatal(err)
 			}
 			serialized, err := json.Marshal([]string{history, current})
 			if err != nil {
@@ -247,11 +260,11 @@ func TestFreshThreadToolReplayUsesReadOnlyJSONWithoutDroppingContent(t *testing.
 			if !strings.Contains(history, `"completed":true`) {
 				t.Fatalf("historical tool records are not closed: %s", history)
 			}
-			if !strings.Contains(current, "ROUTES:") {
-				t.Fatalf("current tool contract was not kept outside history: %s", current)
+			if !strings.Contains(string(transcriptRaw), toolBridgeContractMarker) || strings.Count(string(transcriptRaw), toolBridgeContractMarker) != 1 {
+				t.Fatalf("current tool contract was not carried exactly once outside history: %s", transcriptRaw)
 			}
-			if strings.Contains(history, "ROUTES:") {
-				t.Fatalf("current tool contract leaked into imported history: %s", history)
+			if strings.Contains(string(transcriptRaw), "ROUTES:") {
+				t.Fatalf("current tool contract retained the old route wrapper: %s", transcriptRaw)
 			}
 			if strings.Count(history, systemMarker) != 1 || !strings.Contains(history, `"role":"system"`) {
 				t.Fatalf("client system instruction was dropped or duplicated: %s", history)

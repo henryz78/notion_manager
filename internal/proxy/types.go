@@ -271,6 +271,7 @@ type CallOptions struct {
 	KnownCitationDocs       *[]CitationCandidate  // known search result metadata for context-based citation recovery
 	KnownToolCallURLs       *map[string][]string  // tool call id -> ordered web result URLs for resolving tool citations
 	Session                 *Session              // real Notion thread for this client conversation
+	ToolBridgeContract      string                // one-time bridge contract or version update for this Notion thread
 	ForceThreadContinuation bool                  // continue Session.ThreadID before the client-visible turn is published
 	RequestID               string                // top-level API request ID for log correlation
 	RequestDiagnostic       *RequestDiagnostic    // metadata-only Dashboard request trace

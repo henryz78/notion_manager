@@ -271,7 +271,10 @@ func TestCallInferencePartialTranscriptCarriesToolResultWithoutTools(t *testing.
 		{Role: "user", Content: "answer using that result"},
 	}
 
-	if err := CallInference(account, messages, "gpt-test", false, func(string, bool, *UsageInfo) {}, CallOptions{Session: session}); err != nil {
+	if err := CallInference(account, messages, "gpt-test", false, func(string, bool, *UsageInfo) {}, CallOptions{
+		Session:            session,
+		ToolBridgeContract: toolBridgeContractMarker + " action_1",
+	}); err != nil {
 		t.Fatalf("CallInference() error = %v", err)
 	}
 	if captured.CreateThread || !captured.IsPartialTranscript || captured.ThreadID != session.ThreadID {
@@ -286,6 +289,9 @@ func TestCallInferencePartialTranscriptCarriesToolResultWithoutTools(t *testing.
 		if !strings.Contains(transcript, expected) {
 			t.Fatalf("partial transcript is missing %q: %s", expected, transcript)
 		}
+	}
+	if strings.Count(transcript, toolBridgeContractMarker) != 1 {
+		t.Fatalf("tool bridge contract was not carried exactly once with the result: %s", transcript)
 	}
 	for _, protocolMarker := range []string{"TOOL_RESULT", "tool_call_id", "call-1"} {
 		if strings.Contains(transcript, protocolMarker) {
@@ -414,6 +420,256 @@ func TestStableMetadataContinuesThreadWhenModelAndToolChoiceChange(t *testing.T)
 	}
 	assertWorkflowModelConfig(t, requests[0].Transcript, "workflow-model-first")
 	assertWorkflowModelConfig(t, requests[1].Transcript, "workflow-model-second")
+}
+
+func TestToolBridgeContractIsSentOnceAndUpdatedForNewTools(t *testing.T) {
+	previousBase := NotionAPIBase
+	previousConfig := AppConfig
+	previousModels := SnapshotModelMap()
+	previousClientOverride := chromeHTTPClientForTest
+	AppConfig = DefaultConfig()
+	ReplaceModelMap(map[string]string{"gpt-tools": "workflow-model-tools"})
+	globalSessionManager.Clear()
+	t.Cleanup(func() {
+		globalSessionManager.Clear()
+		NotionAPIBase = previousBase
+		AppConfig = previousConfig
+		ReplaceModelMap(previousModels)
+		chromeHTTPClientForTest = previousClientOverride
+	})
+
+	var mu sync.Mutex
+	var requests []NotionInferenceRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body NotionInferenceRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		requests = append(requests, body)
+		callNumber := len(requests)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		fmt.Fprintf(w, `{"type":"agent-inference","id":"step%d","value":[{"type":"text","content":"reply %d"}],"finishedAt":1,"inputTokens":10,"outputTokens":2}`+"\n", callNumber, callNumber)
+	}))
+	defer server.Close()
+	NotionAPIBase = server.URL
+	chromeHTTPClientForTest = func(time.Duration) *http.Client { return server.Client() }
+
+	tools := make([]AnthropicTool, 6)
+	for i := range tools {
+		tools[i] = AnthropicTool{
+			Name:        fmt.Sprintf("tool_%d", i+1),
+			Description: "tool description",
+			InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
+		}
+	}
+	handler := HandleAnthropicMessages(newPool(&Account{
+		UserID: "user-tools", UserEmail: "tools@example.com", SpaceID: "space-tools",
+		PlanType: "team", ClientVersion: DefaultClientVersion, TokenV2: "token-tools",
+	}))
+	metadata := map[string]interface{}{"session_id": "tool-contract-session"}
+	first := callAnthropicHandlerForText(t, handler, AnthropicRequest{
+		Model: "gpt-tools", MaxTokens: 100, Metadata: metadata,
+		Messages: []AnthropicMessage{{Role: "user", Content: "first request"}},
+		Tools:    tools,
+	})
+	second := callAnthropicHandlerForText(t, handler, AnthropicRequest{
+		Model: "gpt-tools", MaxTokens: 100, Metadata: metadata,
+		Messages: []AnthropicMessage{
+			{Role: "user", Content: "first request"},
+			{Role: "assistant", Content: first},
+			{Role: "user", Content: "second request"},
+		},
+		Tools: tools,
+	})
+	updatedTools := append(append([]AnthropicTool(nil), tools...), AnthropicTool{
+		Name:        "tool_7",
+		Description: "new tool",
+		InputSchema: map[string]interface{}{"type": "object"},
+	})
+	third := callAnthropicHandlerForText(t, handler, AnthropicRequest{
+		Model: "gpt-tools", MaxTokens: 100, Metadata: metadata,
+		Messages: []AnthropicMessage{
+			{Role: "user", Content: "first request"},
+			{Role: "assistant", Content: first},
+			{Role: "user", Content: "second request"},
+			{Role: "assistant", Content: second},
+			{Role: "user", Content: "third request"},
+		},
+		Tools: updatedTools,
+	})
+	if first != "reply 1" || second != "reply 2" || third != "reply 3" {
+		t.Fatalf("unexpected replies: %q, %q, %q", first, second, third)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requests) != 3 {
+		t.Fatalf("request count=%d, want 3", len(requests))
+	}
+	serialized := make([]string, len(requests))
+	for i, request := range requests {
+		raw, err := json.Marshal(request.Transcript)
+		if err != nil {
+			t.Fatal(err)
+		}
+		serialized[i] = string(raw)
+	}
+	if strings.Count(serialized[0], toolBridgeContractMarker) != 1 || strings.Contains(serialized[0], "ROUTES:") {
+		t.Fatalf("first request did not carry exactly one clean contract: %s", serialized[0])
+	}
+	if strings.Contains(serialized[1], toolBridgeContractMarker) || strings.Contains(serialized[1], "ROUTES:") || !strings.Contains(serialized[1], "second request") {
+		t.Fatalf("second request repeated or lost the contract: %s", serialized[1])
+	}
+	if got := strings.Count(serialized[2], toolBridgeContractMarker); got != 1 {
+		t.Fatalf("new tool contract marker count=%d: %s", got, serialized[2])
+	}
+	if !strings.Contains(serialized[2], "replaces the previous tool contract") {
+		t.Fatalf("new tool contract did not identify replacement: %s", serialized[2])
+	}
+	if !strings.Contains(serialized[2], "action_7") {
+		t.Fatalf("new tool did not produce one replacement contract: %s", serialized[2])
+	}
+}
+
+func TestToolBridgeContractIsRecreatedOnceWhenConversationSwitchesAccount(t *testing.T) {
+	previousBase := NotionAPIBase
+	previousConfig := AppConfig
+	previousModels := SnapshotModelMap()
+	previousClientOverride := chromeHTTPClientForTest
+	previousRoutingQuotaFetcher := routingQuotaFetcher
+	AppConfig = DefaultConfig()
+	ReplaceModelMap(map[string]string{"gpt-switch": "workflow-model-switch"})
+	globalSessionManager.Clear()
+	routingQuotaFetcher = func(*Account) (*QuotaInfo, error) {
+		return &QuotaInfo{IsEligible: true}, nil
+	}
+	t.Cleanup(func() {
+		globalSessionManager.Clear()
+		NotionAPIBase = previousBase
+		AppConfig = previousConfig
+		ReplaceModelMap(previousModels)
+		chromeHTTPClientForTest = previousClientOverride
+		routingQuotaFetcher = previousRoutingQuotaFetcher
+	})
+
+	var mu sync.Mutex
+	var requests []struct {
+		userID string
+		body   NotionInferenceRequest
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body NotionInferenceRequest
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		requests = append(requests, struct {
+			userID string
+			body   NotionInferenceRequest
+		}{userID: r.Header.Get("x-notion-active-user-header"), body: body})
+		callNumber := len(requests)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		fmt.Fprintf(w, `{"type":"agent-inference","id":"switch-step%d","value":[{"type":"text","content":"switch reply %d"}],"finishedAt":1,"inputTokens":10,"outputTokens":2}`+"\n", callNumber, callNumber)
+	}))
+	defer server.Close()
+	NotionAPIBase = server.URL
+	chromeHTTPClientForTest = func(time.Duration) *http.Client { return server.Client() }
+
+	accountA := &Account{UserID: "switch-a", UserEmail: "switch-a@example.com", SpaceID: "space-switch-a", PlanType: "team", ClientVersion: DefaultClientVersion, TokenV2: "switch-a-token"}
+	accountB := &Account{UserID: "switch-b", UserEmail: "switch-b@example.com", SpaceID: "space-switch-b", PlanType: "team", ClientVersion: DefaultClientVersion, TokenV2: "switch-b-token"}
+	handler := HandleAnthropicMessages(newPool(accountA, accountB))
+	tools := make([]AnthropicTool, 6)
+	for i := range tools {
+		tools[i] = AnthropicTool{Name: fmt.Sprintf("tool_%d", i+1), InputSchema: map[string]interface{}{"type": "object"}}
+	}
+	metadata := map[string]interface{}{"session_id": "tool-account-switch"}
+	first := callAnthropicHandlerForText(t, handler, AnthropicRequest{
+		Model: "gpt-switch", MaxTokens: 100, Metadata: metadata,
+		Messages: []AnthropicMessage{{Role: "user", Content: "first tool-aware turn"}}, Tools: tools,
+	})
+	accountA.mu.Lock()
+	accountA.ManuallyDisabled = true
+	accountA.mu.Unlock()
+	second := callAnthropicHandlerForText(t, handler, AnthropicRequest{
+		Model: "gpt-switch", MaxTokens: 100, Metadata: metadata,
+		Messages: []AnthropicMessage{
+			{Role: "user", Content: "first tool-aware turn"},
+			{Role: "assistant", Content: first},
+			{Role: "user", Content: "continue after account switch"},
+		}, Tools: tools,
+	})
+	if first != "switch reply 1" || second != "switch reply 2" {
+		t.Fatalf("unexpected replies: %q, %q", first, second)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(requests) != 2 || requests[0].userID != "switch-a" || requests[1].userID != "switch-b" {
+		t.Fatalf("conversation did not switch accounts as expected: %#v", requests)
+	}
+	if !requests[1].body.CreateThread || requests[1].body.IsPartialTranscript {
+		t.Fatalf("account switch did not use one fresh replay: %#v", requests[1].body)
+	}
+	raw, err := json.Marshal(requests[1].body.Transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialized := string(raw)
+	if strings.Count(serialized, toolBridgeContractMarker) != 1 || strings.Contains(serialized, "ROUTES:") || !strings.Contains(serialized, "continue after account switch") {
+		t.Fatalf("switched account did not receive one clean current contract and request: %s", serialized)
+	}
+}
+
+func TestAnthropicNonStreamResponseDeclaresUTF8(t *testing.T) {
+	previousBase := NotionAPIBase
+	previousConfig := AppConfig
+	previousModels := SnapshotModelMap()
+	previousClientOverride := chromeHTTPClientForTest
+	AppConfig = DefaultConfig()
+	ReplaceModelMap(map[string]string{"gpt-utf8": "workflow-model-utf8"})
+	globalSessionManager.Clear()
+	t.Cleanup(func() {
+		globalSessionManager.Clear()
+		NotionAPIBase = previousBase
+		AppConfig = previousConfig
+		ReplaceModelMap(previousModels)
+		chromeHTTPClientForTest = previousClientOverride
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		fmt.Fprintln(w, `{"type":"agent-inference","id":"step-utf8","value":[{"type":"text","content":"中文回答"}],"finishedAt":1,"inputTokens":1,"outputTokens":1}`)
+	}))
+	defer server.Close()
+	NotionAPIBase = server.URL
+	chromeHTTPClientForTest = func(time.Duration) *http.Client { return server.Client() }
+
+	handler := HandleAnthropicMessages(newPool(&Account{
+		UserID: "user-utf8", UserEmail: "utf8@example.com", SpaceID: "space-utf8",
+		PlanType: "team", ClientVersion: DefaultClientVersion, TokenV2: "token-utf8",
+	}))
+	recorder := httptest.NewRecorder()
+	raw, err := json.Marshal(AnthropicRequest{
+		Model: "gpt-utf8", MaxTokens: 100,
+		Messages: []AnthropicMessage{{Role: "user", Content: "请回答"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(raw)))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/json; charset=utf-8" {
+		t.Fatalf("content type=%q, want application/json; charset=utf-8", got)
+	}
 }
 
 func TestPartialContinuationDescribesToolResultWithoutProtocolMarkers(t *testing.T) {

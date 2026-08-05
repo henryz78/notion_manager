@@ -14,24 +14,25 @@ import (
 // its server-generated Agent replies. Reusing this thread is required because
 // current Notion ignores synthetic assistant-reply entries in a fresh replay.
 type Session struct {
-	mu                sync.Mutex
-	managerKey        string
-	managerEpoch      uint64
-	managerKeyVersion uint64
-	publishAssistant  func(ChatMessage)
-	expectedClientKey string
-	ThreadID          string
-	AccountID         string
-	AccountEmail      string
-	ConfigID          string
-	ContextID         string
-	OriginalDatetime  string
-	ModelUsed         string
-	TurnCount         int
-	RawMessageCount   int
-	UpdatedConfigIDs  []string
-	CreatedAt         time.Time
-	LastUsedAt        time.Time
+	mu                    sync.Mutex
+	managerKey            string
+	managerEpoch          uint64
+	managerKeyVersion     uint64
+	publishAssistant      func(ChatMessage)
+	expectedClientKey     string
+	ThreadID              string
+	AccountID             string
+	AccountEmail          string
+	ConfigID              string
+	ContextID             string
+	OriginalDatetime      string
+	ModelUsed             string
+	TurnCount             int
+	RawMessageCount       int
+	UpdatedConfigIDs      []string
+	ToolBridgeFingerprint string
+	CreatedAt             time.Time
+	LastUsedAt            time.Time
 }
 
 type SessionManager struct {

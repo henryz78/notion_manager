@@ -1,7 +1,7 @@
 package proxy
 
-// cloneChatMessages returns a deep copy so per-attempt tool injection cannot
-// mutate the pristine client history reused by account failover.
+// cloneChatMessages returns a deep copy so per-attempt aliases or directives
+// cannot mutate the pristine client history reused by account failover.
 func cloneChatMessages(src []ChatMessage) []ChatMessage {
 	if src == nil {
 		return nil

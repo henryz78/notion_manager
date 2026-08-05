@@ -13,27 +13,15 @@ func TestToolChainAutoAnswersNaturallyWhenResultsAreComplete(t *testing.T) {
 		{Role: "tool", ToolCallID: "call-1", Name: "Read", Content: "the answer is 42"},
 	}
 
-	followUp := buildToolChainFollowUp(messages, "- action_1\n", "", "auto")
-	if len(followUp) != 1 {
-		t.Fatalf("follow-up messages = %d, want 1", len(followUp))
-	}
-	content := followUp[0].Content
-	if !strings.Contains(content, "answer directly in natural language") {
-		t.Fatalf("auto mode still forces a tool wrapper: %s", content)
-	}
-	if strings.Contains(content, "__done__") {
-		t.Fatalf("auto mode still advertises the legacy done action: %s", content)
+	content := buildPartialContinuationContent(messages)
+	if !strings.Contains(content, "Completed action result") || !strings.Contains(content, "the answer is 42") {
+		t.Fatalf("tool result was not carried into the next turn: %s", content)
 	}
 }
 
 func TestToolChainRequiredStillRequiresAClientAction(t *testing.T) {
-	messages := []ChatMessage{
-		{Role: "user", Content: "inspect the file"},
-		{Role: "assistant", ToolCalls: []ToolCall{{ID: "call-1", Function: ToolCallFunction{Name: "Read", Arguments: `{}`}}}},
-		{Role: "tool", ToolCallID: "call-1", Name: "Read", Content: "result"},
-	}
-	content := buildToolChainFollowUp(messages, "- action_1\n", "", "required")[0].Content
-	if !strings.Contains(content, "Select one action") || strings.Contains(content, "__done__") {
+	content := toolBridgeDirective("required", nil)
+	if !strings.Contains(content, "tool call is required") || strings.Contains(content, "__done__") {
 		t.Fatalf("required mode contract is wrong: %s", content)
 	}
 }
@@ -62,40 +50,16 @@ func TestResolveToolChoiceMode(t *testing.T) {
 	}
 }
 
-func TestToolChoiceNoneBypassesInjection(t *testing.T) {
-	messages := []ChatMessage{{Role: "system", Content: "system"}, {Role: "user", Content: "answer normally"}}
-	tools := []Tool{{Type: "function", Function: ToolFunction{Name: "Read", Description: "read", Parameters: map[string]interface{}{"type": "object"}}}}
-	got := injectToolsIntoMessages(cloneChatMessages(messages), tools, "none")
-	if len(got) != len(messages) {
-		t.Fatalf("messages len = %d, want %d", len(got), len(messages))
-	}
-	for i := range messages {
-		if got[i].Role != messages[i].Role || got[i].Content != messages[i].Content {
-			t.Fatalf("message %d changed in none mode: got=%#v want=%#v", i, got[i], messages[i])
-		}
+func TestToolChoiceNoneHasNoPerRequestDirective(t *testing.T) {
+	if got := toolBridgeDirective("none", nil); got != "" {
+		t.Fatalf("none mode unexpectedly generated a tool directive: %q", got)
 	}
 }
 
-func TestForcedToolInjectionUsesSingleRequiredRouteContract(t *testing.T) {
-	messages := []ChatMessage{{Role: "user", Content: "what time is it"}}
-	tools := []Tool{
-		{Type: "function", Function: ToolFunction{Name: "action_1", Description: "unrelated", Parameters: map[string]interface{}{"type": "object"}}},
-		{Type: "function", Function: ToolFunction{Name: "action_2", Description: "get the current time", Parameters: map[string]interface{}{"type": "object"}}},
-	}
-
-	got := injectToolsIntoMessages(cloneChatMessages(messages), tools, map[string]interface{}{
-		"type":     "function",
-		"function": map[string]interface{}{"name": "action_2"},
-	})
-	if len(got) != 1 {
-		t.Fatalf("messages len = %d, want 1", len(got))
-	}
-	content := got[0].Content
-	if !strings.Contains(content, "exactly one label") {
-		t.Fatalf("forced tool did not use required-route framing: %s", content)
-	}
-	if !strings.Contains(content, "Label: action_2") || strings.Contains(content, "Label: action_1") {
-		t.Fatalf("forced tool list was not restricted to action_2: %s", content)
+func TestForcedToolChoiceUsesCompactDirective(t *testing.T) {
+	content := toolBridgeDirective("force:action_2", map[string]string{"action_2": "action_2"})
+	if !strings.Contains(content, `"action_2"`) || strings.Contains(content, "action_1") {
+		t.Fatalf("forced tool directive was not restricted to action_2: %s", content)
 	}
 }
 

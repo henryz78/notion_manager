@@ -311,28 +311,25 @@ func TestBuildFullTranscriptPersonalInstructionsMode(t *testing.T) {
 	}
 }
 
-func TestPersonalInstructionsModePreservesInjectedToolBridge(t *testing.T) {
+func TestPersonalInstructionsModePreservesOneToolBridgeContract(t *testing.T) {
 	previous := AppConfig
 	AppConfig = DefaultConfig()
 	t.Cleanup(func() { AppConfig = previous })
 
-	bridged := injectToolsIntoMessages(
+	tools := []Tool{{
+		Type: "function",
+		Function: ToolFunction{
+			Name:       "Read",
+			Parameters: map[string]interface{}{"type": "object"},
+		},
+	}}
+
+	transcript := buildFullTranscript(
+		&Account{UserID: "user-a", SpaceID: "space-a"},
 		[]ChatMessage{
 			{Role: "system", Content: "client behavioral prompt"},
 			{Role: "user", Content: "read the file"},
 		},
-		[]Tool{{
-			Type: "function",
-			Function: ToolFunction{
-				Name:       "Read",
-				Parameters: map[string]interface{}{"type": "object"},
-			},
-		}},
-	)
-
-	transcript := buildFullTranscript(
-		&Account{UserID: "user-a", SpaceID: "space-a"},
-		bridged,
 		"model-a",
 		false,
 		true,
@@ -345,13 +342,15 @@ func TestPersonalInstructionsModePreservesInjectedToolBridge(t *testing.T) {
 		false,
 		true,
 		"page-a",
+		buildToolBridgeContract(tools, false),
 	)
-	userText := transcript[2].(ResearcherTranscriptMsg).Value.([][]string)[0][0]
+	contractText := transcript[2].(ResearcherTranscriptMsg).Value.([][]string)[0][0]
+	userText := transcript[3].(ResearcherTranscriptMsg).Value.([][]string)[0][0]
 	if strings.Contains(userText, "client behavioral prompt") {
-		t.Fatalf("client system prompt leaked after tool injection: %q", userText)
+		t.Fatalf("client system prompt leaked after tool contract: %q", userText)
 	}
-	if !strings.Contains(userText, "Read") || !strings.Contains(userText, `"name": "label"`) {
-		t.Fatalf("tool bridge instructions were not preserved: %q", userText)
+	if !strings.Contains(contractText, "Read") || !strings.Contains(contractText, toolBridgeContractMarker) {
+		t.Fatalf("tool bridge contract was not preserved: %q", contractText)
 	}
 }
 

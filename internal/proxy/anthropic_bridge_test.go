@@ -47,7 +47,7 @@ func TestApplyStructuredOutputBridge_JSONSchema(t *testing.T) {
 	}
 }
 
-func TestInjectToolsIntoMessages_PreservesWrapperAndSystemMessages(t *testing.T) {
+func TestToolBridgeContractPreservesClientToolSchemas(t *testing.T) {
 	tools := []Tool{
 		{Type: "function", Function: ToolFunction{Name: "Bash", Description: "Execute shell command", Parameters: map[string]interface{}{"type": "object"}}},
 		{Type: "function", Function: ToolFunction{Name: "Read", Description: "Read a file", Parameters: map[string]interface{}{"type": "object"}}},
@@ -56,31 +56,19 @@ func TestInjectToolsIntoMessages_PreservesWrapperAndSystemMessages(t *testing.T)
 		{Type: "function", Function: ToolFunction{Name: "Glob", Description: "Find files", Parameters: map[string]interface{}{"type": "object"}}},
 		{Type: "function", Function: ToolFunction{Name: "Grep", Description: "Search files", Parameters: map[string]interface{}{"type": "object"}}},
 	}
-	messages := []ChatMessage{
-		{Role: "system", Content: "You are Claude Code."},
-		{Role: "user", Content: "<available-deferred-tools>\nRead\nEdit\n</available-deferred-tools>"},
-		{Role: "user", Content: "修复登录校验"},
+	contract := buildToolBridgeContract(func() []Tool {
+		aliased, _, _ := aliasClientTools(tools)
+		return aliased
+	}(), false)
+	if !strings.Contains(contract, toolBridgeContractMarker) || !strings.Contains(contract, "action_6") {
+		t.Fatalf("contract did not preserve the complete tool set: %q", contract)
 	}
-
-	got := injectToolsIntoMessages(messages, tools)
-	if len(got) != len(messages) {
-		t.Fatalf("expected %d preserved messages, got %d", len(messages), len(got))
-	}
-	if got[0].Content != messages[0].Content || got[1].Content != messages[1].Content {
-		t.Fatalf("system or wrapper message was altered: %#v", got)
-	}
-	if !strings.Contains(got[2].Content, `REQUEST: "修复登录校验"`) {
-		t.Fatalf("expected actual user query in bridged content, got %q", got[2].Content)
-	}
-	if strings.Contains(got[2].Content, "__done__") || !strings.Contains(got[2].Content, "answer directly in natural language") {
-		t.Fatalf("auto mode still forces a done/tool response: %q", got[2].Content)
-	}
-	if !strings.Contains(got[2].Content, "only a routing decision") || !strings.Contains(got[2].Content, "requires live or external data") {
-		t.Fatalf("auto mode does not use neutral routing classification: %q", got[2].Content)
+	if strings.Contains(contract, "ROUTES:") || strings.Contains(contract, "REQUEST:") {
+		t.Fatalf("contract contains per-request framing: %q", contract)
 	}
 }
 
-func TestInjectToolsIntoMessages_AllModelFamiliesReceiveToolSchema(t *testing.T) {
+func TestToolBridgeContractWorksAcrossModelFamilies(t *testing.T) {
 	tools := []Tool{{
 		Type: "function",
 		Function: ToolFunction{
@@ -98,33 +86,18 @@ func TestInjectToolsIntoMessages_AllModelFamiliesReceiveToolSchema(t *testing.T)
 
 	for _, model := range []string{"claude-opus-5", "gpt-5.6-sol", "gemini-3.1-pro", "grok-4.5", "deepseek-v4-pro"} {
 		t.Run(model, func(t *testing.T) {
-			got := injectToolsIntoMessages([]ChatMessage{{Role: "user", Content: "read alpha"}}, tools)
-			if len(got) != 1 || !strings.Contains(got[0].Content, "get_test_value") || !strings.Contains(got[0].Content, `"required":["key"]`) {
-				t.Fatalf("model %s did not receive the complete tool schema: %#v", model, got)
+			got := buildToolBridgeContract(tools, false)
+			if !strings.Contains(got, "get_test_value") || !strings.Contains(got, `"required":["key"]`) {
+				t.Fatalf("model %s did not receive the complete tool schema: %q", model, got)
 			}
 		})
 	}
 }
 
-func TestInjectToolsIntoMessages_ForcedToolIncludesSchema(t *testing.T) {
-	tools := []Tool{{
-		Type: "function",
-		Function: ToolFunction{
-			Name: "get_test_value",
-			Parameters: map[string]interface{}{
-				"type":       "object",
-				"properties": map[string]interface{}{"key": map[string]interface{}{"type": "string"}},
-				"required":   []interface{}{"key"},
-			},
-		},
-	}}
-	choice := map[string]interface{}{"type": "tool", "name": "get_test_value"}
-
-	for _, model := range []string{"claude-opus-5", "gpt-5.6-sol", "gemini-3.1-pro"} {
-		got := injectToolsIntoMessages([]ChatMessage{{Role: "user", Content: "read alpha"}}, tools, choice)
-		if len(got) != 1 || !strings.Contains(got[0].Content, `"required":["key"]`) {
-			t.Fatalf("forced tool schema missing for %s: %#v", model, got)
-		}
+func TestToolBridgeForcedModeUsesCompactDirective(t *testing.T) {
+	got := toolBridgeDirective("force:get_test_value", map[string]string{"get_test_value": "action_1"})
+	if !strings.Contains(got, `"action_1"`) || strings.Contains(got, "get_test_value") {
+		t.Fatalf("forced tool directive was not aliased: %q", got)
 	}
 }
 
@@ -356,9 +329,9 @@ func TestLargeClientToolSetUsesAnonymousLabelsAndFullSchemasBelowLimit(t *testin
 		{Type: "function", Function: ToolFunction{Name: "Grep", Description: "Search file contents.", Parameters: params}},
 	}
 	aliased, _, _ := aliasClientTools(tools)
-	got := injectToolsIntoMessages([]ChatMessage{{Role: "user", Content: "search for needle"}}, aliased)
-	if len(got) != 1 || !strings.Contains(got[0].Content, "action_6") || strings.Contains(got[0].Content, "Grep") || !strings.Contains(got[0].Content, "Argument schema:") {
-		t.Fatalf("large tool prompt did not preserve full anonymous schemas: %#v", got)
+	got := buildToolBridgeContract(aliased, false)
+	if !strings.Contains(got, "action_6") || strings.Contains(got, "Grep") || !strings.Contains(got, "Argument schema:") {
+		t.Fatalf("tool contract did not preserve anonymous schemas: %q", got)
 	}
 }
 
@@ -390,10 +363,6 @@ func TestBuildSizedToolListNeverCompactsClientSchemas(t *testing.T) {
 	list, compacted, fullBytes = buildSizedToolList([]Tool{hugeTool})
 	if compacted || fullBytes != len(list) || !strings.Contains(list, "Argument schema:") || strings.Count(list, marker) != 2 {
 		t.Fatalf("oversized tool definition was altered: compacted=%v bytes=%d sent=%d", compacted, fullBytes, len(list))
-	}
-	forced := buildForcedToolList([]Tool{hugeTool}, "action_1")
-	if !strings.Contains(forced, "Argument schema:") || strings.Count(forced, marker) != 2 {
-		t.Fatal("a forced tool must retain its complete definition")
 	}
 }
 
