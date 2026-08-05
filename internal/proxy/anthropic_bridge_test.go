@@ -7,6 +7,34 @@ import (
 	"testing"
 )
 
+func TestExtractConversationSaltSupportsAnthropicAndCodexMetadata(t *testing.T) {
+	metadata := map[string]interface{}{
+		"user_id": `{"device_id":"dev-1","session_id":"sess-123","account_uuid":""}`,
+	}
+
+	if got := extractConversationSalt(metadata); got != "sess-123" {
+		t.Fatalf("extractConversationSalt() = %q, want %q", got, "sess-123")
+	}
+	if got := extractConversationSalt(map[string]interface{}{"prompt_cache_key": " task-123 "}); got != "task-123" {
+		t.Fatalf("prompt_cache_key salt = %q, want task-123", got)
+	}
+}
+
+func TestStableSessionFingerprintSeparatesPromptCacheKeysAndModels(t *testing.T) {
+	base := computeStableSessionFingerprint("task-a", "fireworks-kimi-k3")
+	otherTask := computeStableSessionFingerprint("task-b", "fireworks-kimi-k3")
+	otherModel := computeStableSessionFingerprint("task-a", "anthropic-opus-4-6")
+	continued := computeStableSessionFingerprint("task-a", "fireworks-kimi-k3")
+	if base == otherTask {
+		t.Fatal("different prompt_cache_key values must not reuse a Notion thread")
+	}
+	if base == otherModel {
+		t.Fatal("different resolved models must not reuse a Notion thread")
+	}
+	if base != continued {
+		t.Fatal("the same prompt_cache_key and model must keep the Notion thread across turns")
+	}
+}
 func TestApplyStructuredOutputBridge_JSONSchema(t *testing.T) {
 	messages := []ChatMessage{
 		{Role: "system", Content: "x-anthropic-billing-header: cc_version=2.1.81; cch=aaaa;"},

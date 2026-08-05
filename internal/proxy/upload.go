@@ -30,6 +30,9 @@ var attachmentUploader = UploadFileToNotion
 //
 // Returns an UploadedAttachment with the attachment:UUID:filename URL for transcript injection.
 func UploadFileToNotion(acc *Account, file *FileAttachment, sessionID string, createThread bool) (*UploadedAttachment, error) {
+	if file == nil {
+		return nil, fmt.Errorf("file is required")
+	}
 	if sessionID == "" {
 		sessionID = generateUUIDv4()
 		createThread = true
@@ -192,6 +195,26 @@ func UploadFileToNotion(acc *Account, file *FileAttachment, sessionID string, cr
 	}, nil
 }
 
+type attachmentUploadTarget struct {
+	ThreadID     string
+	CreateThread bool
+}
+
+func buildAttachmentUploadPlan(threadID string, attachmentCount int, createThread bool) []attachmentUploadTarget {
+	if attachmentCount <= 0 {
+		return nil
+	}
+
+	plan := make([]attachmentUploadTarget, attachmentCount)
+	for i := range plan {
+		plan[i] = attachmentUploadTarget{
+			ThreadID:     threadID,
+			CreateThread: createThread && i == 0,
+		}
+	}
+	return plan
+}
+
 // BuildAttachmentTranscript creates an attachment transcript entry from an uploaded file.
 // Uses enriched metadata from the processAgentAttachment task if available.
 func BuildAttachmentTranscript(uploaded *UploadedAttachment) AttachmentTranscriptMsg {
@@ -216,9 +239,13 @@ func BuildAttachmentTranscript(uploaded *UploadedAttachment) AttachmentTranscrip
 			AiTraceId:        generateUUIDv4(),
 		}
 	}
+	if meta.Guardrail == nil {
+		meta.Guardrail = &AttachmentGuardrail{AttachmentRisk: "skipped"}
+	}
 
 	return AttachmentTranscriptMsg{
 		Type:        "attachment",
+		ID:          generateUUIDv4(),
 		FileUrl:     uploaded.AttachmentURL,
 		FileName:    uploaded.FileName,
 		ContentType: uploaded.ContentType,

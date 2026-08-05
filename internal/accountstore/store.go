@@ -132,6 +132,9 @@ func findIdentityPathLocked(dir, accountID string) (string, error) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
+		if err := os.Chmod(path, 0o600); err != nil {
+			return "", fmt.Errorf("protect account file %s: %w", filepath.Base(path), err)
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
@@ -153,8 +156,11 @@ func findIdentityPathLocked(dir, accountID string) (string, error) {
 // from being created beside it.
 func WriteAccountJSON(dir, accountID, label string, data []byte) (string, error) {
 	accountID = strings.ToLower(strings.TrimSpace(accountID))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create accounts dir: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", fmt.Errorf("protect accounts dir: %w", err)
 	}
 	unlockDirectory, err := LockDirectory(dir)
 	if err != nil {
@@ -168,6 +174,9 @@ func WriteAccountJSON(dir, accountID, label string, data []byte) (string, error)
 	}
 	if path == "" {
 		path = filepath.Join(dir, CanonicalFilename(accountID, label))
+		if chmodErr := os.Chmod(path, 0o600); chmodErr != nil && !os.IsNotExist(chmodErr) {
+			return "", fmt.Errorf("protect existing account file %s: %w", filepath.Base(path), chmodErr)
+		}
 		if existing, readErr := os.ReadFile(path); readErr == nil {
 			existingID, parseErr := AccountIDFromJSON(existing)
 			if parseErr != nil {

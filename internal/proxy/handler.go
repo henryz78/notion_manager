@@ -638,7 +638,10 @@ func isFreePlan(acc *Account) bool {
 	if acc == nil {
 		return true
 	}
-	planType := acc.planTypeSnapshot()
+	return isFreePlanType(acc.planTypeSnapshot())
+}
+
+func isFreePlanType(planType string) bool {
 	if planIncludesFullNotionAI(planType) {
 		return false
 	}
@@ -647,6 +650,18 @@ func isFreePlan(acc *Account) bool {
 		return true
 	default:
 		// Unknown plans are not permanently classified without evidence.
+		return false
+	}
+}
+
+// isLifetimeFreePlanType is intentionally narrower than isFreePlanType.
+// Plus is quota-limited, but it is still a paid workspace plan and must be
+// allowed to recover when a later official quota check says it is eligible.
+func isLifetimeFreePlanType(planType string) bool {
+	switch strings.ToLower(strings.TrimSpace(planType)) {
+	case "personal", "free", "":
+		return true
+	default:
 		return false
 	}
 }

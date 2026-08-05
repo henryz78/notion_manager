@@ -25,6 +25,7 @@ type Session struct {
 	AccountEmail          string
 	ConfigID              string
 	ContextID             string
+	ContextPageID         string
 	OriginalDatetime      string
 	ModelUsed             string
 	TurnCount             int
@@ -557,10 +558,17 @@ func (session *Session) publishAssistantContinuation(message ChatMessage) {
 	session.publishAssistant = nil
 }
 
-func computeStableSessionFingerprint(stableSalt string) string {
+func computeStableSessionFingerprint(stableSalt string, resolvedModels ...string) string {
 	hash := sha256.New()
 	hash.Write([]byte("conversation:"))
 	hash.Write([]byte(stableSalt))
+	if len(resolvedModels) > 0 {
+		model := strings.TrimSpace(resolvedModels[0])
+		if model != "" {
+			hash.Write([]byte("\nmodel:"))
+			hash.Write([]byte(model))
+		}
+	}
 	return hex.EncodeToString(hash.Sum(nil))[:32]
 }
 
@@ -568,7 +576,7 @@ func extractConversationSalt(metadata map[string]interface{}) string {
 	if len(metadata) == 0 {
 		return ""
 	}
-	for _, key := range []string{"session_id", "conversation_id"} {
+	for _, key := range []string{"prompt_cache_key", "session_id", "conversation_id"} {
 		if value, ok := metadata[key].(string); ok && strings.TrimSpace(value) != "" {
 			return strings.TrimSpace(value)
 		}
@@ -593,6 +601,14 @@ func extractConversationSalt(metadata map[string]interface{}) string {
 		}
 	}
 	return ""
+}
+
+func hasPromptCacheKey(metadata map[string]interface{}) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	value, ok := metadata["prompt_cache_key"].(string)
+	return ok && strings.TrimSpace(value) != ""
 }
 
 // lockConversationSessionForRequest returns a session locked for exclusive use
@@ -679,6 +695,7 @@ func newConversationSessionForAccount(accountEmail, accountID string) *Session {
 		AccountEmail:     accountEmail,
 		ConfigID:         generateUUIDv4(),
 		ContextID:        generateUUIDv4(),
+		ContextPageID:    generateUUIDv4(),
 		OriginalDatetime: now.Format(time.RFC3339Nano),
 		CreatedAt:        now,
 		LastUsedAt:       now,

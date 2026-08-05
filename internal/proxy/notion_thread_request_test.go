@@ -170,6 +170,7 @@ func TestCallInferenceCreatesThenContinuesRealNotionThread(t *testing.T) {
 		FileName:      "notes.txt",
 		ContentType:   "text/plain",
 		FileSizeBytes: 42,
+		SessionID:     session.ThreadID,
 	}}
 	var secondOutput strings.Builder
 	if err := CallInference(account, secondMessages, "gpt-test", false, func(delta string, _ bool, _ *UsageInfo) {
